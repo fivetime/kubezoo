@@ -39,8 +39,12 @@ type RESTStorageProvider struct {
 // NewRESTStorage returns a rest storage.
 func (r RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, error) {
 	scheme := legacyscheme.Scheme
-	apiextensionsv1.AddToScheme(scheme)
-	apiextensions.AddToScheme(scheme)
+	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
+		return genericapiserver.APIGroupInfo{}, err
+	}
+	if err := apiextensions.AddToScheme(scheme); err != nil {
+		return genericapiserver.APIGroupInfo{}, err
+	}
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(r.apiGroupConfig.Group, scheme, runtime.NewParameterCodec(scheme), serializer.NewCodecFactory(scheme))
 	for version, resources := range r.apiGroupConfig.StorageConfigs {
 		storage := map[string]rest.Storage{}

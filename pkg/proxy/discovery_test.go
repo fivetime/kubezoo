@@ -99,7 +99,7 @@ func TestDiscoveryProxy_ServerGroups(t *testing.T) {
 		},
 	}
 	tenantCRDs := []*v1.CustomResourceDefinition{
-		&v1.CustomResourceDefinition{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "foos." + tenantID + "-kubezoo.io",
 			},
@@ -165,7 +165,7 @@ func TestDiscoveryProxy_ServerVersionsForGroup(t *testing.T) {
 		},
 	}
 	tenantCRDs := []*v1.CustomResourceDefinition{
-		&v1.CustomResourceDefinition{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "foos." + tenantID + "-kubezoo.io",
 			},
@@ -221,7 +221,7 @@ func TestDiscoveryProxy_ServerResourcesForGroupVersion(t *testing.T) {
 		},
 	}
 	tenantCRDs := []*v1.CustomResourceDefinition{
-		&v1.CustomResourceDefinition{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "foos." + tenantID + "-kubezoo.io",
 			},

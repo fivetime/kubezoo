@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-//nolint
+// nolint
 func NewTenantCRD() *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenants.tenant.kubezoo.io"},
@@ -112,7 +112,7 @@ func NewTenantCRD() *apiextensionsv1.CustomResourceDefinition {
 	}
 }
 
-//nolint
+// nolint
 func NewCustomResourceDefinitions() []*apiextensionsv1.CustomResourceDefinition {
 	return []*apiextensionsv1.CustomResourceDefinition{NewTenantCRD()}
 }

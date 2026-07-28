@@ -1,71 +1,67 @@
-# KubeZoo - Gateway Service for Kubernetes <br /> Multi-tenancy
+# KubeZoo
 
-English | [简体中文](./README.zh.md)
+KubeZoo is a lightweight Kubernetes API gateway that adds multi-tenancy to an
+existing Kubernetes cluster. It isolates tenant views by transforming API
+requests and responses while tenants share the underlying control plane and
+data plane.
 
-
-## Overview
-
-KubeZoo is a lightweight gateway service that leverages the existing namespace model 
-and add multi-tenancy capability to existing Kubernetes. KubeZoo provides 
-view-level isolation among tenants by capturing and transforming the requests and responses.
-Please refer to [design doc](./docs/design.md) for details.
-
-<div align="center">
-  <!--[if IE]>
-    <img src="docs/img/kubezoo-overview.png" width=80% title="KubeZoo Overview" loading="eager" />
-  <![endif]-->
-  <picture>
-    <source srcset="docs/img/kubezoo-overview-dark.png" width=80% title="KubeZoo Overview" media="(prefers-color-scheme: dark)">
-    <img src="docs/img/kubezoo-overview.png" width=80% title="KubeZoo Overview" loading="eager" />
-  </picture>
-</div>
+English | [简体中文](README.zh.md)
 
 ## Why KubeZoo
 
-There exists [three common multi-tenancy](https://kubernetes.io/blog/2021/04/15/three-tenancy-models-for-kubernetes/) models for Kubernetes, 
-i.e., Namespace as a Service (NaaS), Cluster as a Service (CaaS), Control Planes as a service (CPaaS). Each of them can be applied to address different 
-use cases. However, our cases have some specific requirements and constraints that can not be met by the existing models, 
-* ***Many Small Tenants*** - there usually exist hundreds of tenants who only need to run small batch workloads containing few pods for tens of minutes.
-* ***Short Turnaround Time*** - users/tenants are usually impatient, who desire to have their service to be ready in minutes.
-* ***Tight Manpower*** - managing thousands of clusters/control-planes can be labour-intensive and infeasible for medium-sized dev team.
+KubeZoo implements Kubernetes API as a Service (KAaaS). It is designed for
+large numbers of small, short-lived tenants where running a dedicated cluster
+or control plane per tenant would be too expensive operationally.
 
-To address these cases, we present a new tenancy model, i.e., **Kubernetes API as a Service (KAaaS)**, which provides competent isolation with 
-negligible overheads and operation costs. KubeZoo implements this model with all tenants sharing both the control-plane and data-plane, which is 
-suitable for the scenarios where thousands of small tenants need to share an underlying Kubernetes cluster.
+Key characteristics:
 
-<div align="center">
-  <img src="docs/img/comparison.png" width=80% title="Comparison of Different Solutions">
-</div>
+- namespace-backed tenant isolation;
+- request, response, discovery, and object-reference rewriting;
+- shared control-plane and data-plane resources;
+- tenant lifecycle and cluster resource quota controllers.
 
-For more details lease refer [FAQ](./docs/faq.md).
+See the [design](docs/design.md), [architecture](docs/kaaas-platform-architecture-cn.md),
+and [comparison](docs/deployment-and-comparison-cn.md) documents for details.
 
-## Prerequisites
+## Compatibility
 
-Please check the [resource and system requirements](./docs/resource-and-system-requirements.md) before installing KubeZoo.
+The current runtime is based on Kubernetes 1.24. Higher Kubernetes versions are
+not yet supported because the project imports Kubernetes internal packages and
+uses a tightly coupled generated API stack. See
+[modernization status](docs/modernization.md) for the migration boundary.
 
-## Getting started
+## Development
 
-KubeZoo supports Kubernetes versions up to 1.24. Using higher Kubernetes versions may cause
-compatibility issues. KubeZoo can be installed using any of the following methods:
+Prerequisites:
 
-| Methods                     | Instruction                                | Estimated time |
-| --------------------------- | ------------------------------------------ | -------------- |
-| Deploy KubeZoo from scratch | [Deploy KubeZoo](./docs/manually-setup.md) | < 2 minutes    |
+- Go 1.24 or newer; Go 1.26.5 is the preferred toolchain;
+- Docker with Buildx for container builds;
+- Bash and Make for repository targets.
 
-## Community
+Common commands:
 
-### Contributing
+```bash
+make build
+make test-unit
+make test-integration
+make lint
+make docker-build
+```
 
-If you are willing to be a contributor for the KubeZoo project, please refer to our [CONTRIBUTING](CONTRIBUTING.md) document for details.
-We have also prepared a developer [guide](./docs/developer-guide.md) to help the code contributors.
+Local binaries are written below `_output/local/bin/<os>/<arch>`.
 
-### Contact
+## Installation
 
-If you have any questions or want to contribute, you are welcome to communicate most things via GitHub issues or pull requests.
-Or Contact to [Maintainers](./MAINTAINERS.md)
+Review the [resource requirements](docs/resource-and-system-requirements.md),
+then follow the [manual deployment guide](docs/manually-setup.md).
 
+## Security and contributing
+
+Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. Development
+and community expectations are documented in [CONTRIBUTING.md](CONTRIBUTING.md)
+and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-KubeZoo is under the Apache 2.0 license. See the [LICENSE](LICENSE) file for details.
-Certain implementations in KubeZoo rely on the existing code from Kubernetes and the credits go to the original Kubernetes authors.
+KubeZoo is licensed under the [Apache License 2.0](LICENSE). Some
+implementations are derived from Kubernetes and retain their original notices.

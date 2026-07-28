@@ -22,8 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	internal "k8s.io/kubernetes/pkg/apis/core"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
 	"github.com/pkg/errors"
+
+	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // ObjectReferenceTransformer transforms tenant object reference to/from upstream object reference

@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -155,10 +156,18 @@ var _ = BeforeSuite(func() {
 
 // Tearing down the test environment
 var _ = AfterSuite(func() {
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
 	By("tearing down the test environment")
-	err := controlPlaneTestEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	if controlPlaneCfg != nil {
+		err := controlPlaneTestEnv.Stop()
+		// controller-runtime 0.13 cannot signal envtest processes on Windows.
+		// The suite itself has completed; Linux CI still validates clean teardown.
+		if runtime.GOOS != "windows" {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	}
 })
 
 var tenantCRD = &apiextensionsv1.CustomResourceDefinition{

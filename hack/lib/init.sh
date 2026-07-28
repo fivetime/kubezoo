@@ -18,13 +18,13 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-ZOO_MOD="$(head -1 $ZOO_ROOT/go.mod | awk '{print $2}')"
+ZOO_MOD="$(cd "${ZOO_ROOT}" && go list -m)"
 ZOO_OUTPUT_DIR=${ZOO_ROOT}/_output
 ZOO_BIN_DIR=${ZOO_OUTPUT_DIR}/bin
 ZOO_LOCAL_BIN_DIR=${ZOO_OUTPUT_DIR}/local/bin
 
 PROJECT_PREFIX=${PROJECT_PREFIX:-kubezoo}
 LABEL_PREFIX=${LABEL_PREFIX:-kubezoo.io}
-GIT_VERSION=${GIT_VERSION:-$(git describe --abbrev=0 --tags --always)}
-GIT_COMMIT=$(git rev-parse HEAD)
+GIT_VERSION=${GIT_VERSION:-$(git describe --abbrev=0 --tags --always 2>/dev/null || echo dev)}
+GIT_COMMIT=${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')

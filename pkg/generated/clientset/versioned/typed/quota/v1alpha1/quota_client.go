@@ -21,9 +21,10 @@ package v1alpha1
 import (
 	"net/http"
 
+	rest "k8s.io/client-go/rest"
+
 	v1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/scheme"
-	rest "k8s.io/client-go/rest"
 )
 
 type QuotaV1alpha1Interface interface {

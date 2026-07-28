@@ -19,16 +19,17 @@ limitations under the License.
 package fake
 
 import (
-	clientset "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
-	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
-	fakequotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1/fake"
-	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1"
-	faketenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
+
+	clientset "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
+	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
+	fakequotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1/fake"
+	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1"
+	faketenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.

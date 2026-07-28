@@ -23,14 +23,15 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
-	internalinterfaces "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/internalinterfaces"
-	quota "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/quota"
-	tenant "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/tenant"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
+
+	versioned "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
+	internalinterfaces "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/internalinterfaces"
+	quota "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/quota"
+	tenant "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/tenant"
 )
 
 // SharedInformerOption defines the functional option type for SharedInformerFactory.

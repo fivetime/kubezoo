@@ -24,7 +24,7 @@ import (
 )
 
 // ObjectTransformer transforms tenant object to/from upstream object
-// NOTE for both Forward and Backward, the first input and ouput are either
+// NOTE for both Forward and Backward, the first input and output are either
 // unstructured or internal object.
 type ObjectTransformer interface {
 	// Forward transforms the tenant object to the upstream object.
@@ -58,7 +58,7 @@ func (c *CrossReferenceConvertor) ConvertTenantObjectToUpstreamObject(obj runtim
 	}
 
 	// convert logic
-	obj, err = c.objectTransformer.Forward(obj, tenantID)
+	_, err = c.objectTransformer.Forward(obj, tenantID)
 	if err != nil {
 		klog.Errorf("fail to convert tenant object to upstream object: %v", err)
 		return err
@@ -77,7 +77,7 @@ func (c *CrossReferenceConvertor) ConvertUpstreamObjectToTenantObject(obj runtim
 	}
 
 	// convert logic
-	obj, err = c.objectTransformer.Backward(obj, tenantID)
+	_, err = c.objectTransformer.Backward(obj, tenantID)
 	if err != nil {
 		klog.Errorf("fail to convert upstream object to upstream object: %v", err)
 		return err

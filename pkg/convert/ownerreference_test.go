@@ -17,10 +17,12 @@ limitations under the License.
 package convert
 
 import (
-	"github.com/go-test/deep"
-	"github.com/kubewharf/kubezoo/pkg/util"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"testing"
+
+	"github.com/go-test/deep"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // checkGroupKind checks whether NATIVE group/kind is namespaced, which means customResourceGroup is always false.
@@ -33,13 +35,13 @@ func checkGroupKind(group, kind, tenantID string, isTenantObject bool) (namespac
 var (
 	tenantID              = "test01"
 	tenantOwnerReferences = []*metav1.OwnerReference{
-		&metav1.OwnerReference{
+		{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 			Name:       "dp-92a152bd69",
 			UID:        "bd081382-4015-11eb-9d00-b8599fe021ac",
 		},
-		&metav1.OwnerReference{
+		{
 			APIVersion: "v1",
 			Kind:       "Namespace",
 			Name:       "default",
@@ -47,13 +49,13 @@ var (
 		},
 	}
 	upstreamOwnerReferences = []*metav1.OwnerReference{
-		&metav1.OwnerReference{
+		{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 			Name:       "dp-92a152bd69",
 			UID:        "bd081382-4015-11eb-9d00-b8599fe021ac",
 		},
-		&metav1.OwnerReference{
+		{
 			APIVersion: "v1",
 			Kind:       "Namespace",
 			Name:       "test01-default",

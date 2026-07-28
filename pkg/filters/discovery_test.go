@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -70,6 +71,10 @@ func (dp *fakeDiscoveryProxy) ServerVersion() (*version.Info, error) {
 }
 
 func (dp *fakeDiscoveryProxy) OpenAPISchema() (*openapi_v2.Document, error) {
+	return nil, nil
+}
+
+func (dp *fakeDiscoveryProxy) GetSwagger() (*spec.Swagger, error) {
 	return nil, nil
 }
 

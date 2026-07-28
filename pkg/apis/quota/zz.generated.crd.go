@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-//nolint
+// nolint
 func NewClusterResourceQuotaCRD() *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: "clusterresourcequotas.quota.kubezoo.io"},
@@ -216,7 +216,7 @@ func NewClusterResourceQuotaCRD() *apiextensionsv1.CustomResourceDefinition {
 	}
 }
 
-//nolint
+// nolint
 func NewCustomResourceDefinitions() []*apiextensionsv1.CustomResourceDefinition {
 	return []*apiextensionsv1.CustomResourceDefinition{NewClusterResourceQuotaCRD()}
 }

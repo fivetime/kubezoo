@@ -50,7 +50,6 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.BindAddress, "proxy-bind-address", o.BindAddress, "The server address of the tenants' kubeconfig file, N.B. this address should be a valid server address of the client-ca-file.")
 	fs.IntVar(&o.SecurePort, "proxy-secure-port", o.SecurePort, "The port on which the kubezoo used to serve HTTPS with authentication and authorization.")
 	fs.StringVar(&o.ClientCAKeyFile, "client-ca-key-file", o.ClientCAKeyFile, "Filename containing a PEM-encoded RSA or ECDSA private key used to sign tenant certificates.")
-	return
 }
 
 func (o *ProxyOptions) Validate() []error {

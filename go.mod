@@ -1,6 +1,8 @@
 module github.com/kubewharf/kubezoo
 
-go 1.18
+go 1.24.0
+
+toolchain go1.26.5
 
 require (
 	github.com/davecgh/go-spew v1.1.1

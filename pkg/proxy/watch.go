@@ -56,7 +56,7 @@ func newProxyWatch(w watch.Interface, tenantProxy *tenantProxy, tenantID string)
 		watch:       w,
 		tenantProxy: tenantProxy,
 		stopChan:    make(chan struct{}),
-		resultChan:  make(chan watch.Event, 0),
+		resultChan:  make(chan watch.Event),
 		tenantID:    tenantID,
 	}
 

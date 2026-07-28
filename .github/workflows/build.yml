@@ -1,0 +1,42 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - name: Build
+        run: make build
+      - name: Unit tests
+        run: make test-unit
+      - name: Install envtest
+        run: make envtest
+      - name: Integration tests
+        run: |
+          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.24.x -p path)" \
+            go test ./pkg/controller -coverprofile=coverage.out
+      - name: Upload coverage
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out

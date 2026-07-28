@@ -25,7 +25,7 @@ import (
 
 var (
 	tenantObjectReferences = []*internal.ObjectReference{
-		&internal.ObjectReference{
+		{
 			APIVersion:      "apps/v1",
 			Kind:            "Deployment",
 			Namespace:       "default",
@@ -33,7 +33,7 @@ var (
 			UID:             "bd081382-4015-11eb-9d00-b8599fe021ac",
 			ResourceVersion: "sdfefef",
 		},
-		&internal.ObjectReference{
+		{
 			APIVersion:      "v1",
 			Kind:            "Namespace",
 			Name:            "default",
@@ -42,7 +42,7 @@ var (
 		},
 	}
 	upstreamObjectReferences = []*internal.ObjectReference{
-		&internal.ObjectReference{
+		{
 			APIVersion:      "apps/v1",
 			Kind:            "Deployment",
 			Namespace:       "test01-default",
@@ -50,7 +50,7 @@ var (
 			UID:             "bd081382-4015-11eb-9d00-b8599fe021ac",
 			ResourceVersion: "sdfefef",
 		},
-		&internal.ObjectReference{
+		{
 			APIVersion:      "v1",
 			Kind:            "Namespace",
 			Name:            "test01-default",

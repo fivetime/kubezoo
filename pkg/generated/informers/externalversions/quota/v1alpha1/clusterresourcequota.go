@@ -22,14 +22,15 @@ import (
 	"context"
 	time "time"
 
-	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
-	versioned "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
-	internalinterfaces "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/internalinterfaces"
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/listers/quota/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
+
+	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	versioned "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
+	internalinterfaces "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/internalinterfaces"
+	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/listers/quota/v1alpha1"
 )
 
 // ClusterResourceQuotaInformer provides access to a shared informer and lister for

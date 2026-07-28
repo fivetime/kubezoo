@@ -24,6 +24,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/klog"
 
 	"github.com/kubewharf/kubezoo/pkg/proxy"
 	"github.com/kubewharf/kubezoo/pkg/util"
@@ -105,7 +106,9 @@ func WithDiscoveryProxy(handler http.Handler, discoveryProxy proxy.DiscoveryProx
 					responseDiscoveryError(w, err)
 					return
 				}
-				w.Write(bytes)
+				if _, err := w.Write(bytes); err != nil {
+					klog.Errorf("failed to write discovery response: %v", err)
+				}
 				return
 			}
 
@@ -139,7 +142,9 @@ func responseDiscoveryError(w http.ResponseWriter, err error) {
 		code = int(statusErr.ErrStatus.Code)
 	}
 	w.WriteHeader(code)
-	w.Write([]byte(msg))
+	if _, err := w.Write([]byte(msg)); err != nil {
+		klog.Errorf("failed to write discovery error: %v", err)
+	}
 }
 
 // responseJson marshal the body and write to the connection
@@ -150,7 +155,9 @@ func responseJson(w http.ResponseWriter, v interface{}) {
 		responseDiscoveryError(w, err)
 		return
 	}
-	w.Write(js)
+	if _, err := w.Write(js); err != nil {
+		klog.Errorf("failed to write discovery response: %v", err)
+	}
 }
 
 // isDiscoveryRequest checks the request is discovery request or not.

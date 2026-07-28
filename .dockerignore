@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.vscode
+_output
+bin
+cover.out
+coverage.out
+vendor
+docs
+**/*_test.go

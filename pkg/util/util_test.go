@@ -325,7 +325,7 @@ func TestTenantIDFrom(t *testing.T) {
 			name: "get tenant from context",
 			c: request.WithUser(context.TODO(), &user.DefaultInfo{
 				Extra: map[string][]string{
-					"tenant": []string{"111111"},
+					"tenant": {"111111"},
 				},
 			}),
 			expect: "111111",

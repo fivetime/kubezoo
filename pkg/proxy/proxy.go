@@ -20,8 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/kubewharf/kubezoo/pkg/proxy/pod"
 	"strings"
+
+	"github.com/kubewharf/kubezoo/pkg/proxy/pod"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -461,6 +462,9 @@ func (tp *tenantProxy) Delete(ctx context.Context, name string, _ rest.ValidateO
 		err     error
 	)
 	client, err := tp.getClient(ctx)
+	if err != nil {
+		return nil, false, err
+	}
 	if subresource := tp.subresource; subresource == "" {
 		got, deleted, err = client.Delete(ctx, name, *options)
 	} else {

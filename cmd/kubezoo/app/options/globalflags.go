@@ -19,6 +19,7 @@ package options
 import (
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/cli/globalflag"
+
 	// ensure libs have a chance to globally register their flags
 	_ "k8s.io/apiserver/pkg/admission"
 	_ "k8s.io/kubernetes/pkg/cloudprovider/providers"
@@ -41,5 +42,5 @@ func AddCustomGlobalFlags(fs *pflag.FlagSet) {
 func registerLegacyGlobalFlags(fs *pflag.FlagSet) {
 	globalflag.Register(fs, "cloud-provider-gce-lb-src-cidrs")
 	globalflag.Register(fs, "cloud-provider-gce-l7lb-src-cidrs")
-	fs.MarkDeprecated("cloud-provider-gce-lb-src-cidrs", "This flag will be removed once the GCE Cloud Provider is removed from kube-apiserver")
+	_ = fs.MarkDeprecated("cloud-provider-gce-lb-src-cidrs", "This flag will be removed once the GCE Cloud Provider is removed from kube-apiserver")
 }

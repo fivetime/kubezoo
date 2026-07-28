@@ -21,8 +21,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -30,15 +31,11 @@ import (
 // TestWithTenantInfo tests the method WithTenantInfo.
 func TestWithTenantInfo(t *testing.T) {
 	tenantID := "demo01"
-	serviceAccountInfo := serviceaccount.ServiceAccountInfo{
-		Name:      "foo",
-		Namespace: util.AddTenantIDPrefix(tenantID, "foo"),
-		UID:       "aa458e95-3a0d-11e7-a8bf-0cc47a944282",
-		PodName:   "bar",
-		PodUID:    "aa458e95-3a0d-11e7-a8bf-0cc47a944141",
+	serviceAccountInfo := &user.DefaultInfo{
+		Name: serviceaccount.MakeUsername(util.AddTenantIDPrefix(tenantID, "foo"), "foo"),
 	}
 	req := &http.Request{}
-	req = req.WithContext(request.WithUser(req.Context(), serviceAccountInfo.UserInfo()))
+	req = req.WithContext(request.WithUser(req.Context(), serviceAccountInfo))
 
 	success := make(chan struct{})
 	tenant := WithTenantInfo(
