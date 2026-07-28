@@ -40,7 +40,6 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 ENVTEST = $(shell pwd)/bin/setup-envtest
-KUBECODEGEN = $(shell pwd)/bin/kube-codegen
 
 # go-get-tool will 'go get' any package $2 and install it to $1.
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -61,11 +60,6 @@ endef
 .PHONY: envtest
 envtest: ## Download envtest-setup locally if necessary.
 	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@latest,./)
-
-.PHONY: kube-codegen
-kube-codegen:
-	$(call go-get-tool,$(KUBECODEGEN),github.com/zoumo/kube-codegen@v0.2.0,./cmd/kube-codegen)
-
 
 .PHONY: e2e
 e2e: envtest
@@ -109,20 +103,18 @@ docker-push: ## Build and push the kubezoo container image.
 local-up: ## Setup kubezoo locally on a kind cluster
 	bash hack/make-rules/local_up.sh
 
-code-gen: kube-codegen
-	@kube-codegen code-gen \
-		--generators deepcopy,protobuf,openap,crd \
-		--go-header-file hack/boilerplate.go.txt \
-		--client-path pkg/generated \
-		--apis-module github.com/kubewharf/kubezoo \
-		--apis-path pkg/apis 
+.PHONY: codegen
+codegen: ## Regenerate generated code (deepcopy, defaulters, registration, OpenAPI, clientset)
+	bash hack/make-rules/codegen.sh
 
-client-gen: 
-	@kube-codegen client-gen  \
-	--go-header-file hack/boilerplate.go.txt \
-	--client-path pkg/generated \
-	--apis-module github.com/kubewharf/kubezoo \
-	--apis-path pkg/apis \
-	--clientset-dir=clientset/versioned \
-	--informers-dir=informers/externalversions
+.PHONY: verify-codegen
+verify-codegen: ## Fail if any generated code is out of date
+	bash hack/make-rules/codegen.sh --verify
+
+# The previous code-gen/client-gen targets drove github.com/zoumo/kube-codegen.
+# They are kept as aliases so existing habits keep working; see
+# hack/make-rules/codegen.sh for why the generators are now invoked directly.
+.PHONY: code-gen client-gen
+code-gen: codegen
+client-gen: codegen
 
