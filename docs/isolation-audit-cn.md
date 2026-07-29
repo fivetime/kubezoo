@@ -680,6 +680,48 @@ node.kubernetes.io/unreachable   NoExecute
 不是我要测的 `tenant-scheduling`。**判据是拒绝消息里的策略名和规则名**,不是"被拒了"。
 把模板改成完全合规、只留下被测的那一处违规,才测到真东西。
 
+## P. 节点名从 `spec.nodeName` 漏给租户 ⚠️ 观察到,未修
+
+⚠️ **这条是测 §O 时顺带看到的,不是设计过的测试** —— 观测本身可靠(以租户
+kubeconfig、用租户视角的 namespace 名读取),但**泄漏面没有系统摸过**。
+
+```
+# KUBECONFIG=<租户 111111>
+kubectl -n escape get pod c1 -o jsonpath='{.spec.nodeName}'
+→ kz-audit3-control-plane          # 平台真实节点名
+```
+
+代码侧确认:`pkg/convert` / `pkg/proxy` / `pkg/util` 里 **一处都没碰过 `nodeName`**。
+
+于是现状是自相矛盾的:**Node 对象藏了 list/get/watch 三条路径(§7.1),
+但节点名字从每一个 Pod 上漏出来**。租户建几个 Pod 就能枚举平台节点名,
+再配合 `nodeSelector: kubernetes.io/hostname` 做**定向共驻**。
+
+### ⭐ 顺带纠正一个直觉:"看不到 Node ⇒ 设了也无效" 不成立
+
+评估 `nodeSelector` / `tolerations` / `affinity` 的是**调度器** —— 它在上游、
+用自己的凭据读真实 Node 对象,**根本不查租户能看到什么**。可见性是 kubezoo 在
+**读路径**上做的,而调度发生在写入之后,两条路不相交。
+
+代码确认 `pkg/` 里 **一处都没碰过** `nodeSelector` / `tolerations` / `affinity` /
+`topologySpreadConstraints`,原样透传上游。而且 `nodeSelector` **不需要知道节点名**,
+它匹配的是标签,标准标签全世界一样(`node-role.kubernetes.io/control-plane`、
+`topology.kubernetes.io/zone`、`kubernetes.io/hostname`)。
+
+⚠️ 未实测的一条:"平台给节点打了污点时,租户的 `tolerations` 确实能让它上去" ——
+本轮 lab 是单节点 kind,没有可用的污点场景,**只测到策略把它拒了**。要坐实得有多节点 lab。
+
+### 归属与为什么先不改
+
+按 §8.0 判据,这是**读路径 ⇒ kubezoo 的**,策略层结构上够不着(准入看不到响应)。
+但**先别急着改**:
+
+- 泄漏面还没摸全:`-o wide`、`status` 里、events、PV 的 `nodeAffinity`
+- `-o wide` 显示 NODE 是 kubectl 的常规行为,一刀切藏掉会让租户排障体验碎掉
+
+**"改写成假名" vs "接受这个泄漏并写进文档"是个待定决策**,
+建议等 B1 的节点池方案定了一起处理(架构 §8.2.3)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

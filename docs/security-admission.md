@@ -29,6 +29,7 @@
 | 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 —— 由策略层拦(`config/policy/`) |
 | 读发现面 / OpenAPI | 枚举出其它租户的 id、CRD 组名与 schema |
 | 摘掉自己 namespace 上的平台标签 | 策略匹配与退租清理同时失效 |
+| 从自己 Pod 的 `spec.nodeName` 枚举平台节点名 | ⚠️ **当前可行,未修**(见 §6)—— 配合 `kubernetes.io/hostname` 可做定向共驻 |
 | 退租时留下永不完成的 finalizer | namespace 永久 Terminating,租户 ID 不可复用 |
 
 上面每一条都在 `isolation-audit-cn.md` 里有实测记录(含负向对照),多数已修。
@@ -74,7 +75,7 @@
 | 拒绝 DaemonSet | ✅ **策略已写并实测**(租户被拒;平台自己的 DaemonSet 不受影响) |
 | PSA `restricted` 等价规则 | ✅ **策略已写并实测** `config/policy/tenant-pod-security.yaml`。⚠️ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见下 |
 | 拒绝 `spec.nodeName`、约束 `tolerations` | ✅ **策略已写并实测** `config/policy/tenant-scheduling.yaml`(审计 §O) |
-| 约束 `nodeSelector` / `affinity` 到允许标签 | 未做 |
+| 落点:平台**注入**池子的 `nodeSelector`/`toleration`/`topologySpreadConstraints`,并**拒掉租户自写**的 `nodeSelector`/`affinity` | 未做(形态见架构 §8.2.2;⛔ 别用 required 反亲和,别用白名单) |
 
 ⛔ **原生 PSA(namespace 标签 `pod-security.kubernetes.io/enforce`)在这里是废的**:
 kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上游,所以租户
@@ -118,6 +119,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 | 数据面的一切(节点加固、沙箱、网络) | 不是控制面的事 |
 | 取证快照 | 快照要能说清"哪个时间点/哪个 revision 的视图",停机机制给不了这个保证 |
 | 节点级硬冻(`cgroup freezer`) | 节点级带外操作,kubezoo 碰不到 cgroup |
+| 节点名从 `spec.nodeName` 漏给租户 | ⚠️ **不是"不做",是待定**:泄漏面未摸全,且 `-o wide` 显示 NODE 是 kubectl 常规行为,藏掉会碎掉排障体验。等 B1 节点池方案定了一起处理(架构 §8.2.3) |
 | `Frozen` 中和租户自建的 RoleBinding | 控制面冻结管不到容器里已在跑的代码;租户可预埋 dead-man switch,换 VM/kata 也堵不住。⚠️ **所以 `Frozen` 不能单独当取证冻结用** |
 
 ## 7. 核对清单

@@ -477,17 +477,75 @@ exclude:
 
 ### 8.2 必备策略清单
 
-| 策略 | 优先级 | 说明 |
+| 策略 | 状态 | 说明 |
 |---|---|---|
-| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | **P0** | B1 的隔离前提。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`(全集群最高优先级)。<br>**定案:租户设置无效,平台决定。** 按 §8.0 判据这属于**策略层**(纯写路径 + 换平台会变)。<br>⛔ **当前无人执行**:kubezoo 里曾实现过一版,已按 §8.0 判据删除(不越俎代庖)。**在本策略上线前这条越权是开着的** —— 租户可跑出沙箱、可抢占全集群,**这使它成为本清单最紧的一条**。<br>实现时注意三点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);要连 `spec.priority` 一起清;要连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
-| **拒绝 `spec.nodeName`** | **P0** | 直接绕过调度器,把 Pod 钉到任意节点 |
-| **清空/白名单 `tolerations`** | **P0** | 否则可跑到不该跑的节点,包括控制面节点 |
-| PSA `restricted` 等价规则 | **P0** | hostNetwork / hostPID / hostIPC / privileged / hostPath |
-| 限制 `nodeSelector` / `affinity` 到允许标签 | P1 | 节点标签**曾**对租户可见(§7.1 已修);但租户仍可写任意 nodeSelector |
-| 强制 `schedulerName` | P1 | |
-| 拒绝 DaemonSet | P1 | 补 §7.3 |
+| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | ✅ 已写并实测 | `config/policy/tenant-platform-classes.yaml`。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`。kubezoo 里曾实现过一版,已按 §8.0 判据删除(不越俎代庖)。<br>实现三坑:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);连 `spec.priority` 一起清;连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
+| **拒绝 `spec.nodeName`** | ✅ 已写并实测 | `config/policy/tenant-scheduling.yaml`。只匹配 `CREATE` —— 调度器绑定后 `spec.nodeName` 就有值,规则若也匹配 `UPDATE`,已调度的 Pod 再也改不动 |
+| **白名单 `tolerations`** | ✅ 已写并实测 | 同上。⚠️ **不能一刀切**:`DefaultTolerationSeconds` 是**进程内** mutating 插件,在 webhook 之前就给每个 Pod 加了 `not-ready` / `unreachable` 两条(实测确认),写成"不许有 tolerations"会拒掉每一个 Pod |
+| **PSA `restricted` 等价规则** | ✅ 已写并实测 | `config/policy/tenant-pod-security.yaml`。⛔ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见 §8.2.1 |
+| 拒绝 DaemonSet | ✅ 已写并实测 | `config/policy/tenant-deny-daemonset.yaml` |
+| **拒绝租户自写 `nodeSelector` / `affinity`,由平台注入** | P1 | 见 §8.2.2 —— 形态从"白名单"改成"注入 + 拒绝" |
+| 强制 `schedulerName` | 等前置决策 | 只有当平台真跑了一个**承载策略的**自定义调度器时才是控制点(租户填回 `default-scheduler` 即绕过);填个不存在的只会让自己 Pending。B1 的 kata 节点池要不要专属调度器还没定,**这条现在不算未决项** |
 
-前四条 PSA 管不了(PSA 不覆盖 nodeName/tolerations/nodeSelector),必须由策略引擎实现。
+#### 8.2.1 ⛔ 原生 PSA 在本架构里守不住租户
+
+PSA 的判定输入是 namespace 标签 `pod-security.kubernetes.io/enforce`,而
+`pkg/convert/namespace.go` 的 `Forward` **只钉死 `kubezoo.io/tenant` 一个标签**,
+其余标签原样转发上游 —— **租户自己就掌握着 PSA 唯一的输入**。
+
+实测(上游全局默认已是 `restricted`):租户建 namespace 时自带 `enforce: privileged`,
+或事后 `kubectl label` 改,**两条路都拿到 Running 的 privileged + hostNetwork Pod**。
+对照组(不带标签的 namespace)同样的 Pod 被拒,证明 PSA 全程在强制。
+
+这是 §8.1 铁律的又一个实例:**判定条件建立在租户可控的输入上**。
+修法是 Kyverno 按 `kubezoo.io/tenant` 匹配(租户摘不掉),
+并把 PSA 标签**钉回** `restricted`,让原生 PSA 降级为**兜底**
+—— 它在 apiserver 进程内,不走 webhook、没有单点。详见审计 §N。
+
+#### 8.2.2 ⭐ 落点控制:注入 + 拒绝,而不是白名单
+
+**先纠正一个直觉**:"租户看不到 Node,所以他设 `nodeSelector`/`tolerations` 无效" —— **不成立**。
+评估这些字段的是**调度器**,它在上游、用自己的凭据读真实 Node,**不查租户能看到什么**;
+可见性是 kubezoo 在**读路径**上做的,调度发生在写入之后,两条路不相交。
+代码侧已确认:`pkg/` 里**一处都没碰过** `nodeSelector` / `tolerations` / `affinity` /
+`topologySpreadConstraints`,原样透传。
+
+而且 `nodeSelector` **不需要知道节点名** —— 它匹配标签,而标准标签全世界一样:
+`node-role.kubernetes.io/control-plane`、`topology.kubernetes.io/zone`、
+`kubernetes.io/hostname`(⭐ 而节点名正从 `spec.nodeName` 漏给租户,见 §8.2.3)。
+
+**三条结论:**
+
+**① 形态是"注入 + 拒绝",不是白名单。** 平台直接给租户 Pod 注入它该去的池子
+(`nodeSelector` + 对应 `toleration`),同时**拒掉租户自己写的**。
+白名单要枚举允许的标签键值,复杂且容易漏;注入+拒绝只有一条语义。
+
+**② 打散用 `topologySpreadConstraints`,不要用 required 反亲和。**
+`requiredDuringScheduling` 的 podAntiAffinity 每评估一个节点都要扫一遍已有 Pod,
+是公认的调度吞吐杀手 —— 按本项目的北极星(规模优先),大集群上会先撞这堵墙。
+
+**③ 跨租户共驻,affinity 根本表达不了。** 反亲和是"我的 Pod 互相散开";
+要"我的 Pod 别和别的租户挤一台",得让每个租户对所有其他租户做反亲和,是笛卡尔积。
+**能扩展的答案只有节点池** —— 污点 + 注入的 selector/toleration,与 ① 是同一套机制。
+
+⚠️ **打污点、划分节点标签属于平台基础设施**,既不是 kubezoo 也不是策略层。
+平台**不打污点**时租户的 `tolerations` 确实是空转 —— 但 B1 有 kata 专属节点池,
+一有污点,租户的容忍就是那道墙的**唯一绕法**,所以那条 deny 是承重的。
+
+#### 8.2.3 ⚠️ 节点名从 `spec.nodeName` 漏给租户(kubezoo 侧,未修)
+
+Node 对象藏了三条路径(list/get/watch),但**节点名字从每一个 Pod 上漏出来**:
+以租户身份 `kubectl get pod X -o jsonpath='{.spec.nodeName}'` 拿到的是平台真实节点名
+(本轮实测顺带看到)。代码侧确认 `pkg/convert` / `pkg/proxy` / `pkg/util`
+**一处都没碰过 `nodeName`**。
+
+租户建几个 Pod 就能枚举平台节点名,再配合 `kubernetes.io/hostname` 做定向共驻 ——
+这正是 §8.2.2 ③ 里唯一值钱的那个风险的前提。
+
+按 §8.0 判据这是**读路径 ⇒ kubezoo 的**,策略层结构上够不着(准入看不到响应)。
+⚠️ 但**先别急着改**:泄漏面还没摸全(`-o wide`、`status`、events、PV 的 `nodeAffinity`),
+而且 `-o wide` 显示 NODE 是 kubectl 常规行为,一刀切藏掉会让租户排障体验碎掉。
+**"改写成假名" vs "接受并写进文档"是个待定决策**,建议等 B1 节点池方案定了一起处理。
 
 ### 8.3 为什么选 Kyverno 而非 Gatekeeper
 

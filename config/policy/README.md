@@ -25,6 +25,12 @@
 |---|---|---|
 | `tenant-platform-classes.yaml` | 删掉租户设的 `runtimeClassName` / `priorityClassName` / `priority` / `ingressClassName` 及废弃的 `ingress.class` 注解 | 租户可跑出沙箱、可拿 `system-cluster-critical` 抢占全集群 |
 | `tenant-deny-daemonset.yaml` | 拒绝租户建 DaemonSet | 租户可往平台每个节点投放 Pod |
+| `tenant-pod-security.yaml` | Pod 强制 `restricted`;并把 namespace 的 PSA 标签钉回 `restricted` | 租户拿到 privileged + hostNetwork 的 Pod。⛔ **原生 PSA 顶不上**:它的判定输入是 namespace 标签,而那个标签租户自己能写 |
+| `tenant-scheduling.yaml` | 拒 `spec.nodeName`;`tolerations` 只留 k8s 自己加的两条 | 租户可绕过调度器钉节点、可容忍污点跑到控制面或别人的节点池 |
+
+**还差**(见架构 §8.2.2):平台**注入** `nodeSelector`/`toleration`/`topologySpreadConstraints`
++ **拒掉租户自写**的 `nodeSelector`/`affinity`。
+⛔ 打散别用 required podAntiAffinity(扫全量 Pod,调度吞吐杀手);跨租户共驻只能靠节点池。
 
 ## ⚠️⚠️ 两个会让策略"Ready 但什么都不做"的坑(都实测踩过)
 

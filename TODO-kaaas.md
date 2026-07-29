@@ -303,8 +303,29 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             即使全局默认已是 `restricted`。**又是"判定条件建在租户可控输入上"那个形状。**
             修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
             并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
-      - [ ] P1 限制 `nodeSelector`/`affinity` 到允许标签;强制 `schedulerName`
+      - [ ] P1 **落点控制:注入 + 拒绝**(形态已改,不再是"白名单",见架构 §8.2.2)
+            - 平台注入租户该去的池子:`nodeSelector` + 对应 `toleration` + `topologySpreadConstraints`
+            - 同时**拒掉租户自写**的 `nodeSelector` / `affinity`
+            - ⛔ **打散不要用 required podAntiAffinity**:每评估一个节点扫一遍已有 Pod,
+              是调度吞吐杀手,按北极星(规模优先)大集群上会先撞这堵墙 ⇒ 用 `topologySpreadConstraints`
+            - ⛔ **跨租户共驻 affinity 表达不了**(笛卡尔积)⇒ 只能靠节点池:污点 + 注入
+            - ⚠️ **纠正一个直觉**:"租户看不到 Node ⇒ 他设 nodeSelector/tolerations 无效" **不成立**。
+              评估这些字段的是**调度器**,在上游用自己的凭据读真实 Node,不查租户可见性;
+              代码确认 `pkg/` 里一处都没碰过这几个字段。且 `nodeSelector` 匹配的是**标签**,
+              标准标签全世界一样,不需要知道节点名
+            - ⚠️ 打污点 / 划分节点标签属于**平台基础设施**,不是 kubezoo 也不是策略层
+      - [ ] 等前置决策:强制 `schedulerName` —— 只有平台真跑了**承载策略的**自定义调度器时
+            才是控制点(租户填回 `default-scheduler` 即绕过)。B1 的 kata 节点池方案未定,
+            **现在不算未决项**
       - [x] ✅ 拒绝 DaemonSet —— `config/policy/tenant-deny-daemonset.yaml`,已实测
+- [ ] ⚠️ **kubezoo 侧:节点名从 `spec.nodeName` 漏给租户**(读路径,策略层够不着)
+      Node 对象藏了 list/get/watch 三条路径,但**节点名从每一个 Pod 上漏出来** ——
+      以租户身份读自己的 Pod 拿到的是平台真实节点名(本轮实测顺带看到);
+      代码确认 `pkg/convert` / `pkg/proxy` / `pkg/util` **一处都没碰过 `nodeName`**。
+      租户建几个 Pod 即可枚举节点名,配合 `kubernetes.io/hostname` 做定向共驻。
+      ⚠️ **先别急着改**:泄漏面未摸全(`-o wide` / `status` / events / PV 的 `nodeAffinity`),
+      且 `-o wide` 显示 NODE 是 kubectl 常规行为,一刀切藏掉会碎掉租户排障体验。
+      **"改写成假名" vs "接受并写进文档"是待定决策**,建议等 B1 节点池方案定了一起处理
 - [ ] 用 `generate` + `synchronize: true` 承接 namespace 配套对象(租户删了自动重建):
       per-namespace RoleBinding(1.1)、`kubetron-network` ConfigMap(3.2)、PSA 标签、
       ResourceQuota/LimitRange
