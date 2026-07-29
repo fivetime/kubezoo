@@ -52,13 +52,24 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Kind:  "CustomResourceDefinition",
 		}: NewCRDConvertor(ownerReferenceTransformer),
 		{
+			// spec.volumeName names a PersistentVolume, which is cluster-scoped
+			// and therefore prefixed. Without the transformer the claim named a
+			// volume that does not exist under that name, so the whole PV/PVC
+			// binding path went unconverted.
 			Group: "",
 			Kind:  "PersistentVolumeClaim",
-		}: defaultConvertor,
+		}: NewCrossReferenceConverter(defaultConvertor, NewPVCTransformer()),
 		{
+			// This was nopeConvertor -- no conversion at all -- while the read
+			// path still filtered on the tenant prefix. A tenant's PV landed
+			// upstream under a bare name that the tenant could then neither get
+			// nor delete, a second tenant creating the same name got
+			// AlreadyExists, and the object stayed upstream for good. The
+			// default convertor supplies the name prefix; the transformer
+			// rewrites spec.claimRef.namespace.
 			Group: "",
 			Kind:  "PersistentVolume",
-		}: nopeConvertor,
+		}: NewCrossReferenceConverter(defaultConvertor, NewPVTransformer()),
 		{
 			Group: "storage.k8s.io",
 			Kind:  "VolumeAttachment",

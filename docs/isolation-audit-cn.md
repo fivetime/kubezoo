@@ -10,9 +10,9 @@
 | # | 问题 | 严重度 | 状态 |
 |---|---|---|---|
 | A | 租户可注册**全集群生效**的准入 webhook,打死其他租户与平台 | ⛔ 最高 | **已修并实测** |
-| B | PersistentVolume 完全未改写:撞名 + 存在性泄露 + 对象永久滞留 | ⛔ 高 | 实测坐实 |
-| C | PVC 的 `spec.volumeName` 未改写 | ⚠️ 中 | 实测坐实 |
-| D | `PVTranformer` / `PVCTransformer` 写好了但**从未接线** | ⚠️ 中(A/B/C 的成因) | 实测坐实 |
+| B | PersistentVolume 完全未改写:撞名 + 存在性泄露 + 对象永久滞留 | ⛔ 高 | **已修并实测** |
+| C | PVC 的 `spec.volumeName` 未改写 | ⚠️ 中 | **已修并实测** |
+| D | `PVTranformer` / `PVCTransformer` 写好了但**从未接线** | ⚠️ 中(B/C 的成因) | **已接线,并加接线守卫** |
 | E | Node 对所有租户可见 | ⚠️ 中 | 实测确认(已知,TODO 1.2) |
 | — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints | ✅ 正确 | 实测通过 |
 
@@ -86,7 +86,7 @@ name 和 ownerReference)。于是:
 包括平台在该 namespace 里的协调(如 #87 的 RoleBinding)与清理。这是租户自伤,不是越权,
 但会影响该租户 namespace 的可回收性。
 
-## B. PersistentVolume 完全未改写 ⛔
+## B. PersistentVolume 完全未改写 ⛔ —— 已修复
 
 `init.go` 把 PV 映射到 `nopeConvertor` —— **什么都不做**。而读路径按 `<id>-` 前缀过滤。
 两边不对称,结果是三件事同时发生:
@@ -100,12 +100,32 @@ name 和 ownerReference)。于是:
 
 也就是说 PV 对租户既不可用又不可回收,同时还是一条跨租户信道。
 
-## C. PVC 的 `spec.volumeName` 未改写 ⚠️
+### 修法与实测
+
+PV 由 `nopeConvertor` 改为 `defaultConvertor`(提供 name 前缀)+ `PVTransformer`
+(改写 `spec.claimRef.namespace`)。重放同一场景:
+
+| 检查 | 修前 | 修后 |
+|---|---|---|
+| 两租户各建同名 PV `shared2` | 第二个 `AlreadyExists` | `111111-shared2` / `222222-shared2` 各自成立 |
+| 创建者 get / list | NotFound / 空 | 各自看到自己的 `shared2` |
+| 跨租户 get / list / delete | —— | 全部 NotFound,且对象**未被误删** |
+| 所有者 delete | 谁都删不掉 | 正常删除,上游零残留 |
+
+⚠️ **迁移提示**:修复前产生的**裸名 PV 仍然滞留在上游**,且照旧对所有租户不可见。
+它们在修复前后都是孤儿,需要运维手工清理 —— 这不是本次改动引入的。
+
+## C. PVC 的 `spec.volumeName` 未改写 ⚠️ —— 已修复
 
 PVC 映射到 `defaultConvertor`,只改 namespace 与 ownerReference。**实测**:租户写
 `volumeName: some-volume`,上游原样是 `some-volume`。
 
 配合 B,PV↔PVC 绑定这条链路**整条没有转换**。这正是 TODO 点名要查的路径。
+
+### 修法与实测
+
+PVC 由 `defaultConvertor` 改为叠加 `PVCTransformer`。实测:租户写 `volumeName: shared2`,
+上游是 `111111-shared2`,租户读回仍是 `shared2` —— 往返对称。
 
 ## D. 两个转换器写好了但从未接线 ⚠️
 
@@ -119,6 +139,9 @@ NewPVCTransformer    被引用 0 次
 
 这是 B 和 C 的直接成因,也是本次审计方法学上最值得记住的一条:
 **单元测试测的是转换器本身,没有任何测试检查它是否被接上。**
+
+**已接线,并新增两个"接线守卫"测试**(webhook 与 PV/PVC 各一),都验证过:
+把注册项摘掉或改回 `nopeConvertor` 就会报红。
 
 > 顺带:`init.go` 里还留着 `policy/PodSecurityPolicy` 的条目,该 kind 在 1.25 已被删除。
 > 无害但陈旧。

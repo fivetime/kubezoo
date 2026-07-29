@@ -115,3 +115,35 @@ func TestWebhookConfigurationsAreWired(t *testing.T) {
 		}
 	}
 }
+
+// TestPVAndPVCAreWired is the same wiring guard as the webhook one, for the two
+// transformers that prompted it.
+//
+// NewPVTransformer and NewPVCTransformer were both fully implemented with
+// passing unit tests, and neither was ever registered. The result was that a
+// tenant's PersistentVolume landed upstream under a bare name it could not then
+// get or delete, a second tenant creating that name got AlreadyExists, and the
+// object stayed upstream permanently. The transformers were fine; the wiring was
+// missing, and nothing was looking at the wiring.
+func TestPVAndPVCAreWired(t *testing.T) {
+	native, _ := InitConvertors(
+		func(group, kind, tenantID string, isTenantObject bool) (bool, bool, error) {
+			return true, false, nil
+		},
+		FakeListEmptyTenantCRDsFunc,
+	)
+	registered := native.(*nativeObjectConvertor).nativeKindToConvertors
+
+	for _, kind := range []string{"PersistentVolume", "PersistentVolumeClaim"} {
+		gk := schema.GroupKind{Group: "", Kind: kind}
+		convertor, ok := registered[gk]
+		if !ok {
+			t.Errorf("%s has no convertor registered", gk)
+			continue
+		}
+		if _, isCross := convertor.(*CrossReferenceConvertor); !isCross {
+			t.Errorf("%s is registered as %T rather than with its transformer; a nope or plain "+
+				"default convertor leaves the PV/PVC binding path unconverted", gk, convertor)
+		}
+	}
+}
