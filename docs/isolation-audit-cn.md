@@ -18,7 +18,7 @@
 | **F** | ⛔⛔ **租户可自建 `*` on `*` 的 ClusterRole 并绑给自己,完全废掉 #87** | ⛔ 最高 | **已修并实测** |
 | **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
 | H | 配额:每 namespace 各一份额度 / `objectSelector` 标签可绕过 / 单点 | ⛔ 高 | **绕过已修,其余坐实** |
-| **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | **已修并实测**(定为平台决策面;实现是过渡态,归属策略层) |
+| **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | ⛔ **当前开着** —— 归策略层,策略层未部署 |
 | J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **已修并实测**(集群级残留=vanilla 行为) |
 | K | `serviceaccounts/token`、`pods/eviction`、`pods/binding` 解不出请求体 | ⚠️ 中 | **已修并实测** |
 | L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + 文档自相矛盾 | ⚠️ 中 | **已修并实测** |
@@ -382,68 +382,39 @@ priorityClassName: system-cluster-critical  → 上游 priority=2000000000
 `resolvePriorityClass`,只查存在性)。**任一租户可以把自己的 Pod 抬到
 全集群最高优先级,抢占其它租户的负载。**
 
-### 修法:**这三个字段是平台的决策面,租户设置无效**
+### 定案:**这三个字段是平台的决策面,租户设置无效** —— 但**由策略层执行**
 
 考虑过给引用加前缀(并为每个租户投影一份平台共享类),**否决了** ——
-前缀化会让租户**永远用不了平台共享类**(kata / nginx),而那恰恰是唯一正确的用法;
-投影机制还会把前缀渗进平台组件读的字段里。
+前缀化会让租户**永远用不了平台共享类**(kata / nginx),而那恰恰是唯一正确的用法。
 
-**定案**:这三个字段不该由租户决定。平台用什么手段决定(默认类 / 准入注入)是平台的事,
-租户写什么**在入站时丢掉**:
+**这三个字段不该由租户决定**,平台用什么手段决定(默认类 / 准入注入)是平台的事。
+按架构文档 §8.0 的判据,执行**属于策略层**:它只在写路径(丢了不需要反向还原),
+而"负载该用哪个 runtimeClass"**换个平台就会变**,放进 Go 代码意味着改策略要发版。
 
-| 字段 | 处理 |
-|---|---|
-| `spec.runtimeClassName` | 清空 |
-| `spec.priorityClassName` + `spec.priority` | 一并清空(只清名字会留下直接写的数值) |
-| `Ingress.spec.ingressClassName` | 清空 |
-| `kubernetes.io/ingress.class` 注解 | **一并删**(废弃但多数控制器仍认,只清字段等于没清) |
+### ⛔ 当前状态:**这条越权是开着的**
 
-**丢弃而非拒绝**:`ingressClassName` 几乎出现在每个公开示例里,拒绝会大面积破坏兼容性。
-但**丢弃不静默** —— 租户 apply 时收到 admission warning:
+曾经在 kubezoo 里实现过一版(入站丢弃 + admission warning),**已按职责划分删除**
+(`pkg/convert/platformfields.go` 与代理层挂钩)。删除的理由是不越俎代庖,
+**代价是在策略层部署之前,下面这些照样成立**:
 
 ```
-Warning: spec.runtimeClassName, spec.priorityClassName set by this tenant were ignored:
-the runtime class, ingress class and priority class are decided by the platform, not by
-the tenant
-deployment.apps/d1 created
+租户的 Pod / Deployment 写 runtimeClassName: <平台任意 handler>  → 生效,可跑出沙箱
+租户写 priorityClassName: system-cluster-critical               → priority=2000000000,抢占其它租户
+租户写 ingressClassName: <平台的>                                → 接上平台 ingress 控制器
 ```
 
-只报**真正被丢掉的那几个**;一个字段都没设的租户不会收到任何提示(实测)。
-为此把清理放在**代理层**(warning 需要 ctx,两层转换接口都没有),
-并给 handler chain 补上 `WithWarningRecorder` —— ⚠️ **没有它 `AddWarning` 是空操作**,
-代码看着在提示、实际什么都不发。
+⚠️ **不要把这条当成已解决。** 策略上线前它是一条真实可用的越权。
 
-### ⚠️ 归属:这段实现是**过渡态**,该走
+### 迁到策略层时,三个当时踩过的坑不要再踩
 
-按架构文档 §8.0 的判据,这条属于**策略层**而不是 kubezoo:它**只在写路径**
-(丢了不需要反向还原),而"负载该用哪个 runtimeClass"**换个平台就会变**。
-放在 Go 代码里意味着改策略要发版。
-
-**放在 kubezoo 只因为策略层还没部署**,现在删掉等于逃逸重开。**策略上线即移除。**
-迁移时三个容易丢的点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`)、
-`spec.priority` 要一起清、废弃的 `ingress.class` 注解要一起删。
-
-### ⭐ 实现时踩到的两个坑
-
-1. **PodSpec 嵌在 9 个 kind 里**(Pod / PodTemplate / RC / Deployment / ReplicaSet /
-   StatefulSet / DaemonSet / Job / CronJob)。只处理 Pod 会漏掉**最常见的路径**,
-   而且看起来像做完了 —— 与 E(Node 三处豁免)同一形状。加了守卫测试:
-   **凡服务面里结构上带 PodSpec 的 kind,必须在覆盖清单里**。
-   ⚠️ 用反射判定,不是拿空对象调 `PodSpecOf` —— RC 的 Template 是 nil 指针,那样会漏判;
-   反射还能抓到"新增了 kind 但 `PodSpecOf` 不认识"。验证过:摘掉 Deployment 立刻报红
-2. **必须同时认内部版与外部版类型**(仓库自带测试抓到的)。两者是不同 Go 类型、
-   各有各的 PodSpec。只认内部版时,走外部版的路径**不会报错,只会安静地不清理**,
-   等于逃逸重新打开
-
-### 复测(实测,平台侧真装了 `kata` / `platform-nginx`)
-
-| 提交的对象 | 上游落地 |
-|---|---|
-| Pod 写 `runtimeClassName: kata` + `priorityClassName: system-cluster-critical` | 两者皆空、`priority=0` |
-| **Deployment** 同上(模板里) | 两者皆空 |
-| **CronJob**(嵌两层模板) | 两者皆空 |
-| Ingress 写 `ingressClassName` + `ingress.class` 注解 | 两者皆空,**无关注解 `keep-me` 保留** |
-
+1. **`runtimeClassName` / `priorityClassName` 在 `PodSpec` 里,而 PodSpec 嵌在 9 个 kind 里**
+   (Pod / PodTemplate / RC / Deployment / ReplicaSet / StatefulSet / DaemonSet / Job / CronJob)。
+   只处理 Pod 会漏掉 **Deployment 这条最常见的路径**,而且看起来像做完了。
+   ⚠️ **Kyverno 的 autogen 只覆盖 8 个(不含 `PodTemplate`)**;MAP **没有 autogen**,要逐个写,
+   `CronJob` 还多一层(`spec.jobTemplate.spec.template.spec`)
+2. **`spec.priority` 要跟 `priorityClassName` 一起清** —— 只清名字会留下直接写进去的数值
+3. **废弃的 `kubernetes.io/ingress.class` 注解要跟字段一起删** —— 多数控制器仍认它,
+   只清字段等于没清
 
 ## J. `kubectl auth can-i` 对租户全错 ⛔ 坐实
 

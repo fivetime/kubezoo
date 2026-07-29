@@ -479,7 +479,7 @@ exclude:
 
 | 策略 | 优先级 | 说明 |
 |---|---|---|
-| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | **P0** | B1 的隔离前提。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`(全集群最高优先级)。<br>**定案:租户设置无效,平台决定。** 按 §8.0 判据这属于**策略层**(纯写路径 + 换平台会变)。<br>⚠️ **当前是过渡态**:实现暂放在 kubezoo(`pkg/convert/platformfields.go` + 代理层告警),因为策略层尚未部署,删了等于逃逸重开。**策略上线即从 kubezoo 移除**。<br>迁移时注意三点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);要连 `spec.priority` 一起清;要连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
+| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | **P0** | B1 的隔离前提。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`(全集群最高优先级)。<br>**定案:租户设置无效,平台决定。** 按 §8.0 判据这属于**策略层**(纯写路径 + 换平台会变)。<br>⛔ **当前无人执行**:kubezoo 里曾实现过一版,已按 §8.0 判据删除(不越俎代庖)。**在本策略上线前这条越权是开着的** —— 租户可跑出沙箱、可抢占全集群,**这使它成为本清单最紧的一条**。<br>实现时注意三点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);要连 `spec.priority` 一起清;要连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
 | **拒绝 `spec.nodeName`** | **P0** | 直接绕过调度器,把 Pod 钉到任意节点 |
 | **清空/白名单 `tolerations`** | **P0** | 否则可跑到不该跑的节点,包括控制面节点 |
 | PSA `restricted` 等价规则 | **P0** | hostNetwork / hostPID / hostIPC / privileged / hostPath |

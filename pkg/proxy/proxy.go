@@ -37,13 +37,11 @@ import (
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
-	"k8s.io/apiserver/pkg/warning"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
 	"github.com/kubewharf/kubezoo/pkg/common"
-	"github.com/kubewharf/kubezoo/pkg/convert"
 	"github.com/kubewharf/kubezoo/pkg/dynamic"
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -343,7 +341,7 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	}
 
 	// 1. convert the internal version of tenant object to upstream object
-	if err := tp.convertTenantObjectToUpstreamObject(ctx, obj, tenantID); err != nil {
+	if err := tp.convertTenantObjectToUpstreamObject(obj, tenantID); err != nil {
 		return nil, false, err
 	}
 
@@ -419,7 +417,7 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 
 	// 1. convert the internal version of tenant object to upstream object
-	if err := tp.convertTenantObjectToUpstreamObject(ctx, obj, tenantID); err != nil {
+	if err := tp.convertTenantObjectToUpstreamObject(obj, tenantID); err != nil {
 		return nil, err
 	}
 
@@ -676,9 +674,7 @@ func (tp *tenantProxy) Watch(ctx context.Context, options *metainternalversion.L
 }
 
 // convertTenantObjectToUpstreamObject converts tenant object to upstream object.
-func (tp *tenantProxy) convertTenantObjectToUpstreamObject(ctx context.Context, obj runtime.Object, tenantID string) error {
-	dropPlatformOwnedFields(ctx, obj)
-
+func (tp *tenantProxy) convertTenantObjectToUpstreamObject(obj runtime.Object, tenantID string) error {
 	// if obj is of type unstructured, it should be custom resource, whose apiVersion is prefixed with tenant id
 	// (eg: 888888-stable.example.com), leave trimming of tenant id prefix to custom convertor
 	if _, ok := obj.(*unstructured.Unstructured); !ok {
@@ -686,32 +682,6 @@ func (tp *tenantProxy) convertTenantObjectToUpstreamObject(ctx context.Context, 
 		obj.GetObjectKind().SetGroupVersionKind(tp.kind)
 	}
 	return tp.convertor.ConvertTenantObjectToUpstreamObject(obj, tenantID, tp.namespaceScoped)
-}
-
-// dropPlatformOwnedFields clears the fields naming platform-owned classes, and
-// tells the tenant which ones went.
-//
-// It sits here rather than among the convertors because it needs the request
-// context: an admission warning is the only way to say this in band, and it is
-// what stops a dropped field from being a silent one. Everything else about
-// these fields is in pkg/convert.
-func dropPlatformOwnedFields(ctx context.Context, obj runtime.Object) {
-	dropped := convert.DropPlatformOwnedFields(obj)
-	if len(dropped) == 0 {
-		return
-	}
-	warning.AddWarning(ctx, "", fmt.Sprintf(
-		"%s set by this tenant %s ignored: the runtime class, ingress class and priority "+
-			"class are decided by the platform, not by the tenant",
-		strings.Join(dropped, ", "), verbAgreeingWith(dropped)))
-}
-
-// verbAgreeingWith keeps the warning readable when only one field was dropped.
-func verbAgreeingWith(dropped []string) string {
-	if len(dropped) == 1 {
-		return "was"
-	}
-	return "were"
 }
 
 // convertUpstreamObjectToTenantObject converts upstream object to tenant object.
