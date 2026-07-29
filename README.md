@@ -25,16 +25,19 @@ and [comparison](docs/deployment-and-comparison-cn.md) documents for details.
 
 ## Compatibility
 
-The current runtime is based on Kubernetes 1.24. Higher Kubernetes versions are
-not yet supported because the project imports Kubernetes internal packages and
-uses a tightly coupled generated API stack. See
-[modernization status](docs/modernization.md) for the migration boundary.
+The current runtime is based on Kubernetes 1.36. The whole `k8s.io/*` family is
+pinned to 1.36.3 (`v0.36.3` for the staging modules) and the generated API stack
+was regenerated against it.
+
+KubeZoo still imports internal `k8s.io/kubernetes` packages, so a minor bump is
+a deliberate port rather than a version edit. See
+[modernization status](docs/modernization.md).
 
 ## Development
 
 Prerequisites:
 
-- Go 1.24 or newer; Go 1.26.5 is the preferred toolchain;
+- Go 1.26.0 or newer (the `go.mod` baseline); Go 1.26.5 is the pinned toolchain;
 - Docker with Buildx for container builds;
 - Bash and Make for repository targets.
 

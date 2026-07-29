@@ -1,9 +1,10 @@
 # kubezoo 隔离正确性审计(#82)
 
-对着**真实上游集群**(kind v1.35 + kubezoo 移植版 + etcd)做的双租户黑盒审计,不是读码结论。
-每条结论都注明了是**实测**还是**读码**。
+对着**真实上游集群**(kind **v1.36.1** + kubezoo 移植版 + 本地 etcd)做的双租户黑盒审计,
+不是读码结论。每条结论都注明了是**实测**还是**读码**。
 
-审计时的代码状态:`e01e169`(per-namespace RBAC 已落地)。
+审计横跨多个提交:起点 `e01e169`(per-namespace RBAC 落地),各节的"已修"指向各自的提交。
+凡标注**未修 / 待定**的(I、部分 H)以本文为准。
 
 ## 结论摘要
 
@@ -151,8 +152,10 @@ NewPVCTransformer    被引用 0 次
 **已接线,并新增两个"接线守卫"测试**(webhook 与 PV/PVC 各一),都验证过:
 把注册项摘掉或改回 `nopeConvertor` 就会报红。
 
-> 顺带:`init.go` 里还留着 `policy/PodSecurityPolicy` 的条目,该 kind 在 1.25 已被删除。
-> 无害但陈旧。
+> 顺带:`init.go` 里当时还留着 `policy/PodSecurityPolicy`(1.25 已删除的 kind)与
+> `scheduling.k8s.io/PriorityClass`(kubezoo 不服务)两个 `nopeConvertor` 条目。
+> **随 E 一并删掉了** —— 它们永远匹配不上,但若哪天把 PriorityClass 服务出去,
+> 那条 nope 会原样复现 B 的 bug。现在已经没有"什么都不做"的转换器条目。
 
 ## E. Node 对所有租户可见 ⚠️ —— 已修复
 

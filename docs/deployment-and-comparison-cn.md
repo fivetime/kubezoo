@@ -211,7 +211,9 @@ return strings.HasPrefix(accessor.GetName(), tenantID+"-")
 `tokenreview`、`volumeattachment`、跨对象引用(`cross-object.go`)等。
 
 **这是该架构最脆弱的部位**:任何一处引用字段漏改,都是一个跨租户可见性缺口。新增资源类型或
-新增引用字段时,必须同步扩展转换器,否则默认行为(`default.go` / `nope.go`)可能放行。
+新增引用字段时,必须同步扩展转换器,否则默认行为可能放行。
+⚠️ 尤其是 `nope.go`(什么都不做的转换器):#82 的 PersistentVolume 与 Node 两条缺口都是这个形状。
+现在转换器表里**已经没有任何 kind 映射到它**,新增 kind 会落到加前缀的默认转换器 —— 这是安全的兜底。
 
 ---
 
@@ -234,46 +236,60 @@ return strings.HasPrefix(accessor.GetName(), tenantID+"-")
 },
 ```
 
-绑定给用户 `<tenantId>-admin`(`controller.go:614`)。也就是说:
+绑定给用户 `<tenantId>-admin`。也就是说,曾经:
 
 > **被 impersonate 的租户身份在上游拥有 `*` on `*` 的全权。**
 
-再加上示例部署中 KubeZoo 自身是 `--authorization-mode=AlwaysAllow`,结论是:
+⚠️ **这一条已经改掉了(#87)**,但结论只改了一半,评估时要分开看:
 
-**上游 RBAC 与 KubeZoo 授权层都不构成第二道防线。租户之间的隔离,完全且唯一地依赖
-§5 改写层的正确性。** 改写层的任何一个缺口都直接等于跨租户越权,没有兜底。
+- **namespace 级资源:现在有第二道防线**。租户的权限改为**逐 namespace 下发**
+  (RoleBinding 绑在该租户的每个 namespace 上),集群范围不再有 `*` on `*`。
+  跨租户的 namespace 级访问会被上游 RBAC 拒绝 —— 已带负向对照实测。
+  副作用:`kubectl get <资源> -A` 对租户变成 Forbidden。
+- **集群级资源:仍然没有兜底,这是结构性的**。RBAC 的 `resourceNames` 是**精确匹配**,
+  表达不了"名字以 `<租户 ID>-` 开头",所以集群级资源的隔离**完全且唯一地依赖
+  §5 改写层的正确性**。#82 的审计里 PersistentVolume、准入 webhook、Node 三条
+  都是这条路上的实际缺口。
 
-评估该方案时,这一条应当排在首位。
+再加上示例部署中 KubeZoo 自身是 `--authorization-mode=AlwaysAllow`
+(它把授权完全交给上游,不是漏配)。评估该方案时,**集群级资源无兜底**这一条应当排在首位。
 
-### 6.2 Node 目前对所有租户可见(与 FAQ 冲突)
+### 6.2 Node 曾对所有租户可见(与 FAQ 冲突)—— **已修复**
 
-FAQ 称"限制 daemonset 和 node 这类集群共享资源,租户不应感知节点"。但
-`pkg/util/util.go:136-144` 里有:
+FAQ 称"限制 daemonset 和 node 这类集群共享资源,租户不应感知节点",而代码里为通过
+Conformance 测试开了口子,**Node 对所有租户无条件可见**:名称、标签、容量、地址,
+以及 `status.nodeInfo` 里的内核 / 容器运行时 / kubelet 版本。虽是只读,但租户可据此
+推断集群规模与其他租户的负载分布,也等于拿到一份"哪里有 CVE 就查哪里"的索引。
 
-```go
-// Todo: renjs, temporarily expose nodes for tenants to pass Conformance test
-t, err := meta.TypeAccessor(obj)
-...
-if t.GetAPIVersion() == "v1" && t.GetKind() == "Node" {
-    return true
-}
-```
+⚠️ **口子有三处,不是一处**:LIST 过滤(`pkg/util/util.go`)、Get 路径跳过名字前缀转换
+(`pkg/proxy/proxy.go`)、以及 `pkg/convert/init.go` 里映射到"什么都不做"的转换器。
+三处各带一条自己的 TODO 注释,**按注释文案 grep 只找得到第一处**;只删第一处的效果是
+`get nodes` 变空而 `get node <名字>` 照样返回完整对象。
 
-为通过 Conformance 测试,**Node 对所有租户无条件可见**。租户可以列出整个共享集群的全部节点
-(名称、标签、容量、地址、镜像列表)。虽然是只读,但属于信息泄露 —— 租户可据此推断集群规模
-与其他租户的负载分布。这是一个挂着 TODO 的临时口子,评估时应视为待修项。
+三处已全部移除,Node 回归成普通集群级资源。实测:list 空 / get NotFound / raw GET 404 /
+watch 静默 / 平台自身不受影响。
 
 ### 6.3 DaemonSet 并未在代理层被拒绝
 
-`cmd/kubezoo/app/apigroups.go:557-573` 中 `daemonsets` 与 `daemonsets/status` 是正常注册并
-代理的资源。FAQ 所说的"限制 daemonset"**在代理层没有对应的拒绝逻辑**,而 §6.1 的上游 RBAC
-又是全权。因此该限制目前更接近设计意图而非已实施的约束。
+`cmd/kubezoo/app/apigroups.go` 中 `daemonsets` 与 `daemonsets/status` 是正常注册并
+代理的资源,**在代理层没有对应的拒绝逻辑**。#87 之后上游 RBAC 虽然收紧到按 namespace 下发,
+但 DaemonSet 本身是 namespace 级资源,**租户在自己的 namespace 里本来就有权建它**,
+所以 RBAC 也拦不住。
 
-### 6.4 版本上限
+**实测**:租户 `kubectl apply` 一个 DaemonSet —— 创建成功,上游 `DESIRED 1 / CURRENT 1`,
+**已经在平台节点上跑起了一个 Pod**。所以不是"没拒绝"而已,是**租户可以往平台的每一个
+节点上投放 Pod**。FAQ 所说的"限制 daemonset"目前是设计意图而非已实施的约束,
+需要准入策略层补上。
 
-`go.mod` 锁定 `k8s.io/kubernetes v1.24.0`、`go 1.18`;README 明确 "supports Kubernetes
-versions up to 1.24"。**在更高版本的上游集群上使用会有兼容性问题**,且 §5 的转换器需要针对
-新版本的资源与字段做同步扩展。
+### 6.4 版本上限 —— **已抬到 1.36**
+
+原文记录的是移植前的状态(`go.mod` 锁 1.24、Go 1.18)。现在 `k8s.io/*` 全族锁定
+**1.36.3**(staging 模块 `v0.36.3`),Go 基线 1.26.0,生成代码已按 1.36 重新生成,
+`make verify-codegen` 会校验签入产物是否一致。
+
+⚠️ 仍然成立的那一半:KubeZoo **依旧引用 `k8s.io/kubernetes` 的内部包**
+(`pkg/apis/core` 等)并 fork 了 CRD handler,所以**跨小版本升级仍是一次有意的移植,
+不是改个版本号**;§5 的转换器同样需要针对新版本的资源与字段同步扩展。
 
 ---
 
@@ -368,16 +384,24 @@ apiserver 前做路由与限流。三者解决的是不同问题。
 
 ## 10. 选型时的关注点小结
 
-1. **隔离强度**:视图级,且 §6.1 显示上游 RBAC 全权、无第二道防线 —— 隔离完全依赖改写层的
-   正确性。适合**互相之间半可信**的租户(如同一公司内部团队),不适合**互不信任**的租户。
+1. **隔离强度**:视图级。§6.1 更正后的结论分两半 —— **namespace 级资源现在有上游 RBAC
+   作为第二道防线**(#87,按 namespace 下发),**集群级资源没有,而且是结构性的**
+   (RBAC 的 `resourceNames` 精确匹配,表达不了名字前缀)。集群级那半完全依赖改写层的正确性。
+   适合**互相之间半可信**的租户(如同一公司内部团队),不适合**互不信任**的租户。
 2. **规模承压点在上游 etcd**:所有租户对象共用一套键空间。租户数量上去之后,
    etcd/apiserver 的规模能力会先于其他一切成为瓶颈。
 3. **无每租户限流**:一个租户打爆共享 apiserver 会影响全体,项目本身不提供配额治理手段。
-4. **版本停在 1.24**,且仓库活跃度低(最近提交多为拼写与 NPE 修复)。移植到当前版本需要
-   评估 §5 转换器的扩展工作量。
+   ⚠️ 自带的 ClusterResourceQuota 也不解决这个:实测它**每个 namespace 各发一份完整额度**
+   (声明 4 core、6 个 namespace 就是 24 core),且是 `replicas: 1` + `failurePolicy: Fail`
+   的单点。
+4. ~~**版本停在 1.24**~~ —— 已移植到 **1.36.3**(§6.4)。仓库上游活跃度低这一点仍然成立,
+   §5 转换器的扩展仍需持续跟进。
 5. **数据面隔离是外部依赖**:必须搭配 Virtual Kubelet + 云厂商弹性容器才成立,
    §8 列出的全部代价都要一并接受。
-6. **待修项**:§6.2 的 Node 无条件可见。
+6. **待修项**:§6.3 的 DaemonSet 未拒绝(实测租户能在平台节点上投放 Pod);
+   `runtimeClassName` / `ingressClassName` / `priorityClassName` 三个引用字段不改写,
+   租户可引用平台的同名对象(含 `system-cluster-critical`)。
+   ~~§6.2 的 Node 无条件可见~~ 已修复。
 
 ---
 

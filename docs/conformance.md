@@ -1,5 +1,19 @@
 # KubeZoo 2.0 Conformance Test
 
+> ⚠️ **This is a record of an old run, kept for reference, not a current result.**
+>
+> It was produced against the pre-1.36 code base (the paths in the failure output
+> are from the machine it was run on), and two things have changed since:
+>
+> - Nodes are no longer exposed to tenants. The exemption that made them visible
+>   was added specifically so this suite would pass, and it has been removed
+>   deliberately -- the platform's machine inventory is not a tenant's business.
+>   Whatever this run gained from it is gone.
+> - The port to Kubernetes 1.36 changed enough of the served surface that these
+>   pass/fail lines should not be assumed to still hold either way.
+>
+> Re-run it before quoting any number from this file.
+
 ## Run Conformance Test
 
 Steps to run the conformance test.

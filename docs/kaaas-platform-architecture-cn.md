@@ -154,8 +154,8 @@ CN = 111111-admin
 
 | 资源/字段 | 原因 |
 |---|---|
-| DaemonSet | 语义可用(B1 有真实节点)但租户不应感知节点;应由策略拒绝 |
-| Node | 应不可见(现状见 §7.1) |
+| DaemonSet | 语义可用(B1 有真实节点)但租户不应感知节点;应由策略拒绝。**现状:未拒绝,实测租户能在平台节点上投放 Pod**(§7.3) |
+| Node | **已不可见**(§7.1,三处豁免已全部去掉并实测) |
 | hostNetwork / hostPath / privileged / hostPID / hostIPC | 由 Kyverno + PSA 拒绝 |
 | **平台安装的任何 CRD**(kubetron / Kyverno / OpenKruise 等) | CRD 按名字前缀过滤(`pkg/util/util.go:311`),且 **FAQ 描述的 system CRD 共享机制未实现**(见 §7.4) |
 
@@ -262,9 +262,9 @@ Cluster-scoped 那部分**永远只能靠改写层**。但绝大多数流量是 
 
 | 项 | 改法 | 代价 |
 |---|---|---|
-| Node 无条件可见(§7.1) | 删掉 TODO 分支 | Conformance 测试会挂——它正是为此而加 |
+| ~~Node 无条件可见(§7.1)~~ **已修** | 删掉**三处**豁免(不是一处) | Conformance 测试会挂——它正是为此而加 |
 | 平台指纹泄露(§5) | convert 层出站擦除/还原 | 需三方契约 |
-| `-A` 全量 LIST(§7.2) | 先取租户 namespace 列表,再逐 namespace 发 scoped LIST 合并 | 请求放大(N 个 ns = N 次上游请求),但数据量从全集群降到租户自身 |
+| `-A` 全量 LIST(§7.2) | 先取租户 namespace 列表,再逐 namespace 发 scoped LIST 合并 | 请求放大(N 个 ns = N 次上游请求),但数据量从全集群降到租户自身。⚠️ 分页与 resourceVersion 语义要先定,见 §10.5 |
 
 **② 纵深防御** —— §6.2 的 per-namespace RBAC。
 
@@ -285,67 +285,109 @@ Cluster-scoped 那部分**永远只能靠改写层**。但绝大多数流量是 
 
 ## 7. 已知缺陷与不一致(kubezoo)
 
-### 7.1 Node 对所有租户无条件可见
+### 7.1 Node 对所有租户无条件可见 —— **已修复**
 
-`pkg/util/util.go:136-144`:
+原文只点了 `pkg/util/util.go` 里那个"为过 Conformance 临时放开"的分支。
+**实际有三处豁免,删掉一处只会让 list 变干净而 get 全开:**
 
-```go
-// Todo: renjs, temporarily expose nodes for tenants to pass Conformance test
-if t.GetAPIVersion() == "v1" && t.GetKind() == "Node" {
-    return true
-}
-```
+| 位置 | 作用 |
+|---|---|
+| `pkg/util/util.go` `UpstreamObjectBelongsToTenant` | LIST 过滤时对 Node 直接返回 true |
+| `pkg/proxy/proxy.go` `Get` | `&& tp.kind.Kind != "Node"` 让 Node 跳过集群级名字前缀转换 ⇒ **`get node <名字>` 返回完整对象** |
+| `pkg/convert/init.go` | Node 映射到 `nopeConvertor`(完全不转换)—— 与 PV 那个 bug 同一个形状 |
 
-租户可列出整个共享集群的全部节点(名称、标签、容量、地址、镜像列表)。
-在 B1 下更敏感——节点上跑着所有租户的负载,叠加 Pod `nodeName` 可见,
-租户能拼出"哪些租户共处一台机器"。
+三处**各带一条自己的 TODO 注释**,按注释文案 grep 只找得到第一处。
+
+租户原本可列出整个共享集群的全部节点(名称、标签、容量、地址,以及
+`status.nodeInfo` 里的内核 / 容器运行时 / kubelet 版本)。在 B1 下更敏感——
+节点上跑着所有租户的负载,叠加 Pod `nodeName` 可见,租户能拼出"哪些租户共处一台机器"。
+
+三处一起去掉后 Node 回归成普通集群级资源(名字前缀说了算,平台节点都没有前缀):
+list 空 / get NotFound / raw GET 404 / watch 静默 / 平台自己不受影响。**均已实测。**
 
 ### 7.2 `-A` 与 cluster-scoped 请求走"全量 + 过滤"
 
 `pkg/proxy/proxy.go:178-180` 的 `getClient()` 只在 `requestInfo.Namespace != ""` 时限定
 namespace;否则客户端不限范围,靠 `FilterUnstructuredList`(`pkg/util/util.go:408`)事后筛。
 
+⚠️ **现状已变**:#87 的 per-namespace RBAC 落地后,`-A` 对租户**直接 Forbidden** ——
+下表描述的是被权限挡住之前的行为。问题本身没解决,而且 `-A` 这个常用能力也没了,
+详见 §10.5。
+
 | 租户操作 | 上游查询范围 | 隔离靠什么 |
 |---|---|---|
 | `kubectl get pods`(带 ns) | 限定 `111111-default` | ✅ 查询范围够不着别人 |
-| `kubectl get pods -A` | **全集群** | ⚠️ 拉回全部再内存过滤 |
-| cluster 级资源 | **全集群** | ⚠️ 同上 |
+| `kubectl get pods -A` | ~~全集群~~ → **现在 Forbidden** | 上游 RBAC(#87) |
+| cluster 级资源 | **全集群** | ⚠️ 拉回全部再内存过滤 |
 | watch | 同上两种 | `pkg/proxy/watch.go:91` 逐事件过滤 |
 
 两个后果:
 
-- **安全**:过滤函数 `UpstreamObjectBelongsToTenant`(`util.go:120`)是唯一防线。
-  §7.1 的 Node 泄露走的正是这条路。
+- **安全**:对集群级资源,过滤函数 `UpstreamObjectBelongsToTenant`(`util.go:120`)
+  仍是唯一防线 —— RBAC 的 `resourceNames` 是精确匹配,表达不了名字前缀,**没有第二层**。
+  §7.1 的 Node 泄露走的正是这条路,而且它证明了这条防线**还可以被绕过去**:
+  Get 路径根本没走过滤函数。
 - **规模**:`pkg/proxy/` 内**零处 informer/cache**,每次真打上游。任一租户敲一次
   `kubectl get pods -A` 就是一次全集群 LIST。租户越多单次越贵,**代价由全体承担**,
   同时构成 DoS 面。
 
 ### 7.3 DaemonSet 未在代理层拒绝
 
-FAQ 称限制 daemonset,但 `cmd/kubezoo/app/apigroups.go:557-573` 正常注册并代理,
-无拒绝逻辑。需由 Kyverno 策略补上。
+FAQ 称限制 daemonset,但 `cmd/kubezoo/app/apigroups.go` 正常注册并代理,无拒绝逻辑。
+
+**实测**:租户 `kubectl apply` 一个 DaemonSet —— `daemonset.apps/ds-probe created`,
+上游 `111111-default` 里 `DESIRED 1 / CURRENT 1`,**已经在平台节点上跑起了一个 Pod**。
+所以不是"没拒绝"而已,是**租户可以往平台的每一个节点上投放 Pod**。需由 Kyverno 策略补上。
 
 ### 7.4 system CRD 共享机制未实现
 
-FAQ 描述"system CRD 可配置策略供一个或多个租户使用",但**全仓零命中**。
-`ListCRDsForTenant`(`pkg/util/util.go:311`)仅按名字前缀过滤。
+FAQ 描述"system CRD 可配置策略供一个或多个租户使用"。
+
+⚠️ 原文写的"全仓零命中"**不确切**:`NewCheckGroupKindFunc`(`pkg/util/util.go`)里
+确实留了一段带 `TODO: temporary fix for system crd` 的分支,会把**不带租户前缀**的 CRD 组
+当作系统 CRD 认下来。但它**只在 ownerReference / objectReference 的转换路径上被调用**,
+既不影响发现面也不影响读写 —— `ListCRDsForTenant` 与 CRD handler 都按名字前缀过滤。
+而且它是**无条件**的(任何无前缀 CRD 对任何租户都算数),**恰恰没有 FAQ 说的那个"策略"**。
+
+**实测**:平台在上游装 `clonesets.platform.io`,租户侧 ——
+`api-resources --api-group=platform.io` 为空、`get crd` 为空、
+`apply` 一个 CloneSet 报 `no matches for kind "CloneSet" in version "platform.io/v1"`。
 
 后果:**租户看不到也用不了任何平台安装的 CRD**。若要让租户使用 OpenKruise
-的 CloneSet 之类,须先实现共享机制。
+的 CloneSet 之类,须先实现共享机制 —— 这与 #82 findings I 的 A 方案
+("平台共享对象按租户投影")是**同一个坑,应合并设计**。
 
 (反向也成立:Kyverno 的 ConstraintTemplate/Policy、kubetron 的 NetworkPortClaim
 对租户天然不可见——策略内容不泄露。)
 
 ### 7.5 租户持有自己 namespace 的写权限
 
-namespace 由租户创建、租户拥有 `*` on `*`,因此租户可以编辑它——包括摘掉平台打上的
-PSA 标签或策略匹配标签。这直接引出 §8.1 的铁律。
+namespace 由租户创建,租户在自己的 namespace 上有写权限,因此可以编辑它的标签。
+这直接引出 §8.1 的铁律。
 
-### 7.6 版本停在 1.24
+⚠️ **但有一条要更正**:原文说租户"可以摘掉平台打上的标签"。**对 kubezoo 自己打的
+`kubezoo.io/tenant` 标签,实测是摘不掉的** —— `NamespaceTransformer.Forward` 无条件重写它,
+而 patch 走 `guaranteedUpdate → update` 也过转换器。四种写法(`kubectl label ns X 键-`、
+merge patch 置 null、json patch remove、改成别的租户 id)上游标签一字未变,
+改成别人的 id 直接被拒。**准入 webhook 的 `namespaceSelector` 收口与退租强制清理
+都建立在这个标签上,所以专门验过。**
 
-`go.mod` 锁 `k8s.io/kubernetes v1.24.0` / `go 1.18`;README 明示上限 1.24。
-kubetron 使用 `k8s v0.36` / gophercloud v2。**两者要在同一集群共存,kubezoo 必须先抬版本**。
-这是 B1 的头号前置工作(§10)。
+真正成立的风险是**别人打的标签**:PSA 的 `pod-security.kubernetes.io/*`、
+以及任何策略引擎自己约定的匹配标签 —— 那些没有转换器守着,租户能改。
+这正是 §8.1 铁律要反向写(exclude 平台自身 namespace)的原因:
+**判据只能建立在租户改不动的东西上**。
+
+### 7.6 ~~版本停在 1.24~~ —— **已抬到 1.36,该前置条件已解除**
+
+原文:`go.mod` 锁 1.24 / Go 1.18,而 kubetron 用 `k8s v0.36`,两者无法共存,
+是 B1 的头号前置工作。
+
+**已完成**(#83 / #88):`k8s.io/*` 全族锁定 **1.36.3**(staging `v0.36.3`),Go 基线 1.26.0,
+生成代码重新生成并有 `verify-codegen` 守卫,CRD handler 已按 1.36 重新 fork。
+与 kubetron 的版本冲突不再存在。
+
+⚠️ 仍成立的部分:kubezoo **依旧引用 `k8s.io/kubernetes` 内部包**并 fork 了 CRD handler,
+所以下一次跨小版本仍是一次有意的移植,不是改版本号。
 
 ---
 
@@ -378,11 +420,11 @@ exclude:
 
 | 策略 | 优先级 | 说明 |
 |---|---|---|
-| **强制注入 `runtimeClassName=<kata>`** | **P0** | B1 的隔离前提。租户不写默认是 runc,与其他租户共享内核;且 RuntimeClass 是 cluster-scoped(`util.go:275`),租户写 `kata` 会被改写成 `111111-kata` 而不存在,所以**只能由平台强制注入** |
+| **约束 `runtimeClassName`** | **P0** | B1 的隔离前提。租户不写默认是 runc,与其他租户共享内核。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在,所以只能由平台强制注入"——**该字段根本不被改写**。#82 实测:租户写 `runtimeClassName: kata` **原样落到上游并生效**,尽管它 `get runtimeclass kata` 是 NotFound。所以真实情况不是"租户用不了"而是**"租户可以引用平台的任意 RuntimeClass",包括 runc ⇒ 直接跑出沙箱**。修法见 #82 findings I,尚未定案 |
 | **拒绝 `spec.nodeName`** | **P0** | 直接绕过调度器,把 Pod 钉到任意节点 |
 | **清空/白名单 `tolerations`** | **P0** | 否则可跑到不该跑的节点,包括控制面节点 |
 | PSA `restricted` 等价规则 | **P0** | hostNetwork / hostPID / hostIPC / privileged / hostPath |
-| 限制 `nodeSelector` / `affinity` 到允许标签 | P1 | 节点标签对租户可见(§7.1) |
+| 限制 `nodeSelector` / `affinity` 到允许标签 | P1 | 节点标签**曾**对租户可见(§7.1 已修);但租户仍可写任意 nodeSelector |
 | 强制 `schedulerName` | P1 | |
 | 拒绝 DaemonSet | P1 | 补 §7.3 |
 

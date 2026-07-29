@@ -2,7 +2,13 @@
 
 - Does kubezoo have any other restrictions except for not supporting daemonset resources?
 
-> Kubezoo supports most of the resources such as pod, deployment and statefulset by default, while restrict the cluster sharing resources such as daemonset and node. The reason is that when multiple tenants share a cluster, no tenant is expected to sense and manipulate nodes(including daemonset) for security and isolation purpose.
+> Kubezoo supports most of the resources such as pod, deployment and statefulset by default. The intent is to restrict cluster-sharing resources such as daemonset and node: when multiple tenants share a cluster, no tenant is expected to sense or manipulate nodes (including daemonset), for security and isolation.
+>
+> ⚠️ **The implementation does not fully match that intent. Plainly:**
+>
+> - **Nodes are no longer visible.** A tenant's list is empty, a get by name is NotFound, and a watch is silent. Three separate exemptions used to expose every node to every tenant; all three have been removed.
+> - **DaemonSet is not rejected today.** It is registered and proxied like any other resource, and a tenant can create one -- verified, and the pod really does run on a platform node. Enforcing the intent needs an admission policy; see `docs/kaaas-platform-architecture-cn.md` §7.3.
+> - A tenant can still set `nodeSelector`, `tolerations`, `spec.nodeName` and `runtimeClassName`, all of which touch nodes. These need the same policy layer.
 
 - Does kubezoo support RBAC for tenants?
 
@@ -10,7 +16,11 @@
 
 - Does CRD share across the tenants?
 
-> KubeZoo divides CRD into two categories: one is tenant CRD which among tenants are completely isolated. The other is system CRD in a public cloud scenario, which will be handled by the same controller in the backend cluster. System CRD can be configured with a special policy to ensure that they are available to one or more tenants who can create objects.
+> **Tenant CRDs are implemented** and completely isolated between tenants: the API group is prefixed with the tenant id, so two tenants can define the same CRD without collision.
+>
+> ⚠️ **System CRD sharing is not implemented.** The idea is that a CRD installed by the platform, reconciled by one controller in the backend cluster, could be opened to one or more designated tenants by policy. **There is no such policy in the code** -- CRD discovery and access filter on the name prefix only, so **a tenant can neither see nor use any platform-installed CRD**. Verified: with `clonesets.platform.io` installed upstream, a tenant's `api-resources` and `get crd` are both empty and creating an object fails with `no matches for kind`.
+>
+> (`pkg/util/util.go` carries a branch marked `TODO: temporary fix for system crd`, but it only affects ownerReference and objectReference conversion, does not reach discovery or read/write, and is unconditional rather than the policy described above.)
 
 - What if pods of different tenants are deployed on the same Node and their performance affects each other?
 
@@ -18,7 +28,13 @@
 
 - Does kubezoo need a dedicated kubectl?
 
-> No, kubezoo supports the full kubernetes API, so each tenant could use kubectl exactly the same way as a single cluster. 
+> No. Kubezoo serves the full Kubernetes API, so each tenant uses kubectl the same way as against a single cluster.
+>
+> ⚠️ Known differences:
+>
+> - **`kubectl get <resource> -A` is Forbidden.** A tenant's upstream grants are per namespace, and a cluster-scoped LIST is not among them. Replacing it with a per-namespace fan-out is pending, and needs the paging and resourceVersion semantics settled first.
+> - **`kubectl get nodes` returns nothing**, by design (see above).
+> - `kubectl auth can-i` is unreliable for **cluster-scoped** resources. This matches stock Kubernetes -- kubectl sends the current namespace and prints its own warning about it -- and the answers for namespaced resources are accurate.
 
 - What are the advantages and disadvantages of kubezoo and kubernetes's HNC?
 
