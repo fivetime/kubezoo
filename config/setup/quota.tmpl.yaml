@@ -127,13 +127,27 @@ webhooks:
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: clusterresourcequota.kubezoo.io
-  namespaceSelector: {}
-  objectSelector: 
+  # Exclude the quota component's own pods so that it can be rescheduled while
+  # its webhook is failurePolicy: Fail.
+  #
+  # This used to be an objectSelector on the app label, which a tenant could
+  # simply set. Verified against a real cluster: the same over-quota pod was
+  # refused without the label and admitted with it, through the ordinary tenant
+  # path, and landed upstream. A label is part of the object a tenant submits,
+  # so it can never be an exclusion criterion.
+  #
+  # The namespace can be. Tenants only ever reach namespaces prefixed with their
+  # own id -- pkg/convert rewrites the namespace on the way through and refuses
+  # to let a tenant claim another's -- so no tenant object is ever created in
+  # the platform's own namespace.
+  namespaceSelector:
     matchExpressions:
-    - key: app
+    - key: kubernetes.io/metadata.name
       operator: NotIn
-      values: 
-      - kubezoo-cluster-resource-quota
+      values:
+      - default
+      - kube-system
+  objectSelector: {}
   rules:
   - apiGroups:
     - ""

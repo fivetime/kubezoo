@@ -193,6 +193,66 @@ NewPVCTransformer    被引用 0 次
 答 `yes` 是错的;`--subresource=proxy` 才对(答 `no`),实际请求也确实 Forbidden。
 **判据要用实际请求,不能只信 can-i。**
 
+## H. 配额三条 —— 真部署跑完,两条坐实一条未复现
+
+此前全是读码结论。本轮把 `clusterresourcequota` 组件真正部署进 lab 跑通后逐条验。
+
+⭐ **部署本身就先撞到移植期遗留的一个错误假设**:`NewQuotaConfigurationForAdmission(nil, nil)`
+的两个 nil。我在 #83 记过"只有 DRA + DRAExtendedResource 同时开启才会解引用,没构造该场景测过" ——
+**该假设是错的**:`DynamicResourceAllocation` 自 1.35 起 GA 且 `LockToDefault`,
+`DRAExtendedResource` 在 **1.36 转 Beta 默认开**,那条分支必然走到,组件**一启动就 CrashLoop**。
+修法:不塞一个用不上的全集群 Pod informer,而是**明确告诉配额配置 kubezoo 不服务 `resource.k8s.io`**
+(apigroups.go 本来就没暴露),分支自然跳过。
+
+### ① 生效范围:每个 namespace 各拿一份完整额度 ⛔ 坐实
+
+租户声明 `cpu=4`,控制器在**每个**租户 namespace 里生成一份 `hard={"cpu":"4","memory":"4G"}`
+—— 不是共享一份。实测:
+
+```
+111111-default / kube-node-lease / kube-public / kube-system   各 cpu=4  ⇒ 4 个 ns × 4 = 16 core
+租户再自建 2 个 namespace 后                                    ⇒ 6 个 ns × 4 = 24 core(声明值的 6 倍)
+```
+
+**随 namespace 数无限增长**。租户总量约束只由 webhook 在准入时兜(见 ②),
+per-namespace 的 ResourceQuota 对象本身完全不构成总量约束。
+
+### ② `objectSelector` 标签绕过 ⛔ 坐实并已修
+
+webhook 原本用 `objectSelector: app NotIn [kubezoo-cluster-resource-quota]` 排除自身 Pod,
+**而标签是租户提交对象的一部分**。实测(经 kubezoo 的正常租户路径):
+
+| 请求 | 修前 | 修后 |
+|---|---|---|
+| 超额 Pod,无标签 | 被拒 | 被拒 |
+| **同一个 Pod + `app: kubezoo-cluster-resource-quota`** | **创建成功并落地上游** | **被拒** |
+
+**修法:排除条件改为按 namespace**(`namespaceSelector` 排除 `default`/`kube-system`)——
+**namespace 不归租户控制**:`pkg/convert` 在入站时改写 namespace 并拒绝租户冒用他人前缀,
+所以租户对象永远落不到平台自己的 namespace 里。
+同时验证平台组件删除后仍能自愈重建(排除仍然生效,webhook 没有自锁)。
+
+> ⭐ 这正是 TODO 3.1 那条铁律的实例:**排除条件只能建立在租户无法控制的东西上。**
+
+### ③ 并发超发:代码确认,本轮未复现
+
+`quotaAccessor.UpdateQuotaStatus` 确实是空实现(`webhook.go:190` 直接 `return nil`),
+关闭了 admission 期的乐观并发记账。但**并发 6 个 2-core Pod 打 4-core 配额,实际只落地 2 个,未超发**。
+
+⇒ 记为**代码确认、行为未复现**。要坐实需要更高并发或更小时窗(本地单副本 webhook 串行度太高)。
+**不写成"已坐实"。**
+
+### ④ 单点:坐实
+
+`replicas: 1` + `failurePolicy: Fail` + **无 PDB**。配额 webhook 挂掉时全租户 Pod 创建全部失败。
+
+---
+
+⚠️ **本节的方法学教训(踩了三次)**:配额类测试对环境状态极其敏感,我连续三次拿到无效对照 ——
+① 测试脚本参数错位导致标签根本没加上;② 前一步删过 Pod 导致用量归零、放行是正确行为;
+③ `nodeName: nonexistent-node` 让 Pod 被 k8s GC 回收,用量随时间漂移。
+**每次都是"看起来得出了结论"。判据必须是:先确认起点状态,再做单一变量对照。**
+
 ## 通过的项(正向对照)
 
 均为**实测**:
@@ -209,8 +269,7 @@ NewPVCTransformer    被引用 0 次
 
 诚实列出,不算做完:
 
-- **配额三条**(架构文档 §9)仍是**读码结论,未做运行时复现**:生效范围、
-  `objectSelector` 标签绕过、`UpdateQuotaStatus` 空实现导致的并发超发
+- (配额三条已完成,见下节)
 - **`-A` / 全集群 LIST 现在对租户直接 Forbidden**(#87 的副作用,实测)。
   这顺带堵掉了 TODO 1.2 说的"全量 LIST + 过滤"规模墙与 DoS 面,
   但也意味着 `kubectl get pods -A` 对租户**不可用** ⇒ 需按 TODO 1.2 改为

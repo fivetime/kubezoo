@@ -318,14 +318,24 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
 
 ### 尚未覆盖(不算做完)
 
-- [ ] **配额三条仍是读码结论,未做运行时复现**:
-      - [ ] 生效范围:预期只有 compute 类 + `pods` 计数受总量约束;
-            `configmaps`/`secrets`/`services`/`pvc`/`count/*`/`requests.storage` **无总量**,
-            且 per-namespace 限额 == 总量额度 ⇒ **多建一个 namespace 就多拿一份额度**
-      - [ ] ⭐ **objectSelector 绕过**:按 `app` 标签排除,而**标签归租户** ⇒ 打个标签即绕过。
-            **修法:改为按 namespace 排除**
-      - [ ] 并发超发:`UpdateQuotaStatus` 空实现,关闭了 admission 期乐观并发记账
-      - [ ] 配额组件 `replicas: 1` + `failurePolicy: Fail` = 单点
+- [x] **配额三条已真部署跑完** — `docs/isolation-audit-cn.md` H 节
+      - ⭐ **部署即撞到移植期的错误假设**:`NewQuotaConfigurationForAdmission(nil, nil)` ——
+        我曾记"只有 DRA 两个 gate 同时开才解引用,没测过",**该假设是错的**:
+        `DynamicResourceAllocation` 1.35 起 GA+LockToDefault、`DRAExtendedResource` **1.36 转 Beta 默认开**
+        ⇒ 组件**一启动就 CrashLoop**。修法:明确告诉配额配置 kubezoo 不服务 `resource.k8s.io`,而不是塞一个用不上的全集群 Pod informer
+      - [x] ⛔ **生效范围坐实**:每个租户 namespace 各拿**一份完整额度**。声明 cpu=4,
+        4 个系统 ns 即 16 core,租户自建 2 个后 **24 core(6 倍)**,随 namespace 数无限增长
+      - [x] ⛔ **objectSelector 绕过坐实并已修**:超额 Pod 打上 `app: kubezoo-cluster-resource-quota`
+        即**创建成功并落地上游**(经租户正常路径)。**修法:排除条件改为按 namespace** ——
+        namespace 不归租户控制。修后同一请求被拒,平台组件仍能自愈重建
+        ⇒ 正是 3.1 铁律的实例:**排除条件只能建立在租户无法控制的东西上**
+      - [ ] ⚠️ **并发超发:代码确认、行为未复现**。`UpdateQuotaStatus` 确是空实现
+        (`webhook.go:190` 直接 return nil),但并发 6×2core 打 4core 配额只落地 2 个。
+        **不写成已坐实**,需更高并发/更小时窗
+      - [x] **单点坐实**:`replicas: 1` + `failurePolicy: Fail` + 无 PDB
+      - ⚠️ **方法学(踩了三次)**:配额测试对环境状态极敏感,连续三次拿到无效对照
+        (脚本参数错位没加上标签 / 前一步删过 Pod 导致用量归零 / `nodeName` 造假让 Pod 被 GC)。
+        **每次都"看起来得出了结论"。先确认起点状态,再做单一变量对照。**
 - [ ] watch(含 `resourceVersion=0` 全量)、label/field selector、`kubectl auth can-i`、
       SA token 换跨租户权限、discovery/OpenAPI 泄露
 - [ ] `Pod.spec.runtimeClassName` / `Ingress.spec.ingressClassName` 未改写 ⇒ **悬空引用**(读码,未实测)

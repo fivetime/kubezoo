@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apiserver/pkg/admission/plugin/resourcequota"
 	"k8s.io/apiserver/pkg/authentication/user"
 	quotageneric "k8s.io/apiserver/pkg/quota/v1/generic"
+	master "k8s.io/kubernetes/pkg/controlplane"
 	quotainstall "k8s.io/kubernetes/pkg/quota/v1/install"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -57,13 +59,26 @@ func NewAdmission(ctx context.Context, client client.Client) (*Admission, error)
 	accessor := &quotaAccessor{client: client}
 
 	// NewQuotaConfigurationForAdmission grew an informer factory and an
-	// APIResourceConfigSource. Both are safe to leave nil here: the factory is
-	// only dereferenced by the DRA evaluators, and only when both
-	// DynamicResourceAllocation and DRAExtendedResource are on, and a nil
-	// resource config means every resource is enabled. Upstream likewise passes
-	// a nil lister func on the admission path, because admission measures the
-	// incoming object rather than recomputing usage from a lister.
-	quotaConfiguration, err := quotainstall.NewQuotaConfigurationForAdmission(nil, nil)
+	// APIResourceConfigSource in 1.36.
+	//
+	// The factory was left nil here on the assumption that only the DRA
+	// evaluators dereference it, and only with both DynamicResourceAllocation
+	// and DRAExtendedResource enabled. The first half was right and the second
+	// was not: DynamicResourceAllocation is GA and locked on since 1.35, and
+	// DRAExtendedResource went beta and on by default in 1.36. The branch was
+	// therefore always taken, and the component crashed on startup the first
+	// time it was deployed.
+	//
+	// Rather than feed it a cluster-wide pod informer it has no other use for,
+	// tell it what kubezoo actually serves. Tenants have no access to
+	// resource.k8s.io at all -- apigroups.go does not expose it -- so there is
+	// no DRA usage to charge anyone for, and disabling it skips the branch.
+	//
+	// The nil lister func is deliberate and matches upstream: admission measures
+	// the incoming object rather than recomputing usage from a lister.
+	resourceConfig := master.DefaultAPIResourceConfigSource()
+	resourceConfig.DisableVersions(resourcev1.SchemeGroupVersion)
+	quotaConfiguration, err := quotainstall.NewQuotaConfigurationForAdmission(nil, resourceConfig)
 	if err != nil {
 		return nil, err
 	}
