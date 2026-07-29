@@ -147,7 +147,14 @@
         新增/修改校验类脚本时,**必须做一次负向对照**(故意弄脏,确认它会红)
 - [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
       —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
-- [ ] 合并回 main
+- [x] 合并回 main — `ec374da`(`--no-ff`,本地已合,**未推送**)
+      - 三个 `WIP:` commit 压成一个诚实的 `Move the build onto Kubernetes 1.36.3`
+        (它单独仍编不过,提交信息里写明了)
+      - ⚠️ **合并前抓到:`58959f1` 误提交了 75MB 构建产物 `clusterresourcequota`**,
+        且一路留到了分支顶端。已剔除,并把 `/kubezoo`、`/clusterresourcequota` 加进 `.gitignore`
+        (`hack/build.sh` 会在仓库根目录落这两个文件)
+      - 重整历史的保障:**新旧分支最终树逐字节比对**,除 `.gitignore` 与被删二进制外零差异
+      - 合并后在 main 上重跑:build / `make test` / `make verify-codegen` / 二进制启动,全绿
 
 > ⚠️ **方法学**,两条都在这次移植里应验了:
 > 1. **"还剩 N 个错误"不是可靠进度指标** —— 每修好一处就暴露下一处(server.go 曾
