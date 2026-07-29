@@ -607,6 +607,55 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
 
 ---
 
+## 10.5 `-A` 全量 LIST:现状、过渡方案、以及结合 KubeBrain 的目标解
+
+### 现状(实测)
+
+租户敲 `kubectl get pods -A` 时,kubezoo 走的是**全集群 LIST → 内存里按租户前缀丢弃**
+(`tenantProxy.getClient` 在无 namespace 时用集群级客户端,再由 `FilterUnstructuredList` 过滤)。
+代价与**全体租户的数据量**成正比 —— 100 租户 × 1000 Pod,任何一个租户随手一敲就是 10 万对象的读取。
+既是规模墙,也是**任何租户都能发的 DoS**。
+
+⚠️ 顺带说明:#87 的 per-namespace RBAC 落地后,`-A` 对租户**已经直接 Forbidden**,
+所以这条路径当前打不通。但它只是被权限挡住了,**问题本身没解决**,而且 `-A` 这个常用能力也没了。
+
+### 过渡方案:逐 namespace scoped LIST 合并
+
+解决**唯一不可接受**的那条:跨租户放大与 DoS 消失,代价降到与该租户自身数据成正比。
+
+但要带着三个明确决定去做,否则是换个地方踩:
+
+1. **请求放大** —— 一个租户请求变 N 个上游请求(N = 该租户 namespace 数)。
+   ⇒ **租户 namespace 数必须有配额约束**,否则请求放大本身成为新的 DoS
+2. **分页** —— ⚠️ 现有实现**根本没有 continue token 处理**(全量读回再过滤)。
+   合并之后 N 个游标要合成一个连贯 token,否则 kubezoo 必须把租户全部数据 materialize 在内存里。
+   ⇒ 要么实现复合 token,要么**明确声明 `-A` 不支持分页**并对结果规模设硬上限(超限报错,不是 OOM)
+3. **resourceVersion** —— 合并列表没有单一 RV,N 次 LIST 取自不同 revision,不是快照。
+   而 `kubectl get -w -A` 与 informer 都要拿 LIST 的 RV 去起 watch。
+   ⇒ 返回 N 个结果中的**最小 RV**(宁可重放也不漏),并写明 `-A` 的 watch 语义是最终一致而非快照
+
+### ⭐ 目标解:结合 KubeBrain 做到 O(租户数据)
+
+**因为 kubezoo 给 namespace 加了租户前缀,一个租户某类资源的全部对象在存储层本来就是
+一段连续的 key 区间** —— apiserver 的 `NamespaceKeyRootFunc` 就是
+`prefix + "/" + namespace` 拼前缀,所以 `/registry/pods/<tid>-` 是一个天然的连续区间。
+
+一次前缀扫描即可:**O(租户数据)、单一 RV、分页天然正确** —— 上面三个问题一次全消。
+
+⚠️ **但缺口不在存储层,而在 apiserver。** KubeBrain 侧的能力是现成的(前缀区间扫描、RangeStream),
+真正缺的是**没有办法把"按 namespace 前缀 LIST"这个意图从 API 表达下去**:
+k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 对 `metadata.namespace`
+也只能精确匹配。kubezoo 打的是真 apiserver,绕不过去。
+
+因此目标解需要一个 **apiserver 侧的改动**(我们本来就维护 k8s fork):
+让 LIST 能表达 namespace 前缀,由 store 层把它算成 `/registry/<res>/<tid>-` 这一段区间下发。
+这与 store 现有的行为是同构的 —— **它本来就是在算前缀区间,只是现在只会用完整 namespace 去算**。
+
+⛔ **不要走的路**:让 kubezoo 直接读 KubeBrain 绕过 apiserver。那会跳过鉴权、准入与版本转换,
+并要求 kubezoo 复刻 apiserver 的编解码 —— 收益不抵风险。
+
+> 关联:#84(kubezoo × KubeBrain 键空间形态)、TODO 1.2。
+
 ## 11. 前置工作与建议顺序
 
 | 序 | 工作 | 理由 |
