@@ -763,6 +763,19 @@ return t.Effect == v1.TaintEffectNoExecute
 (`nodeSelector` / `nodeAffinity` 反而**仍然有效** —— kubelet 的 `generalFilter`
 里有 `PodMatchNodeSelector`。)
 
+### ⭐ 兜住这条路的是注入的 `nodeSelector`,不是污点
+
+节点池方案(架构 §8.2.2)里平台会给租户 Pod **注入**该租户池的 `nodeSelector`。
+它在建 Pod 时就焊进 spec(Pod spec 建后基本不可变,租户事后拆不掉),
+而 kubelet **会**核对它 ⇒ 租户 A 把 Pod bind 到租户 B 的节点上,**会被 kubelet 拒**。
+
+这跟直觉是反的:平时污点是"硬"机制、选择器是"软"的;在 binding 这条路上正好倒过来。
+⇒ **注入的 `nodeSelector` 是承重件**,而且它是否承重取决于
+**那个标签只有该租户的节点才有** —— 用一个所有池子共有的标签就等于没兜住。
+
+⚠️ 所以多节点 lab 要测的**决定性一条**是:平台注入 nodeSelector 之后,
+跨租户的 `pods/binding` 是不是真被 kubelet 拒。
+
 ### 还不知道的(这条能不能成立全看这些)
 
 - **kubezoo 到底代不代理 `pods/binding`?** Binding 是"子资源 + 请求体是另一个 kind"

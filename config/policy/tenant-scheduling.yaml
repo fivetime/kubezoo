@@ -36,6 +36,13 @@ spec:
                 operator: NotEquals
                 value: ""
 
+    # ⚠️⚠️ 这条是**节点池方案落地前的过渡**。定案的设计是"注入替换"而不是"拒绝":
+    # 每租户有自己的 worker 节点池(节点带污点),平台注入该池的 nodeSelector + toleration,
+    # 整体覆盖租户写的。届时**本条必须同时改掉** —— 准入链是 mutating 全跑完再跑 validating,
+    # 注入的 toleration 会被本条白名单拒掉。见架构 §8.2.2。
+    # 改成注入时还有两个坑:必须整体覆盖不能 merge;覆盖会连带删掉下面白名单里那两条,
+    # 平台注入的那份得带上它们,否则节点 NotReady 时 Pod 立刻被驱逐而不是等 300s。
+    #
     # ⚠️ 白名单里那两个不是可选的:DefaultTolerationSeconds 是**进程内**的 mutating
     # 插件,在 webhook 之前就给每个 Pod 加上 not-ready / unreachable 两条 NoExecute
     # 容忍。一刀切"不许有 tolerations"会拒掉每一个 Pod —— 实测过。

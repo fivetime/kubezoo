@@ -303,9 +303,16 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             即使全局默认已是 `restricted`。**又是"判定条件建在租户可控输入上"那个形状。**
             修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
             并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
-      - [ ] P1 **落点控制:注入 + 拒绝**(形态已改,不再是"白名单",见架构 §8.2.2)
-            - 平台注入租户该去的池子:`nodeSelector` + 对应 `toleration` + `topologySpreadConstraints`
-            - 同时**拒掉租户自写**的 `nodeSelector` / `affinity`
+      - [ ] P1 **落点控制:每租户节点池 + 注入替换**(设计已定,见架构 §8.2.2)
+            - 每租户有自己的 worker 节点池,**节点带污点**防普通应用调度过来
+            - 平台**替换**租户 Pod 的落点字段:注入该池 `nodeSelector` + `toleration`
+              + `topologySpreadConstraints`(**不是拒绝**)
+            - ⭐⭐ **注入的 `nodeSelector` 是承重件**:binding 那条路上 kubelet 不检污点
+              但**检 nodeSelector** ⇒ 它是跨租户 binding 的唯一拦阻。
+              **前提是那个标签只有该租户节点才有**,用共有标签等于没兜住
+            - ⚠️ 三坑:必须整体覆盖不能 merge;覆盖会删掉 `not-ready`/`unreachable`
+              两条(注入的那份要带上,否则驱逐从 300s 变成立刻);
+              **注入上线时现有的 `restrict-tolerations` deny 必须同时改掉**(会拒掉注入结果)
             - ⛔ **打散不要用 required podAntiAffinity**:每评估一个节点扫一遍已有 Pod,
               是调度吞吐杀手,按北极星(规模优先)大集群上会先撞这堵墙 ⇒ 用 `topologySpreadConstraints`
             - ⛔ **跨租户共驻 affinity 表达不了**(笛卡尔积)⇒ 只能靠节点池:污点 + 注入

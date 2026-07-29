@@ -502,35 +502,61 @@ PSA 的判定输入是 namespace 标签 `pod-security.kubernetes.io/enforce`,而
 并把 PSA 标签**钉回** `restricted`,让原生 PSA 降级为**兜底**
 —— 它在 apiserver 进程内,不走 webhook、没有单点。详见审计 §N。
 
-#### 8.2.2 ⭐ 落点控制:注入 + 拒绝,而不是白名单
+#### 8.2.2 ⭐ 落点控制:每租户节点池 + 注入替换
+
+**设计已定**(用户确认):**每个租户有自己的 worker 节点池,节点本身带污点**,
+防止普通应用调度过来。平台**替换**租户 Pod 的落点字段 ——
+注入该租户池的 `nodeSelector` + 对应 `toleration`,**而不是拒绝**租户写的。
 
 **先纠正一个直觉**:"租户看不到 Node,所以他设 `nodeSelector`/`tolerations` 无效" —— **不成立**。
 评估这些字段的是**调度器**,它在上游、用自己的凭据读真实 Node,**不查租户能看到什么**;
 可见性是 kubezoo 在**读路径**上做的,调度发生在写入之后,两条路不相交。
 代码侧已确认:`pkg/` 里**一处都没碰过** `nodeSelector` / `tolerations` / `affinity` /
-`topologySpreadConstraints`,原样透传。
+`topologySpreadConstraints`,原样透传。而且 `nodeSelector` **不需要知道节点名** ——
+它匹配标签,标准标签全世界一样(`node-role.kubernetes.io/control-plane`、
+`kubernetes.io/hostname`,⭐ 而节点名正从 `spec.nodeName` 漏给租户,见 §8.2.3)。
 
-而且 `nodeSelector` **不需要知道节点名** —— 它匹配标签,而标准标签全世界一样:
-`node-role.kubernetes.io/control-plane`、`topology.kubernetes.io/zone`、
-`kubernetes.io/hostname`(⭐ 而节点名正从 `spec.nodeName` 漏给租户,见 §8.2.3)。
+##### ⭐⭐ 注入的 `nodeSelector` 是承重件,不是顺手做的事
 
-**三条结论:**
+在 `pods/binding` 那条路上(§Q),污点和选择器的强弱**是反的**:
 
-**① 形态是"注入 + 拒绝",不是白名单。** 平台直接给租户 Pod 注入它该去的池子
-(`nodeSelector` + 对应 `toleration`),同时**拒掉租户自己写的**。
-白名单要枚举允许的标签键值,复杂且容易漏;注入+拒绝只有一条语义。
+| | 调度器 | kubelet 准入 |
+|---|---|---|
+| `NoSchedule` 污点 | 检 | **不检** —— `pkg/kubelet/lifecycle/predicate.go:448` 写死"only interested in the NoExecute taint" |
+| `nodeSelector` / `nodeAffinity` | 检 | **检** —— `generalFilter` 里的 `PodMatchNodeSelector` |
 
-**② 打散用 `topologySpreadConstraints`,不要用 required 反亲和。**
+直接 binding 跳过调度器 ⇒ **污点失效**。但注入的 `nodeSelector` 在建 Pod 时就焊进
+spec(Pod spec 建后基本不可变,租户事后拆不掉),kubelet 会拿它核对节点标签 ⇒
+**租户 A 把自己的 Pod bind 到租户 B 的节点上,会被 kubelet 拒**。
+
+⇒ **它是否承重,取决于那个标签只有该租户的节点才有。**
+用一个所有池子共有的标签(如 `node-role.kubernetes.io/worker`)就等于没兜住。
+
+##### ⚠️ 两个实现坑
+
+**① 必须整体覆盖 `spec.tolerations`,不能 merge。**
+merge 的话租户自己写的控制面容忍会活下来。
+
+**② 覆盖会连带删掉 `not-ready` / `unreachable` 两条。**
+`DefaultTolerationSeconds` 是**进程内** mutating 插件,在 webhook 之前就加了这两条
+(实测确认,§O)。整体覆盖把它们删掉的后果是:节点 NotReady 时 Pod **立刻**被驱逐,
+而不是等默认的 300s。**平台注入的那份必须把这两条带上**,否则等于悄悄改了全体租户的驱逐行为。
+
+**③ 注入(mutate)和现有的 deny 规则会打架。**
+准入链是所有 mutating 先跑、再跑 validating。平台注入了租户池的 toleration 之后,
+`config/policy/tenant-scheduling.yaml` 里的 `restrict-tolerations`(白名单 validate)
+会**把注入的结果拒掉**。上线注入时那条 deny 必须同时改掉 —— 它是**节点池方案落地前的过渡**。
+
+##### 打散与跨租户共驻
+
+**打散用 `topologySpreadConstraints`,不要用 required 反亲和。**
 `requiredDuringScheduling` 的 podAntiAffinity 每评估一个节点都要扫一遍已有 Pod,
 是公认的调度吞吐杀手 —— 按本项目的北极星(规模优先),大集群上会先撞这堵墙。
 
-**③ 跨租户共驻,affinity 根本表达不了。** 反亲和是"我的 Pod 互相散开";
-要"我的 Pod 别和别的租户挤一台",得让每个租户对所有其他租户做反亲和,是笛卡尔积。
-**能扩展的答案只有节点池** —— 污点 + 注入的 selector/toleration,与 ① 是同一套机制。
+**跨租户共驻 affinity 根本表达不了**(要让每个租户对所有其他租户做反亲和,是笛卡尔积)。
+每租户节点池就是这个问题的答案,而它跟上面是同一套机制。
 
 ⚠️ **打污点、划分节点标签属于平台基础设施**,既不是 kubezoo 也不是策略层。
-平台**不打污点**时租户的 `tolerations` 确实是空转 —— 但 B1 有 kata 专属节点池,
-一有污点,租户的容忍就是那道墙的**唯一绕法**,所以那条 deny 是承重的。
 
 #### 8.2.3 ⚠️ 节点名从 `spec.nodeName` 漏给租户(kubezoo 侧,未修)
 
