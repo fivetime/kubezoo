@@ -67,11 +67,27 @@ message TenantSpec {
   optional int32 id = 1;
 
   optional TenantQuota quota = 2;
+
+  // Suspension stops a tenant from operating without touching what it is
+  // running. Absent means the tenant is operating normally.
+  // +optional
+  optional TenantSuspension suspension = 3;
 }
 
 // TenantStatus represents the current state of a rule.
 message TenantStatus {
   // Current state of tenant.
   optional bool online = 1;
+}
+
+// TenantSuspension describes a suspension in force.
+message TenantSuspension {
+  // Mode is how far the suspension goes.
+  optional string mode = 1;
+
+  // Reason is shown to the tenant on every refused request, so that it reads
+  // as a decision rather than as a malfunction.
+  // +optional
+  optional string reason = 2;
 }
 

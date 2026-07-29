@@ -42,6 +42,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantQuota":               schema_pkg_apis_tenant_v1alpha1_TenantQuota(ref),
 		"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantSpec":                schema_pkg_apis_tenant_v1alpha1_TenantSpec(ref),
 		"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantStatus":              schema_pkg_apis_tenant_v1alpha1_TenantStatus(ref),
+		"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantSuspension":          schema_pkg_apis_tenant_v1alpha1_TenantSuspension(ref),
 		resource.Quantity{}.OpenAPIModelName():                                            schema_apimachinery_pkg_api_resource_Quantity(ref),
 		v1.APIGroup{}.OpenAPIModelName():                                                  schema_pkg_apis_meta_v1_APIGroup(ref),
 		v1.APIGroupList{}.OpenAPIModelName():                                              schema_pkg_apis_meta_v1_APIGroupList(ref),
@@ -468,12 +469,18 @@ func schema_pkg_apis_tenant_v1alpha1_TenantSpec(ref common.ReferenceCallback) co
 							Ref:     ref("github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantQuota"),
 						},
 					},
+					"suspension": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Suspension stops a tenant from operating without touching what it is running. Absent means the tenant is operating normally.",
+							Ref:         ref("github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantSuspension"),
+						},
+					},
 				},
 				Required: []string{"id", "quota"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantQuota"},
+			"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantQuota", "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1.TenantSuspension"},
 	}
 }
 
@@ -492,6 +499,35 @@ func schema_pkg_apis_tenant_v1alpha1_TenantStatus(ref common.ReferenceCallback) 
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_tenant_v1alpha1_TenantSuspension(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "TenantSuspension describes a suspension in force.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Mode is how far the suspension goes.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason is shown to the tenant on every refused request, so that it reads as a decision rather than as a malfunction.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"mode"},
 			},
 		},
 	}

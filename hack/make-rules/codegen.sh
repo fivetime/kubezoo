@@ -53,7 +53,7 @@ VERIFY=false
 [[ "${1:-}" == "--verify" ]] && VERIFY=true
 
 # Targets to run, in order. Override with TARGETS="deepcopy openapi".
-TARGETS="${TARGETS:-deepcopy defaulter register openapi openapi-served client}"
+TARGETS="${TARGETS:-deepcopy defaulter register protobuf openapi openapi-served client}"
 
 # ---------------------------------------------------------------------------
 # The APIs this repository owns.
@@ -187,6 +187,60 @@ run_quiet() {
   return "${status}"
 }
 
+# Protobuf marshallers for the APIs this repository owns.
+#
+# These matter more than their obscurity suggests. KubeZoo stores its own API
+# objects with protobuf as the media type (see options.go), and the generated
+# marshaller only knows the fields it was generated from. A field added to the
+# Go type and not regenerated here is accepted by the API server, reported as
+# created, and then silently absent when read back -- verified by round-tripping
+# the type through its own Marshal/Unmarshal, which drops it without an error.
+#
+# This target did not exist. deepcopy, openapi and the clients were all
+# regenerated and the protobuf was not, so the tree looked freshly generated
+# while the one file that decides what is persisted was stale.
+run_protobuf() {
+  install_gen go-to-protobuf k8s.io/code-generator/cmd/go-to-protobuf k8s.io/code-generator
+  install_gen protoc-gen-gogo k8s.io/code-generator/cmd/go-to-protobuf/protoc-gen-gogo k8s.io/code-generator
+  # go-to-protobuf shells out to goimports to tidy what it emits.
+  install_gen goimports golang.org/x/tools/cmd/goimports golang.org/x/tools
+
+  local packages=""
+  for api in "${OWNED_APIS[@]}"; do
+    packages+="${packages:+,}${api}"
+  done
+
+  # go-to-protobuf resolves packages as directories below its output root, in
+  # the old GOPATH shape, and rewrites the .go files in place. So it gets a
+  # scratch root with the module path symlinked back at the work tree: it reads
+  # and writes through the link, and the edits land in the tree being generated.
+  # protoc finds protoc-gen-gogo on PATH.
+  local root
+  root="$(mktemp -d)"
+  mkdir -p "${root}/$(dirname "${MODULE}")"
+  ln -s "${WORK_ROOT}" "${root}/${MODULE}"
+
+  # protoc resolves the imported .proto files by path too, so the apimachinery
+  # modules have to sit in the same tree. They are only read: the leading "-"
+  # in --apimachinery-packages marks them as imported rather than generated.
+  local dep dir
+  mkdir -p "${root}/k8s.io"
+  mkdir -p "${root}/github.com/gogo"
+  for dep in k8s.io/apimachinery k8s.io/api github.com/gogo/protobuf; do
+    dir="$(go list -m -f '{{.Dir}}' "${dep}" 2>/dev/null)" || continue
+    [[ -n "${dir}" ]] && ln -s "${dir}" "${root}/${dep}"
+  done
+
+  PATH="${BIN_DIR}:${PATH}" run_quiet "${BIN_DIR}/go-to-protobuf" \
+    --go-header-file "${HEADER}" \
+    --output-dir "${root}" \
+    --packages "${packages}" \
+    --apimachinery-packages '-k8s.io/apimachinery/pkg/util/intstr,-k8s.io/apimachinery/pkg/api/resource,-k8s.io/apimachinery/pkg/runtime/schema,-k8s.io/apimachinery/pkg/runtime,-k8s.io/apimachinery/pkg/apis/meta/v1,-k8s.io/api/core/v1'
+  local status=$?
+  rm -rf "${root}"
+  return "${status}"
+}
+
 run_deepcopy() {
   install_gen deepcopy-gen k8s.io/code-generator/cmd/deepcopy-gen k8s.io/code-generator
   run_quiet "${BIN_DIR}/deepcopy-gen" \
@@ -289,6 +343,7 @@ for target in ${TARGETS}; do
     deepcopy)       run_deepcopy ;;
     defaulter)      run_defaulter ;;
     register)       run_register ;;
+    protobuf)       run_protobuf ;;
     openapi)        run_openapi ;;
     openapi-served) run_openapi_served ;;
     client)         run_client ;;

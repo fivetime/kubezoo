@@ -63,6 +63,35 @@ type TenantList struct {
 type TenantSpec struct {
 	ID    int32       `json:"id" protobuf:"varint,1,name=id"`
 	Quota TenantQuota `json:"quota" protobuf:"bytes,2,name=quota"`
+	// Suspension stops a tenant from operating without touching what it is
+	// running. Absent means the tenant is operating normally.
+	// +optional
+	Suspension *TenantSuspension `json:"suspension,omitempty" protobuf:"bytes,3,opt,name=suspension"`
+}
+
+// TenantSuspensionMode selects how far a suspension goes.
+type TenantSuspensionMode string
+
+const (
+	// SuspensionReadOnly leaves the tenant able to see its objects but not to
+	// change them. It is the billing case: the point is to prompt payment
+	// without manufacturing an incident, and a tenant that cannot see its own
+	// objects will reasonably conclude they are gone.
+	SuspensionReadOnly TenantSuspensionMode = "ReadOnly"
+	// SuspensionRevoked stops the tenant operating at all, while its workloads
+	// keep running exactly as they are. It is the investigation case: the
+	// tenant must not touch anything, and the evidence must not move.
+	SuspensionRevoked TenantSuspensionMode = "Revoked"
+)
+
+// TenantSuspension describes a suspension in force.
+type TenantSuspension struct {
+	// Mode is how far the suspension goes.
+	Mode TenantSuspensionMode `json:"mode" protobuf:"bytes,1,name=mode"`
+	// Reason is shown to the tenant on every refused request, so that it reads
+	// as a decision rather than as a malfunction.
+	// +optional
+	Reason string `json:"reason,omitempty" protobuf:"bytes,2,opt,name=reason"`
 }
 
 type TenantQuota struct {

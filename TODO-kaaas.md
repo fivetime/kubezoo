@@ -413,6 +413,49 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
 
 ---
 
+### 1.4 ⛔ codegen 漏了 protobuf —— 已修(#90 的前置)
+
+做 #90 要给 Tenant API 加一个字段,加完发现**字段静默不落盘**:
+
+```
+kubectl apply  → tenant.tenant.kubezoo.io/444444 created     # 成功
+kubectl get    → {"id":444444,"quota":{...}}                 # suspension 不见了
+```
+
+**同一个对象里就有铁证**:`last-applied-configuration` 注解记着客户端**发过**
+`suspension`,而存下来的 `spec` 没有。丢在服务端,不是客户端也不是存储层。
+
+⭐ 根因:kubezoo 自己的对象**以 protobuf 为存储媒介**
+(`options.go` 明写 `DefaultStorageMediaType = application/vnd.kubernetes.protobuf`),
+而 `hack/make-rules/codegen.sh` 的目标是 `deepcopy defaulter register openapi openapi-served client`
+—— **没有 protobuf**。`generated.pb.go` 是签入的,**仓库没有任何办法重新生成它**。
+于是 deepcopy / openapi / client 全都刷新了,树看着是新生成的,而**唯一决定什么能落盘的那个文件是陈旧的**。
+
+⚠️ **我中间判错过一次,记下来**:先用 `--storage-media-type=application/json` 做 A/B,
+字段**仍然丢**,我据此排除了 protobuf。后来把类型单独拿出来跑
+`Marshal`→`Unmarshal` 往返,**字段确实被丢掉且不报错** —— protobuf 就是原因之一。
+那次 JSON A/B 为什么也丢,我**没有查清楚**,不写成结论。
+**孤立复现 > 部署态 A/B**:部署态变量太多,一次没生效就会得出反向结论。
+
+修法:给 codegen.sh 加 `protobuf` 目标(`go-to-protobuf`)。四个坑依次踩过:
+GOPATH 形状的输出树(用软链接把模块路径指回工作树)、
+apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
+以及 **`k8s.io/api/core/v1` 必须标成 import-only**,否则 quota 的 `.proto`
+会把 core/v1 的消息**本地重新声明一遍**(编译直接报 undefined)。
+
+⚠️ 重新生成后 quota 的 `generated.pb.go` **少了 172 行**
+(`ProtoMessage()` / `Descriptor()` / `XXX_*` 全没了)。**不是回归** ——
+核对了上游 k8s 1.36 自己的 `k8s.io/api/core/v1/generated.pb.go`,同样一个都没有;
+签入的那份是 1.24 时代生成器的产物。`.proto` 一字未变 ⇒ 线格式不变。
+
+- [x] `codegen.sh` 加 protobuf 目标;`make verify-codegen` 现在也覆盖它
+- [x] 加**永久守卫** `pkg/apis/tenant/v1alpha1/protobuf_test.go`:
+      把填满的对象过一遍自己的 marshaller,字段掉了就报红(已验证:换回旧 pb.go 立刻红)
+- [x] Tenant API 加 `spec.suspension`(`mode: ReadOnly|Revoked` + `reason`),**已能正确落盘**
+- [ ] ⚠️ **目前设了没有任何效果** —— 执行逻辑还没写,见下
+
+---
+
 ## 阶段 3:平台层
 
 ### 3.1 Kyverno(选型已定)
