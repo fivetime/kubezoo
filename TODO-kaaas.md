@@ -469,11 +469,20 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       控制器却把上游 RBAC 留在**完整 admin**。一个笔误就能造出"半停机"。
       修:① `Validate`/`ValidateUpdate` 拒绝非法 mode(实测 `Revoked` 现在被拒并列出合法值);
       ② 两层的运行期兜底统一为**认不出就按最严处理**(存量对象用),而不是最松
-- [ ] ⛔ **Frozen 不覆盖租户自建的 RoleBinding —— 实测坐实,未实现中和**:
-      租户把 `admin` 绑给自己的 SA,冻结后该 SA 仍 `can-i delete pods = yes`,
-      **能删证据**。欠费场景这是对的,取证场景是洞。
-      中和需要连带"可还原",没做;在做出来之前控制器**每次 Frozen 都打警告并列出具体绑定**。
-      ⚠️ **现阶段 Frozen 不能单独当取证冻结用**
+- [x] **Frozen 够不到租户自建的 RoleBinding —— 有意不做**(决定已下)。
+      实测坐实:租户把 `admin` 绑给自己的 SA,冻结后该 SA 仍 `can-i delete pods = yes`。
+      不补的理由:**控制面冻结从来管不到容器里已在跑的代码** —— 租户可以预埋 dead-man switch,
+      换 VM/kata 也堵不住;而 k8s 对象层的那半,正解是**冻结时做快照**而不是把冻结做严
+      (有快照之后,SA 再删本身就是篡改证据)。控制器仍每次列出这些绑定,
+      但那是**陈述边界供运维决策**,不是待办
+- [ ] **冻结时快照对象清单**(取证真正要的东西,也是证据链的一部分)—— 未做
+- [ ] **节点级硬冻:`cgroup freezer`** —— 与"不动 Pod"**不冲突**:
+      cgroup v2 写 `cgroup.freeze=1`(v1 是 `freezer.state=FROZEN`)冻的是**内核调度**、不发信号,
+      进程不退出、内存上下文完整,解冻即恢复(CRIU/checkpoint 同一套地基)。
+      与 §9.5 的 `Frozen`(冻租户的操作能力)是不同层的两把闸,可叠加
+      - ⚠️ **坑(未实测)**:冻住后 kubelet liveness 探针会失败 → 到 `failureThreshold` **重启容器**,
+        恰好毁掉要保的现场。**必须先摘探针/改重启策略再冻**
+      - ⚠️ 节点级带外操作,kubezoo 碰不到 cgroup,需节点侧特权组件;并到 kata 节点池设计里
 
 ---
 

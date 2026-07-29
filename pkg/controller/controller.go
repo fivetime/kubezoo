@@ -514,9 +514,15 @@ func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.Ten
 // because the tenant's own automation can still change or delete the evidence --
 // so a freeze is not on its own a forensic hold.
 //
-// Closing it means neutralising the tenant's bindings and being able to put
-// them back, which is not implemented. Until it is, the least this can do is
-// refuse to be quiet about it and name them.
+// This is deliberately not closed. Freezing a tenant's control plane never
+// reached code already running inside its containers, and a tenant that intends
+// to destroy evidence can arrange for that from inside -- no amount of RBAC
+// withdrawal, and no stronger sandbox either, prevents it. What preserves the
+// object state is a snapshot taken when the freeze is applied; after that, a
+// later deletion by the tenant's own automation is itself recorded.
+//
+// So this reports rather than fixes: an operator deciding how to handle a
+// particular tenant needs to know which bindings are still live.
 func (tc *TenantController) reportBindingsFreezingDoesNotReach(tenantId string) {
 	namespaces, err := tc.upstreamCoreClient.Namespaces().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantId}).String(),
@@ -543,9 +549,11 @@ func (tc *TenantController) reportBindingsFreezingDoesNotReach(tenantId string) 
 	if len(remaining) == 0 {
 		return
 	}
-	klog.Warningf("tenant %s is frozen, but %d role bindings it created are still in force and "+
-		"still grant its service accounts: %v -- a controller the tenant deployed can keep "+
-		"changing objects, including deleting evidence. Neutralising these is not implemented",
+	klog.Warningf("tenant %s is frozen; %d role bindings it created are still in force and still "+
+		"grant its service accounts: %v. A freeze withdraws the tenant's own access, not the "+
+		"permissions its workloads hold, so anything it deployed keeps running with them. "+
+		"Snapshot the object state if it needs preserving; to stop the workloads themselves "+
+		"without killing them, freeze their cgroups on the node",
 		tenantId, len(remaining), remaining)
 }
 

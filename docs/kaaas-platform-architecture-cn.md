@@ -663,29 +663,51 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
   `serviceaccounts/token`(签发可用凭据)
 - **绕过 kubezoo 直连上游同样被拒** —— 第二层是真的在拦
 
-### ⛔ 明确未实现:Frozen 不覆盖租户自建的 RoleBinding
+### 边界:Frozen 够不到租户自建的 RoleBinding —— **有意不做**
 
-前面 §9.5 早就点了这条,现在**实测坐实**:租户建一个 RoleBinding 把 `admin` 绑给自己的 SA,
-冻结之后 ——
+**实测坐实**:租户建一个 RoleBinding 把 `admin` 绑给自己的 SA,冻结之后 ——
 
 ```
 kubectl auth can-i delete pods -n 111111-default \
   --as=system:serviceaccount:111111-default:operator   → yes
 ```
 
-**租户部署的 operator 仍能改动、甚至删除证据。** 对欠费场景这是**正确的**
-(应用本来就该继续跑);对取证场景这是个**洞**。
+租户部署的 operator 仍能改动 k8s 对象。对欠费场景这是**正确的**(应用本来就该继续跑)。
+对取证场景,**决定是不补**,理由是补了也换不来想要的东西:
 
-中和这些绑定需要连带解决"可还原"(取证结束后要能恢复),没有实现。
-在实现之前,控制器**每次 Frozen 都会打警告并列出具体是哪些绑定**:
+- **控制面冻结从来管不到容器里已经在跑的代码。** 租户完全可以预埋 dead-man switch
+  (掉心跳就抹盘、定时清对象存储、拿自己的云凭据删备份)。把 API 全断掉,它照样执行。
+  换成 VM 甚至 kata 也一样 —— **只要代码在租户手里,这条路堵不住**
+- 要区分两类破坏:**容器内的**(补 RoleBinding 一点用没有)和 **k8s 对象层的**
+  (补了确实有用)。而后者的正解**不是把冻结做严,是冻结时做快照** ——
+  取证要的是"冻结那一刻的对象清单",不是指望活集群一直保持原样。
+  有了快照,之后 SA 再删**本身就是证据**(篡改行为有记录)
 
-```
-tenant 111111 is revoked, but 1 role bindings it created are still in force and still
-grant its service accounts: [111111-default/my-operator] -- ... Neutralising these is
-not implemented
-```
+所以补 RoleBinding 是在给一个不该承担这个职责的机制加码。控制器仍然**每次 Frozen 都列出
+这些绑定**,但那是**陈述边界供运维决策**,不是待办。
 
-⚠️ **所以目前 Frozen 不能单独当作取证冻结用**,要么先人工处理这些绑定,要么等这条补上。
+### ⭐ 真要硬冻:`cgroup freezer`,而且不与"不动 Pod"冲突
+
+我一度以为"停住容器内的活动"必然要杀/停 Pod,与取证要求冲突。**不成立** ——
+Linux 的 cgroup freezer 冻的是**内核调度**,不发信号:
+
+| | cgroup v2 | cgroup v1 |
+|---|---|---|
+| 入口 | 向 Pod 级 cgroup 的 `cgroup.freeze` 写 `1` | `freezer.state` 写 `FROZEN` |
+
+进程**不退出**、内存上下文**完整保留**,解冻即恢复 —— 这也正是 CRIU / kubelet
+容器 checkpoint 的地基。语义上这才是"冻结"这个词的字面意思,
+而 §9.5 的 `Frozen` 冻的是**租户的操作能力**,两者是不同层的两把闸,可以叠加使用。
+
+⚠️ **一个会毁掉现场的坑(读码与机制推断,未实测)**:容器一旦冻住,
+kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
+到 `failureThreshold` 就**重启容器** —— 恰好把要保的内存现场毁掉。
+所以顺序必须是**先摘掉探针(或改重启策略),再冻**。
+同理 readiness 失败会把 Pod 摘出 Service endpoints,这一条在取证场景通常是想要的。
+
+⚠️ 另外这是**节点级、带外**的操作:kubezoo 是控制面,碰不到 cgroup。
+需要节点侧的特权组件(DaemonSet 或平台自有的节点工具)来执行,
+落到 kata 节点池那一块设计时一并考虑。
 
 > 关联任务见 `TODO-kaaas.md`。
 
