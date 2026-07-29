@@ -90,8 +90,29 @@
       `AddCustomGlobalFlags` 去全局 flagset 找 `default-not-ready-toleration-seconds`,
       1.36 已把它挪进 `AdmissionOptions.AddFlags`,`globalflag.Register` 找不到就 panic。
       整个函数已过时,连同 `globalflags.go` 一起删掉
-- [ ] `apigroups.go`(1225 行)按 1.36 **全面核对**资源/版本清单
-      (目前只删了编译报错的 autoscaling v2beta1/v2beta2 与 PodSecurityPolicy)
+- [x] `apigroups.go` 按 1.36 **全面核对**资源/版本清单 — `3747fb7`。1183 → 935 行。
+      方法:envtest 起**真 1.36 apiserver** 导出 discovery 当基准,与表格机器比对(不靠记忆)
+      - **删掉 12 个陈旧 group-version**。其中 7 个(`extensions/v1beta1`、`policy/v1beta1`、
+        `batch/v1beta1`、`discovery/v1beta1`、`authorization/v1beta1`、`rbac/v1alpha1`、
+        `rbac/v1beta1`)1.36 apiserver **完全不认识**;另 5 个"还认识但默认关闭",且**已被改作
+        完全不同的资源** —— 显式 `--runtime-config` 打开后实测:
+        `admissionregistration/v1beta1` 给的是 mutatingadmissionpolicies(不是 webhookconfigurations)、
+        `coordination/v1beta1` 是 leasecandidates(不是 leases)、
+        `networking/v1beta1` 是 ipaddresses/servicecidrs(不是 ingresses)、
+        `authentication/v1beta1` 与 `certificates/v1beta1` **什么都不给**
+      - ⭐ **这些不是死代码,是活端点**:`NewRESTStorage` **忽略了传进来的
+        `APIResourceConfigSource`**,表里写什么就装什么,而 scheme 仍给这些版本优先级 ⇒
+        kubezoo 真的对外提供 `/apis/extensions/v1beta1/...`,转发到上游得 404。
+        副作用是 **`--runtime-config` 对所有被代理的 group 全部失效**。已改成按 config source 过滤
+      - 补两个 1.36 有而这边缺的:`pods/resize`、`persistentvolumeclaims/status`
+        (后者是纯遗漏 —— 其他 core 资源都有 status 子资源)
+      - **加了两个常驻守卫测试**(都在旧表上验证过会红,第一个抓 7 个、第二个抓全部 12 个):
+        声明的 GV 必须是 1.36 apiserver 认识的;声明的每个资源必须能活着穿过 resource-config 过滤
+      - ⚠️ **有意没加,需要产品决策而非移植决定**:上游启用但这边没有的
+        `storage.k8s.io/v1`(StorageClass!PVC 要引用它)、`scheduling.k8s.io/v1`、
+        `certificates.k8s.io/v1`、`resource.k8s.io/v1`(DRA);以及已暴露 group 内部的
+        `admissionregistration/v1` 策略对象、`networking/v1` 的 ipaddresses/servicecidrs
+        —— 后两类是**集群级配置,租户大概率不该碰**
 - [ ] `pkg/util/util.go` 的 `groupKindNamespaced` 表(60+ 条)按 1.36 更新
 - [ ] `make codegen` 重新生成 + `make verify-codegen` 通过
 - [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
