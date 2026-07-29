@@ -30,18 +30,24 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-      exclude:
-        # ⭐ 铁律:排除平台自己的 namespace,匹配其余全部。
-        # 不用正向选租户标签 —— 新租户 namespace 不依赖任何标签就已被覆盖。
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       mutate:
         patchesJson6902: |-
           - op: remove
@@ -59,16 +65,15 @@ spec:
         any:
           - resources:
               kinds: [Ingress]
-      exclude:
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       mutate:
         patchesJson6902: |-
           - op: remove
@@ -90,16 +95,15 @@ spec:
         any:
           - resources:
               kinds: [Deployment, StatefulSet, DaemonSet, ReplicaSet, ReplicationController, Job]
-      exclude:
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       mutate:
         patchesJson6902: |-
           - op: remove
@@ -113,16 +117,15 @@ spec:
         any:
           - resources:
               kinds: [CronJob]
-      exclude:
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       mutate:
         patchesJson6902: |-
           - op: remove
@@ -136,16 +139,15 @@ spec:
         any:
           - resources:
               kinds: [PodTemplate]
-      exclude:
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       mutate:
         patchesJson6902: |-
           - op: remove

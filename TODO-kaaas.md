@@ -211,6 +211,32 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       要先摘探针再冻(未实测)
 ---
 
+### 1.6 ⛔⛔ P0 未修:租户新建的 namespace 永远拿不到 RoleBinding
+
+**复现**(实测,lab 带 Kyverno 的完整形态):
+
+```
+租户 kubectl create ns team-a          → namespace 建出来了,带 kubezoo.io/tenant 标签
+上游 111111-team-a 的 RoleBinding      → 0,等 35 分钟仍是 0(resync 周期才 10 分钟)
+租户在该 ns 里做任何事                 → Forbidden(上游 RBAC 没有授权)
+```
+
+⇒ **租户自己建的 namespace 是永久不可用的。** 这是 #87 那套 per-namespace RBAC 的窟窿:
+权限按 namespace 下发,而新 namespace 的那一份从来没下发。
+
+**已经查清的部分**(用于接手):
+
+- **Create 路径是好的**:新建租户 222222,4 个系统 namespace 立刻都有 RoleBinding
+- **Update/收敛路径是死的**:
+  - 建 namespace → 控制器**一行日志都没有**(namespace informer 没投递,或事件没被处理)
+  - 直接 annotate 租户对象强制产生 Update → **同样没有反应**
+  - ⭐ **把一个本来正常的 namespace(`111111-team-a`)的 RoleBinding 删掉 → 不会被补回来**
+    ⇒ 所以现存那些 RoleBinding 是**租户创建时留下的遗产**,不是持续收敛的结果
+- 排除项:namespace 都是 `Active`、无 `deletionTimestamp`、标签齐全;控制器 worker 活着
+- ⚠️ **根因未定位,不要照着猜测去改**。一个待验的方向:`queue.Add(Event{tenantId, Update})`
+  用结构体做 key,若某个 `Event{111111,Update}` 陷入失败重试,后续同 key 的 Update 会
+  **全部去重并进同一个失败项** —— 与"Create 正常、Update 全死"的现象吻合,但**没有证据**
+
 ## 阶段 2:隔离正确性审计(#82)✅ 主体完成
 
 > ⭐ **报告是 [`docs/isolation-audit-cn.md`](docs/isolation-audit-cn.md)** —— 逐条 findings、

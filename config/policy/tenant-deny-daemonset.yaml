@@ -19,18 +19,15 @@ spec:
         any:
           - resources:
               kinds: [DaemonSet]
-      exclude:
-        # ⭐ 同一条铁律:排除平台自己的 namespace。
-        # 平台自己的 DaemonSet(CNI、日志采集等)必须继续能建。
-        any:
-          - resources:
-              namespaces:
-                - kube-system
-                - kube-public
-                - kube-node-lease
-                - default
-                - kyverno
-                - local-path-storage
+              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
+              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
+              # namespace 的排除表**:那样平台以后新增一个组件 namespace
+              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
+              # Pod 的 runtimeClassName 被剥掉。
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
       validate:
         message: >-
           DaemonSet is not available to tenants: it places a pod on every node of
