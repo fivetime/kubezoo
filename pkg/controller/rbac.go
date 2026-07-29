@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
 
+	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/common"
 )
 
@@ -41,7 +43,48 @@ import (
 const (
 	tenantNamespaceAdminRole    = "kubezoo:tenant-namespace-admin"
 	tenantNamespaceAdminBinding = "kubezoo:tenant-admin"
+	// The read-only counterpart, bound in place of the admin role while a
+	// tenant is suspended read-only. A separate role rather than a narrowed one,
+	// because both are shared by every tenant and only the binding differs.
+	tenantNamespaceReadOnlyRole = "kubezoo:tenant-namespace-readonly"
 )
+
+// readOnlyVerbs is what a read-only suspension leaves a tenant.
+var readOnlyVerbs = []string{"get", "list", "watch"}
+
+// namespaceRoleFor picks which shared ClusterRole the per-namespace binding
+// should reference.
+func namespaceRoleFor(mode tenantv1alpha1.TenantSuspensionMode) string {
+	if mode == tenantv1alpha1.SuspensionReadOnly {
+		return tenantNamespaceReadOnlyRole
+	}
+	return tenantNamespaceAdminRole
+}
+
+// narrowToReadOnly strips every verb but the reading ones from a rule set, so
+// that a read-only suspension covers the cluster-scoped half of a tenant's
+// permissions as well as the namespaced half. Rules left with no verbs are
+// dropped, since a rule granting nothing is noise.
+func narrowToReadOnly(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	narrowed := make([]rbacv1.PolicyRule, 0, len(rules))
+	for _, rule := range rules {
+		kept := make([]string, 0, len(readOnlyVerbs))
+		for _, verb := range rule.Verbs {
+			for _, allowed := range readOnlyVerbs {
+				if verb == allowed || verb == "*" {
+					kept = append(kept, allowed)
+					break
+				}
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		rule.Verbs = kept
+		narrowed = append(narrowed, rule)
+	}
+	return narrowed
+}
 
 // tenantUser is the upstream identity kubezoo impersonates on behalf of a
 // tenant. pkg/dynamic sets the impersonation headers on every request, so
@@ -175,16 +218,35 @@ var notGrantedToTenants = map[string][]string{
 //
 // Non-resource URLs are no longer granted at all. Discovery still works because
 // Kubernetes binds system:discovery to system:authenticated out of the box.
-func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantID string) error {
+func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantID string,
+	mode tenantv1alpha1.TenantSuspensionMode) error {
 	if _, err := rbacClient.ClusterRoles().List(context.TODO(), metav1.ListOptions{ResourceVersion: "0"}); err != nil {
 		klog.Warningf("Failed to list the clusterroles %s with error %v", tenantID, err)
 		return err
 	}
 
+	// A read-only suspension narrows the cluster-scoped half too. Reconciling
+	// with RemoveExtraPermissions rewrites the role in place, so lifting the
+	// suspension restores it on the next pass.
+	tenantRules := clusterScopedRules()
+	if mode == tenantv1alpha1.SuspensionReadOnly {
+		tenantRules = narrowToReadOnly(tenantRules)
+	}
+
 	clusterRoles := []rbacv1.ClusterRole{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: tenantClusterRole(tenantID)},
-			Rules:      clusterScopedRules(),
+			Rules:      tenantRules,
+		},
+		{
+			// The read-only counterpart of the namespace admin role below.
+			// Always reconciled, whether or not anything is bound to it: a
+			// suspension has to take effect immediately, not one resync after
+			// the role is created.
+			ObjectMeta: metav1.ObjectMeta{Name: tenantNamespaceReadOnlyRole},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule(readOnlyVerbs...).Groups("*").Resources("*").RuleOrDie(),
+			},
 		},
 		{
 			// Shared by every tenant. Broad on purpose: a RoleBinding may only
@@ -257,10 +319,23 @@ func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV
 
 // syncClusterRoleBindings binds the tenant's upstream user to its cluster-scoped
 // role. The namespaced half is bound per namespace, not here.
-func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string) error {
+func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string,
+	mode tenantv1alpha1.TenantSuspensionMode) error {
 	if _, err := rbacClient.ClusterRoleBindings().List(context.TODO(), metav1.ListOptions{ResourceVersion: "0"}); err != nil {
 		klog.Warningf("Failed to list the clusterrolebindings %s with error %v", tenantId, err)
 		return err
+	}
+
+	// Revocation withdraws the binding rather than narrowing it. The tenant is
+	// then not a subject of anything kubezoo created, and upstream refuses it
+	// outright.
+	if mode == tenantv1alpha1.SuspensionRevoked {
+		name := rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).Users(tenantUser(tenantId)).BindingOrDie().Name
+		err := rbacClient.ClusterRoleBindings().Delete(context.TODO(), name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("revoking clusterrolebinding %s: %w", name, err)
+		}
+		return nil
 	}
 
 	clusterRoleBindings := []rbacv1.ClusterRoleBinding{
@@ -308,7 +383,8 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 // namespace carries it -- the four system ones because the controller creates
 // them that way, and tenant-created ones because pkg/convert stamps it on the
 // way through and refuses to let a tenant set it to another tenant's id.
-func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string) error {
+func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string,
+	mode tenantv1alpha1.TenantSuspensionMode) error {
 	selector := labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantId})
 	namespaces, err := coreClient.Namespaces().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: selector.String(),
@@ -320,6 +396,13 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 	for i := range namespaces.Items {
 		ns := &namespaces.Items[i]
 		if ns.DeletionTimestamp != nil {
+			continue
+		}
+		if mode == tenantv1alpha1.SuspensionRevoked {
+			err := rbacClient.RoleBindings(ns.Name).Delete(context.TODO(), tenantNamespaceAdminBinding, metav1.DeleteOptions{})
+			if err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("revoking rolebinding in namespace %s: %w", ns.Name, err)
+			}
 			continue
 		}
 		// Built by hand rather than with rbacv1helpers.NewRoleBinding, which
@@ -335,7 +418,11 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 			RoleRef: rbacv1.RoleRef{
 				APIGroup: rbacv1.GroupName,
 				Kind:     "ClusterRole",
-				Name:     tenantNamespaceAdminRole,
+				// roleRef is immutable, so switching between the admin and
+				// read-only roles cannot be an update. Reconciliation notices
+				// and recreates the binding, which is the ReconcileRecreate
+				// case handled below.
+				Name: namespaceRoleFor(mode),
 			},
 			Subjects: []rbacv1.Subject{{
 				APIGroup: rbacv1.GroupName,

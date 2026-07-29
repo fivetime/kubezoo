@@ -569,7 +569,7 @@ objectSelector:
 
 ---
 
-## 9.5 租户停机:两种模式 —— 需求已定,未实现
+## 9.5 租户停机:两种模式 —— **已实现并实测**(遗留一个显式缺口)
 
 两个来自不同场景的需求,共用同一套机制但**收敛程度不同**:
 
@@ -630,6 +630,55 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
   2. 上游 RBAC 同时降级为只读 —— 即便前门被绕过也拦得住
 - **宽限期到期**才走退租(退租的强制 finalizer 清理已实现)
 - **B 需要审计留痕**:何时冻结、谁授权、冻结时的对象清单快照 —— 取证场景下这本身就是证据链的一部分
+
+### 实现与验收(实测)
+
+状态是 Tenant CR 上的 `spec.suspension`(`mode: ReadOnly|Revoked` + `reason`),两层执行:
+
+1. **前门**(`pkg/filters/suspension.go`):按模式拒绝,并给出**能读懂的文案**而不是裸 Forbidden
+2. **上游 RBAC**(租户控制器):ReadOnly 把 RoleBinding 的 `roleRef` 指向
+   `kubezoo:tenant-namespace-readonly`(`roleRef` 不可变,靠 reconciliation 的
+   **recreate** 完成切换),集群级角色一并收窄为只读;Revoked 直接删掉绑定
+
+**全程实测,Pod 是判据**:
+
+| 阶段 | 租户读 | 租户写 | exec | 上游 roleRef | Pod |
+|---|---|---|---|---|---|
+| 正常 | ✅ | ✅ | ✅ | `...-namespace-admin` | Running |
+| **ReadOnly** | ✅ | ⛔ 带文案 | ⛔ | `...-namespace-readonly` | **Running, restarts=0** |
+| **Revoked** | ⛔ 带文案 | ⛔ | ⛔ | 绑定已删除 | **Running, restarts=0** |
+| 解除后 | ✅ | ✅ | ✅ | `...-namespace-admin` **已恢复** | Running, restarts=0 |
+
+- 两种模式下 **discovery 都保持可用**,否则 kubectl 在构造请求阶段就失败,
+  租户看到的是"客户端坏了"而不是停机原因
+- ReadOnly 放行 `authorization.k8s.io` 的 review(它们是 POST 的**提问**),
+  但拒绝 `exec`/`attach`/`portforward`(名义上是读,实为进容器改东西)与
+  `serviceaccounts/token`(签发可用凭据)
+- **绕过 kubezoo 直连上游同样被拒** —— 第二层是真的在拦
+
+### ⛔ 明确未实现:Revoked 不覆盖租户自建的 RoleBinding
+
+前面 §9.5 早就点了这条,现在**实测坐实**:租户建一个 RoleBinding 把 `admin` 绑给自己的 SA,
+吊销之后 ——
+
+```
+kubectl auth can-i delete pods -n 111111-default \
+  --as=system:serviceaccount:111111-default:operator   → yes
+```
+
+**租户部署的 operator 仍能改动、甚至删除证据。** 对欠费场景这是**正确的**
+(应用本来就该继续跑);对取证场景这是个**洞**。
+
+中和这些绑定需要连带解决"可还原"(取证结束后要能恢复),没有实现。
+在实现之前,控制器**每次 Revoked 都会打警告并列出具体是哪些绑定**:
+
+```
+tenant 111111 is revoked, but 1 role bindings it created are still in force and still
+grant its service accounts: [111111-default/my-operator] -- ... Neutralising these is
+not implemented
+```
+
+⚠️ **所以目前 Revoked 不能单独当作取证冻结用**,要么先人工处理这些绑定,要么等这条补上。
 
 > 关联任务见 `TODO-kaaas.md`。
 

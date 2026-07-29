@@ -32,6 +32,7 @@ import (
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
@@ -45,6 +46,7 @@ import (
 	"k8s.io/klog"
 
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/dynamic"
 	quotaclient "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
@@ -482,6 +484,70 @@ func (tc *TenantController) filterCRDs(clusterScopedAPIResources []metav1.APIRes
 	return nonCRDs
 }
 
+// suspensionModeOf reports the suspension in force for a tenant, or the empty
+// mode if it is operating normally.
+func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.TenantSuspensionMode {
+	tenant, err := tc.tenantLister.Get(tenantId)
+	if err != nil {
+		// Treated as not suspended. The alternative -- assuming the strictest
+		// mode when the cache cannot answer -- would revoke every tenant's
+		// access on a transient fault, which is a far worse failure than
+		// briefly leaving a suspension unapplied.
+		klog.Warningf("cannot read tenant %s to determine its suspension, reconciling it as "+
+			"operating normally: %v", tenantId, err)
+		return ""
+	}
+	if tenant.Spec.Suspension == nil {
+		return ""
+	}
+	return tenant.Spec.Suspension.Mode
+}
+
+// reportBindingsRevocationDoesNotReach names what a revocation leaves standing.
+//
+// Revoking a tenant withdraws the bindings kubezoo created, which stops the
+// tenant's own credentials. It does not stop the tenant's workloads: a tenant
+// may bind its own service accounts, those bindings are the tenant's objects
+// rather than kubezoo's, and a controller the tenant deployed keeps its
+// permissions and its token. For the billing case that is correct -- the
+// applications are supposed to keep working. For an investigation it is a hole,
+// because the tenant's own automation can still change or delete the evidence.
+//
+// Closing it means neutralising the tenant's bindings and being able to put
+// them back, which is not implemented. Until it is, the least this can do is
+// refuse to be quiet about it and name them.
+func (tc *TenantController) reportBindingsRevocationDoesNotReach(tenantId string) {
+	namespaces, err := tc.upstreamCoreClient.Namespaces().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantId}).String(),
+	})
+	if err != nil {
+		klog.Warningf("tenant %s is revoked, but its own role bindings could not be listed to "+
+			"report what the revocation does not reach: %v", tenantId, err)
+		return
+	}
+	var remaining []string
+	for i := range namespaces.Items {
+		bindings, err := tc.upstreamRbacClient.RoleBindings(namespaces.Items[i].Name).List(
+			context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			continue
+		}
+		for j := range bindings.Items {
+			if bindings.Items[j].Name == tenantNamespaceAdminBinding {
+				continue
+			}
+			remaining = append(remaining, namespaces.Items[i].Name+"/"+bindings.Items[j].Name)
+		}
+	}
+	if len(remaining) == 0 {
+		return
+	}
+	klog.Warningf("tenant %s is revoked, but %d role bindings it created are still in force and "+
+		"still grant its service accounts: %v -- a controller the tenant deployed can keep "+
+		"changing objects, including deleting evidence. Neutralising these is not implemented",
+		tenantId, len(remaining), remaining)
+}
+
 // syncResources sync system resources to the upstream cluster when new tenant is being created.
 func (tc *TenantController) syncResources(tenantId string) error {
 	if tc.tenantClient == nil || tc.upstreamCoreClient == nil || tc.upstreamRbacClient == nil {
@@ -489,17 +555,27 @@ func (tc *TenantController) syncResources(tenantId string) error {
 	}
 
 	klog.V(4).Infof("Sync system resources for tenant %s", tenantId)
+
+	// The suspension decides how much of a tenant's upstream permission is
+	// reconciled back. It is read here, from the tenant object, rather than
+	// left to an operator editing RBAC by hand: this controller converges, so a
+	// hand-deleted binding is simply recreated on the next pass.
+	mode := tc.suspensionModeOf(tenantId)
+
 	if err := syncNamespaces(tc.upstreamCoreClient, tenantId); err != nil {
 		return err
 	}
-	if err := syncClusterRoles(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId); err != nil {
+	if err := syncClusterRoles(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
 		return err
 	}
-	if err := syncClusterRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId); err != nil {
+	if err := syncClusterRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
 		return err
 	}
-	if err := syncNamespaceRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId); err != nil {
+	if err := syncNamespaceRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
 		return err
+	}
+	if mode == tenantv1alpha1.SuspensionRevoked {
+		tc.reportBindingsRevocationDoesNotReach(tenantId)
 	}
 	if err := genCertAndKubeconfig(tc.tenantClient, tenantId, tc.tenantLister, tc.clientCAFile, tc.clientCAKeyFile, tc.kubeZooHostAddress); err != nil {
 		return err

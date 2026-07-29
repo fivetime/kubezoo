@@ -452,7 +452,19 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
 - [x] 加**永久守卫** `pkg/apis/tenant/v1alpha1/protobuf_test.go`:
       把填满的对象过一遍自己的 marshaller,字段掉了就报红(已验证:换回旧 pb.go 立刻红)
 - [x] Tenant API 加 `spec.suspension`(`mode: ReadOnly|Revoked` + `reason`),**已能正确落盘**
-- [ ] ⚠️ **目前设了没有任何效果** —— 执行逻辑还没写,见下
+- [x] **执行逻辑已实现并实测**(两层),详见架构文档 §9.5:
+      前门 `pkg/filters/suspension.go` 按模式拒绝并给出可读文案;
+      控制器按模式收窄/撤销上游 RBAC(ReadOnly 换只读 roleRef —— `roleRef` 不可变,
+      靠 reconciliation **recreate**;Revoked 删绑定)
+      - 实测四段:正常 → ReadOnly → Revoked → 解除,**Pod 全程 Running / restarts=0**,
+        解除后 roleRef 自动恢复成 admin、租户可写
+      - 两种模式都保留 discovery,否则 kubectl 在构造请求阶段就挂,租户看到的是"客户端坏了"
+      - ReadOnly 放行 `authorization.k8s.io` 的 review,拒绝 `exec`/`attach`/`portforward` 与 `serviceaccounts/token`
+- [ ] ⛔ **Revoked 不覆盖租户自建的 RoleBinding —— 实测坐实,未实现中和**:
+      租户把 `admin` 绑给自己的 SA,吊销后该 SA 仍 `can-i delete pods = yes`,
+      **能删证据**。欠费场景这是对的,取证场景是洞。
+      中和需要连带"可还原",没做;在做出来之前控制器**每次 Revoked 都打警告并列出具体绑定**。
+      ⚠️ **现阶段 Revoked 不能单独当取证冻结用**
 
 ---
 

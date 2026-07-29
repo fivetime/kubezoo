@@ -97,6 +97,7 @@ import (
 	quotaclient "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
+	tenantlister "github.com/kubewharf/kubezoo/pkg/generated/listers/tenant/v1alpha1"
 	tenantrest "github.com/kubewharf/kubezoo/pkg/rest"
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -654,8 +655,6 @@ func buildGenericConfig(
 	if lastErr != nil {
 		return
 	}
-	genericConfig.BuildHandlerChainFunc = NewBuildHandlerChanFunc(discoveryProxy)
-
 	if lastErr = s.GenericServerRunOptions.ApplyTo(genericConfig); lastErr != nil {
 		return
 	}
@@ -728,6 +727,13 @@ func buildGenericConfig(
 	if lastErr != nil {
 		return
 	}
+
+	// Built here rather than beside the discovery proxy above, because the
+	// suspension filter needs the tenant lister and the informers do not exist
+	// until the control plane config does. The chain function is not called
+	// until the server is assembled, so its position here is free.
+	genericConfig.BuildHandlerChainFunc = NewBuildHandlerChanFunc(discoveryProxy,
+		controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Lister())
 
 	if lastErr = applyAuthenticationOptions(utilwait.ContextForChannel(genericConfig.DrainedNotify()), s.Authentication, genericConfig); lastErr != nil {
 		return
@@ -969,10 +975,15 @@ func getServiceIPAndRanges(serviceClusterIPRanges string) (net.IP, net.IPNet, ne
 	return apiServerServiceIP, primaryServiceIPRange, secondaryServiceIPRange, nil
 }
 
-func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy) func(apiHandler http.Handler, c *server.Config) (secure http.Handler) {
+func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
+	tenants tenantlister.TenantLister) func(apiHandler http.Handler, c *server.Config) (secure http.Handler) {
 	return func(handler http.Handler, c *genericapiserver.Config) (secure http.Handler) {
 		failedHandler := genericapifilters.Unauthorized(c.Serializer)
 		handler = tenantfilters.WithDiscoveryProxy(handler, discoveryProxy)
+		// Outside the discovery proxy so that a suspended tenant can still
+		// discover the API and read the refusal, and inside WithTenantInfo,
+		// which is what puts the tenant on the context.
+		handler = tenantfilters.WithTenantSuspension(handler, tenants)
 		handler = tenantfilters.WithTenantInfo(handler)
 		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences, c.Authentication.RequestHeaderConfig)
 		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
