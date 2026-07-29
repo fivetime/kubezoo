@@ -722,6 +722,73 @@ kubectl -n escape get pod c1 -o jsonpath='{.spec.nodeName}'
 **"改写成假名" vs "接受这个泄漏并写进文档"是个待定决策**,
 建议等 B1 的节点池方案定了一起处理(架构 §8.2.3)。
 
+## Q. `pods/binding` 可能绕开整套落点控制 ⚠️ 读码发现,**未实测**
+
+⚠️ **这条是查 `schedulerName` 归属时读码撞见的,一次都没跑过。** 先记下来,别当结论用。
+
+三件已确认的事实拼在一起:
+
+**① 租户在自己 namespace 里是 `*` on `*`。**
+`pkg/controller/rbac.go:270`,`kubezoo:tenant-namespace-admin` 就是
+`NewRule("*").Groups("*").Resources("*")` —— 有意为之(见那里的注释:RoleBinding 只能在
+自己 namespace 内授权,而且要覆盖租户 CRD 的自定义资源)。
+但 `*` on `*` **包含 `create` on `pods/binding`**。
+
+**② `pods/binding` 在 k8s 里是留给调度器的。**
+`plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go` 里,
+`create pods/binding` 只出现在 `kubeSchedulerRules`(`system:kube-scheduler`),
+内置的 `admin` / `edit` 都没有。
+
+**③ 我们的 `deny-nodename` 规则匹配的是 `kinds: [Pod]`。**
+Binding 是**另一个 kind**、走**子资源**路径 —— 规则不会匹配到它。
+
+⇒ 推论:租户先建一个不带 `nodeName` 的 Pod(过准入),再往 `pods/binding` POST 一个
+Binding **直接指定节点**,就绕开了 `deny-nodename`。
+
+### 为什么这不只是"绕过一条规则"
+
+**kubelet 的准入只检 `NoExecute` 污点。** k8s 源码 `pkg/kubelet/lifecycle/predicate.go:448`
+写得很直白:
+
+```go
+// Check taint/toleration except for static pods
+// Kubelet is only interested in the NoExecute taint.
+return t.Effect == v1.TaintEffectNoExecute
+```
+
+`NoSchedule` 污点**只有调度器**会检。直接 binding 跳过调度器 ⇒
+**`NoSchedule` 污点被完全绕开**。若 B1 的 kata 节点池只用 `NoSchedule` 隔离,
+这条路可能直接把节点池隔离打穿。
+
+(`nodeSelector` / `nodeAffinity` 反而**仍然有效** —— kubelet 的 `generalFilter`
+里有 `PodMatchNodeSelector`。)
+
+### 还不知道的(这条能不能成立全看这些)
+
+- **kubezoo 到底代不代理 `pods/binding`?** Binding 是"子资源 + 请求体是另一个 kind"
+  的典型,正是 §K 那类问题。可能根本解不出请求体就报错了 —— 那样这条自动不成立
+- 真绑上去之后 Pod 会不会被 kubelet 拒(资源、nodeSelector)
+- 平台若用 `NoExecute` 而非 `NoSchedule` 打污点,kubelet 就会拒 —— **这可能就是修法**
+
+### 怎么测
+
+需要**多节点 lab**(单节点 kind 没有可用的污点场景):一个带 `NoSchedule` 污点的节点,
+租户建 Pod 后 POST binding 指向它,看是否 Running。
+⭐ 这和 §P 里"污点存在时租户 `tolerations` 确实能上去"是**同一个 lab**,一起测。
+
+### 归属
+
+若成立,修法有三条路,判据不同:
+
+| 修法 | 归属 |
+|---|---|
+| Kyverno 规则加上 Binding / `pods/binding` 子资源 | 策略层(写路径) |
+| 平台改用 `NoExecute` 打污点 | 平台基础设施 |
+| 收窄 `kubezoo:tenant-namespace-admin`,把 `pods/binding` 排除掉 | **kubezoo**(它保护的是寻址边界,且集群级/子资源无 RBAC 兜底) |
+
+⚠️ 第三条要小心:那个 `*` on `*` 是**有意的**(覆盖租户 CRD),改成排除列表就等于
+维护一份黑名单 —— 又是"排除条件"那个形状,得先想清楚新增子资源时谁来补。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
