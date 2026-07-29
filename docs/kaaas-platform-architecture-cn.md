@@ -651,8 +651,41 @@ k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 
 让 LIST 能表达 namespace 前缀,由 store 层把它算成 `/registry/<res>/<tid>-` 这一段区间下发。
 这与 store 现有的行为是同构的 —— **它本来就是在算前缀区间,只是现在只会用完整 namespace 去算**。
 
-⛔ **不要走的路**:让 kubezoo 直接读 KubeBrain 绕过 apiserver。那会跳过鉴权、准入与版本转换,
-并要求 kubezoo 复刻 apiserver 的编解码 —— 收益不抵风险。
+### 取舍:为什么不让 kubezoo 直连 KubeBrain
+
+"KubeBrain 是我们自己的,直接读多快" —— 这个方案被认真评估过,**结论是不走,但理由不是想当然的那几条**。
+下面把两边都记下来,免得以后被当成没考虑过而重新提议。
+
+**先纠正两条常被拿来反对、但其实站不住的理由**:
+
+- ❌ "要复刻 apiserver 的编解码" —— **不成立**。kubezoo 已经在构造完整的
+  `kubeapiserver.NewStorageFactoryConfig().Complete(...).New()`,那个 StorageFactory
+  本来就掌握每个资源的 codec、存储版本与媒体类型。再建一个指向上游 KubeBrain 的实例,解码基本白送
+- ❌ "绕过鉴权就不安全" —— 这条**反而对直连有利**。前缀 `/registry/<res>/<tid>-` 本身就是边界,
+  而且是 **RBAC 表达不了的那种**(`resourceNames` 精确匹配,见 §9 的硬边界)。区间读比 RBAC 更严
+
+**真正决定不走的四条**:
+
+1. ⭐ **边界从外部检查变成内部计算**。今天每个租户请求上游都会被 RBAC **独立**校验一次
+   impersonate 身份;直连之后,租户边界完全等于"kubezoo 自己算对了那个前缀",**背后没有任何兜底**。
+   这不是理论担忧 —— 隔离审计(#82)在 kubezoo 自己的边界逻辑里找到了**三个错**
+   (PV 走 nopeConvertor 完全不改写、webhook 全集群生效、`escalate`/`bind` 提权),
+   其中两个存在已久且单元测试全过。**刚发现完这些,就把批量读的唯一边界交给同一套逻辑,方向是反的**
+2. **静态加密的密钥**。多租户平台存着租户 secret,`--encryption-provider-config` 该开。
+   开了之后 kubezoo 必须持有同一套 DEK/KEK ⇒ **它就有能力解密那个 etcd 里的一切**,
+   而不只是它该读的那段区间。区间限制是 kubezoo 自己的代码在守,不是密钥在守
+3. **审计断了**。直连读不进 apiserver 审计日志,"谁读了什么"会消失 ——
+   与 §9.5 的取证冻结需求直接冲突。要补就得 kubezoo 自建一套
+4. **它是混合路径不是替代**。聚合 API(metrics 等)根本不在 etcd 里,仍须走 apiserver ⇒
+   两条路并存,长期维护两份语义
+
+**而 apiserver 改法反而更省**:改 store 让 LIST 能表达 namespace 前缀,是让它**少算一截**
+(它今天就在算前缀区间);直连则要第二套存储栈 + 密钥材料 + 自建审计 + 自己实现 selector 求值
++ 长期绑定 key 布局。**工作量更小,而且 RBAC 与审计都还在。**
+
+**何时该重新评估**:如果部署形态确定不开静态加密、且读审计由别处承担(如网关层),
+那么第 2、3 条消失,只剩第 1 条 —— 那时可以把直连作为**只读旁路**重新讨论,
+但前提是 kubezoo 的前缀计算有独立的守卫测试与现场负向对照。
 
 > 关联:#84(kubezoo × KubeBrain 键空间形态)、TODO 1.2。
 
