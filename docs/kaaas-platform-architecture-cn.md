@@ -576,7 +576,14 @@ objectSelector:
 | 模式 | 场景 | 租户能力 | 负载 |
 |---|---|---|---|
 | **A read-only** | 欠费保号 | 能看,不能改 | 照跑 |
-| **B 完全吊销** | 违法调查 / 取证冻结 | **什么都不能做** | **原样冻结,等待取证** |
+| **B 冻结**(`Frozen`) | 违法调查 / 取证 | **什么都不能做** | **照跑,一个都不删** |
+
+⭐ **命名**:B 一度叫 `Revoked`,改掉了 —— 在安全语境里 "revoke" 指**吊销凭据**,
+而这里租户的证书**照样能通过认证**,被拒是在授权层;而且"吊销"含不可逆的意味,
+这个状态**设计上就是可逆的**。取"冻结"是因为它自带**可解冻**与**资产保全**两层意思,
+而这恰好是两个场景共同的定义性属性。
+⚠️ 但要主动挡掉一个歧义:**被冻结的是租户的操作能力,不是负载** ——
+k8s 里 `Job.spec.suspend` 是把负载停掉,这里 Pod 是**继续跑**的。
 
 A 的用意是催缴而不制造事故 —— 全断会让租户看不到自己的东西,容易误判成"数据没了"。
 B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证。
@@ -597,18 +604,18 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
 
 - **A read-only**:把 RoleBinding / ClusterRoleBinding 的 `roleRef` 指向只读角色
   (`get`/`list`/`watch`),而不是删除绑定
-- **B 完全吊销**:删除绑定
+- **B 冻结**:删除绑定
 
 ⚠️ **`roleRef` 在 k8s 里是不可变字段**,所以 A 的切换必须"删了重建",不能 update。
 
 ### ⚠️⚠️ B(取证冻结)有一个容易致命的盲区
 
-**吊销租户的 kubeconfig 并不能阻止租户已部署的东西继续动。**
+**冻结租户的操作能力并不能阻止租户已部署的东西继续动。**
 
 租户可以给自己 namespace 里的 ServiceAccount 授权(`pkg/convert/rolebinding.go` 的
 `transformSubjectToUpstream` 明确支持 `ServiceAccount` 与 `system:serviceaccounts:` 组主体),
 这些权限**属于 SA 而不是租户凭据**。租户跑的 operator/控制器拿的是 SA token,
-吊销 kubeconfig 对它毫无影响 —— 它可以继续改动、甚至**删除证据**。
+冻结租户凭据的授权对它毫无影响 —— 它可以继续改动、甚至**删除证据**。
 
 所以 B 必须同时处理:
 
@@ -633,12 +640,12 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
 
 ### 实现与验收(实测)
 
-状态是 Tenant CR 上的 `spec.suspension`(`mode: ReadOnly|Revoked` + `reason`),两层执行:
+状态是 Tenant CR 上的 `spec.suspension`(`mode: ReadOnly|Frozen` + `reason`),两层执行:
 
 1. **前门**(`pkg/filters/suspension.go`):按模式拒绝,并给出**能读懂的文案**而不是裸 Forbidden
 2. **上游 RBAC**(租户控制器):ReadOnly 把 RoleBinding 的 `roleRef` 指向
    `kubezoo:tenant-namespace-readonly`(`roleRef` 不可变,靠 reconciliation 的
-   **recreate** 完成切换),集群级角色一并收窄为只读;Revoked 直接删掉绑定
+   **recreate** 完成切换),集群级角色一并收窄为只读;Frozen 直接删掉绑定
 
 **全程实测,Pod 是判据**:
 
@@ -646,7 +653,7 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
 |---|---|---|---|---|---|
 | 正常 | ✅ | ✅ | ✅ | `...-namespace-admin` | Running |
 | **ReadOnly** | ✅ | ⛔ 带文案 | ⛔ | `...-namespace-readonly` | **Running, restarts=0** |
-| **Revoked** | ⛔ 带文案 | ⛔ | ⛔ | 绑定已删除 | **Running, restarts=0** |
+| **Frozen** | ⛔ 带文案 | ⛔ | ⛔ | 绑定已删除 | **Running, restarts=0** |
 | 解除后 | ✅ | ✅ | ✅ | `...-namespace-admin` **已恢复** | Running, restarts=0 |
 
 - 两种模式下 **discovery 都保持可用**,否则 kubectl 在构造请求阶段就失败,
@@ -656,10 +663,10 @@ B 的用意相反:租户**不得再操作**,而 Pod 必须保持原状供取证�
   `serviceaccounts/token`(签发可用凭据)
 - **绕过 kubezoo 直连上游同样被拒** —— 第二层是真的在拦
 
-### ⛔ 明确未实现:Revoked 不覆盖租户自建的 RoleBinding
+### ⛔ 明确未实现:Frozen 不覆盖租户自建的 RoleBinding
 
 前面 §9.5 早就点了这条,现在**实测坐实**:租户建一个 RoleBinding 把 `admin` 绑给自己的 SA,
-吊销之后 ——
+冻结之后 ——
 
 ```
 kubectl auth can-i delete pods -n 111111-default \
@@ -670,7 +677,7 @@ kubectl auth can-i delete pods -n 111111-default \
 (应用本来就该继续跑);对取证场景这是个**洞**。
 
 中和这些绑定需要连带解决"可还原"(取证结束后要能恢复),没有实现。
-在实现之前,控制器**每次 Revoked 都会打警告并列出具体是哪些绑定**:
+在实现之前,控制器**每次 Frozen 都会打警告并列出具体是哪些绑定**:
 
 ```
 tenant 111111 is revoked, but 1 role bindings it created are still in force and still
@@ -678,7 +685,7 @@ grant its service accounts: [111111-default/my-operator] -- ... Neutralising the
 not implemented
 ```
 
-⚠️ **所以目前 Revoked 不能单独当作取证冻结用**,要么先人工处理这些绑定,要么等这条补上。
+⚠️ **所以目前 Frozen 不能单独当作取证冻结用**,要么先人工处理这些绑定,要么等这条补上。
 
 > 关联任务见 `TODO-kaaas.md`。
 

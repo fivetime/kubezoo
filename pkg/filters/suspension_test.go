@@ -70,10 +70,10 @@ func TestReadOnlySuspensionAllowsReadsAndRefusesWrites(t *testing.T) {
 	}
 }
 
-// TestRevokedSuspensionRefusesEverythingButDiscovery is the investigation case.
+// TestFrozenSuspensionRefusesEverythingButDiscovery is the investigation case.
 // Discovery survives so that the tenant is told why, rather than watching its
 // client fail while building a request.
-func TestRevokedSuspensionRefusesEverythingButDiscovery(t *testing.T) {
+func TestFrozenSuspensionRefusesEverythingButDiscovery(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		request request.RequestInfo
@@ -90,10 +90,25 @@ func TestRevokedSuspensionRefusesEverythingButDiscovery(t *testing.T) {
 		{"version", request.RequestInfo{IsResourceRequest: false, Path: "/version"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := allowedUnderSuspension(&tc.request, tenantv1alpha1.SuspensionRevoked)
+			got := allowedUnderSuspension(&tc.request, tenantv1alpha1.SuspensionFrozen)
 			if got != tc.allow {
 				t.Errorf("allowed = %v, want %v", got, tc.allow)
 			}
 		})
+	}
+}
+
+// TestUnrecognisedModeIsTreatedAsFrozen -- validation refuses an unknown mode on
+// the way in, so this covers objects stored before that existed. It used to fall
+// through to the read-only branch while the controller left upstream RBAC at
+// full admin, so the two layers disagreed and a typo produced a tenant that was
+// half-suspended.
+func TestUnrecognisedModeIsTreatedAsFrozen(t *testing.T) {
+	for _, verb := range []string{"get", "list", "watch", "create", "delete"} {
+		requestInfo := request.RequestInfo{IsResourceRequest: true, Verb: verb, Resource: "pods"}
+		if allowedUnderSuspension(&requestInfo, tenantv1alpha1.TenantSuspensionMode("Revoked")) {
+			t.Errorf("%s was allowed under an unrecognised mode; a suspension nobody can "+
+				"interpret should hold, not half-open", verb)
+		}
 	}
 }

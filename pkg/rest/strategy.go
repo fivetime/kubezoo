@@ -97,7 +97,30 @@ func (tenantStrategy) Validate(ctx context.Context, obj runtime.Object) field.Er
 		}}
 	}
 
-	return nil
+	return validateSuspension(tenant.Spec.Suspension)
+}
+
+// validateSuspension refuses a suspension mode that is not one of the two.
+//
+// Without this the value is stored as written and the two enforcement layers
+// disagree about what it means: the front door falls through to its read-only
+// branch while the controller leaves upstream RBAC at full admin. A typo, or a
+// value from an earlier spelling of this API, then produces a tenant that is
+// half-suspended and an error message that explains nothing. Refusing the write
+// is the only place this can be caught once rather than in every reader.
+func validateSuspension(suspension *tenantv1alpha1.TenantSuspension) field.ErrorList {
+	if suspension == nil {
+		return nil
+	}
+	switch suspension.Mode {
+	case tenantv1alpha1.SuspensionReadOnly, tenantv1alpha1.SuspensionFrozen:
+		return nil
+	}
+	return field.ErrorList{field.NotSupported(
+		field.NewPath("spec", "suspension", "mode"),
+		suspension.Mode,
+		[]string{string(tenantv1alpha1.SuspensionReadOnly), string(tenantv1alpha1.SuspensionFrozen)},
+	)}
 }
 
 // WarningsOnCreate returns warnings for the creation of the given object.
@@ -115,7 +138,9 @@ func (tenantStrategy) Canonicalize(obj runtime.Object) {
 }
 
 func (tenantStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	return field.ErrorList{}
+	// A suspension is almost always applied to a tenant that already exists, so
+	// validating only on create would leave the real path unchecked.
+	return validateSuspension(obj.(*tenantv1alpha1.Tenant).Spec.Suspension)
 }
 
 // WarningsOnUpdate returns warnings for the given update.

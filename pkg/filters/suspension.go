@@ -98,7 +98,12 @@ func allowedUnderSuspension(requestInfo *request.RequestInfo, mode tenantv1alpha
 		return true
 	}
 
-	if mode == tenantv1alpha1.SuspensionRevoked {
+	if mode != tenantv1alpha1.SuspensionReadOnly {
+		// Frozen, or a mode this build does not recognise. Validation refuses
+		// an unknown mode on the way in, so reaching here means an object
+		// written before that existed -- and a suspension nobody can interpret
+		// should hold rather than half-open. The alternative silently left
+		// upstream RBAC at full admin while the front door behaved read-only.
 		return false
 	}
 
@@ -133,9 +138,12 @@ func refuse(w http.ResponseWriter, tenantID string, suspension *tenantv1alpha1.T
 	case tenantv1alpha1.SuspensionReadOnly:
 		message += " and is read-only: this request would change something. " +
 			"Your objects are still readable and your workloads are still running"
-	case tenantv1alpha1.SuspensionRevoked:
-		message += " and its access has been revoked: no request is accepted. " +
-			"Your workloads have not been touched"
+	case tenantv1alpha1.SuspensionFrozen:
+		message += " and is frozen: no request is accepted. Nothing of yours has been " +
+			"deleted and your workloads are still running"
+	default:
+		message += fmt.Sprintf(" with an unrecognised mode %q, and is being treated as frozen",
+			suspension.Mode)
 	}
 	if suspension.Reason != "" {
 		message += fmt.Sprintf(" (%s)", suspension.Reason)

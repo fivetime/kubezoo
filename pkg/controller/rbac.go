@@ -61,6 +61,17 @@ func namespaceRoleFor(mode tenantv1alpha1.TenantSuspensionMode) string {
 	return tenantNamespaceAdminRole
 }
 
+// isFreeze reports whether a mode withdraws the tenant's bindings outright.
+//
+// Anything set but unrecognised counts. Validation refuses unknown modes on the
+// way in, so this only covers objects written before it existed, and a
+// suspension that cannot be interpreted should hold rather than leave upstream
+// RBAC at full admin while the front door refuses writes -- which is what the
+// two layers used to do, disagreeing with each other.
+func isFreeze(mode tenantv1alpha1.TenantSuspensionMode) bool {
+	return mode != "" && mode != tenantv1alpha1.SuspensionReadOnly
+}
+
 // narrowToReadOnly strips every verb but the reading ones from a rule set, so
 // that a read-only suspension covers the cluster-scoped half of a tenant's
 // permissions as well as the namespaced half. Rules left with no verbs are
@@ -326,14 +337,15 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 		return err
 	}
 
-	// Revocation withdraws the binding rather than narrowing it. The tenant is
+	// Freezing withdraws the binding rather than narrowing it. The tenant is
 	// then not a subject of anything kubezoo created, and upstream refuses it
-	// outright.
-	if mode == tenantv1alpha1.SuspensionRevoked {
+	// outright. Nothing is deleted but the binding itself, so lifting the
+	// suspension puts it back on the next pass.
+	if isFreeze(mode) {
 		name := rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).Users(tenantUser(tenantId)).BindingOrDie().Name
 		err := rbacClient.ClusterRoleBindings().Delete(context.TODO(), name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("revoking clusterrolebinding %s: %w", name, err)
+			return fmt.Errorf("withdrawing clusterrolebinding %s to freeze the tenant: %w", name, err)
 		}
 		return nil
 	}
@@ -398,10 +410,10 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 		if ns.DeletionTimestamp != nil {
 			continue
 		}
-		if mode == tenantv1alpha1.SuspensionRevoked {
+		if isFreeze(mode) {
 			err := rbacClient.RoleBindings(ns.Name).Delete(context.TODO(), tenantNamespaceAdminBinding, metav1.DeleteOptions{})
 			if err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("revoking rolebinding in namespace %s: %w", ns.Name, err)
+				return fmt.Errorf("withdrawing rolebinding in namespace %s to freeze the tenant: %w", ns.Name, err)
 			}
 			continue
 		}

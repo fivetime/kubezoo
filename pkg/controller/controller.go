@@ -490,9 +490,9 @@ func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.Ten
 	tenant, err := tc.tenantLister.Get(tenantId)
 	if err != nil {
 		// Treated as not suspended. The alternative -- assuming the strictest
-		// mode when the cache cannot answer -- would revoke every tenant's
-		// access on a transient fault, which is a far worse failure than
-		// briefly leaving a suspension unapplied.
+		// mode when the cache cannot answer -- would freeze every tenant on a
+		// transient fault, which is a far worse failure than briefly leaving a
+		// suspension unapplied.
 		klog.Warningf("cannot read tenant %s to determine its suspension, reconciling it as "+
 			"operating normally: %v", tenantId, err)
 		return ""
@@ -503,26 +503,27 @@ func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.Ten
 	return tenant.Spec.Suspension.Mode
 }
 
-// reportBindingsRevocationDoesNotReach names what a revocation leaves standing.
+// reportBindingsFreezingDoesNotReach names what a revocation leaves standing.
 //
-// Revoking a tenant withdraws the bindings kubezoo created, which stops the
+// Freezing a tenant withdraws the bindings kubezoo created, which stops the
 // tenant's own credentials. It does not stop the tenant's workloads: a tenant
 // may bind its own service accounts, those bindings are the tenant's objects
 // rather than kubezoo's, and a controller the tenant deployed keeps its
 // permissions and its token. For the billing case that is correct -- the
 // applications are supposed to keep working. For an investigation it is a hole,
-// because the tenant's own automation can still change or delete the evidence.
+// because the tenant's own automation can still change or delete the evidence --
+// so a freeze is not on its own a forensic hold.
 //
 // Closing it means neutralising the tenant's bindings and being able to put
 // them back, which is not implemented. Until it is, the least this can do is
 // refuse to be quiet about it and name them.
-func (tc *TenantController) reportBindingsRevocationDoesNotReach(tenantId string) {
+func (tc *TenantController) reportBindingsFreezingDoesNotReach(tenantId string) {
 	namespaces, err := tc.upstreamCoreClient.Namespaces().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantId}).String(),
 	})
 	if err != nil {
-		klog.Warningf("tenant %s is revoked, but its own role bindings could not be listed to "+
-			"report what the revocation does not reach: %v", tenantId, err)
+		klog.Warningf("tenant %s is frozen, but its own role bindings could not be listed to "+
+			"report what the freeze does not reach: %v", tenantId, err)
 		return
 	}
 	var remaining []string
@@ -542,7 +543,7 @@ func (tc *TenantController) reportBindingsRevocationDoesNotReach(tenantId string
 	if len(remaining) == 0 {
 		return
 	}
-	klog.Warningf("tenant %s is revoked, but %d role bindings it created are still in force and "+
+	klog.Warningf("tenant %s is frozen, but %d role bindings it created are still in force and "+
 		"still grant its service accounts: %v -- a controller the tenant deployed can keep "+
 		"changing objects, including deleting evidence. Neutralising these is not implemented",
 		tenantId, len(remaining), remaining)
@@ -574,8 +575,8 @@ func (tc *TenantController) syncResources(tenantId string) error {
 	if err := syncNamespaceRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
 		return err
 	}
-	if mode == tenantv1alpha1.SuspensionRevoked {
-		tc.reportBindingsRevocationDoesNotReach(tenantId)
+	if isFreeze(mode) {
+		tc.reportBindingsFreezingDoesNotReach(tenantId)
 	}
 	if err := genCertAndKubeconfig(tc.tenantClient, tenantId, tc.tenantLister, tc.clientCAFile, tc.clientCAKeyFile, tc.kubeZooHostAddress); err != nil {
 		return err

@@ -451,20 +451,29 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
 - [x] `codegen.sh` 加 protobuf 目标;`make verify-codegen` 现在也覆盖它
 - [x] 加**永久守卫** `pkg/apis/tenant/v1alpha1/protobuf_test.go`:
       把填满的对象过一遍自己的 marshaller,字段掉了就报红(已验证:换回旧 pb.go 立刻红)
-- [x] Tenant API 加 `spec.suspension`(`mode: ReadOnly|Revoked` + `reason`),**已能正确落盘**
+- [x] Tenant API 加 `spec.suspension`(`mode: ReadOnly|Frozen` + `reason`),**已能正确落盘**
 - [x] **执行逻辑已实现并实测**(两层),详见架构文档 §9.5:
       前门 `pkg/filters/suspension.go` 按模式拒绝并给出可读文案;
       控制器按模式收窄/撤销上游 RBAC(ReadOnly 换只读 roleRef —— `roleRef` 不可变,
-      靠 reconciliation **recreate**;Revoked 删绑定)
-      - 实测四段:正常 → ReadOnly → Revoked → 解除,**Pod 全程 Running / restarts=0**,
+      靠 reconciliation **recreate**;Frozen 删绑定)
+      - 实测四段:正常 → ReadOnly → Frozen → 解除,**Pod 全程 Running / restarts=0**,
         解除后 roleRef 自动恢复成 admin、租户可写
       - 两种模式都保留 discovery,否则 kubectl 在构造请求阶段就挂,租户看到的是"客户端坏了"
       - ReadOnly 放行 `authorization.k8s.io` 的 review,拒绝 `exec`/`attach`/`portforward` 与 `serviceaccounts/token`
-- [ ] ⛔ **Revoked 不覆盖租户自建的 RoleBinding —— 实测坐实,未实现中和**:
-      租户把 `admin` 绑给自己的 SA,吊销后该 SA 仍 `can-i delete pods = yes`,
+- [x] **`Revoked` 改名 `Frozen`**:"revoke" 在安全语境指**吊销凭据**,而租户证书**照样能通过认证**,
+      被拒是在授权层;且"吊销"含不可逆意味,这个状态**设计上可逆**。"冻结"自带
+      **可解冻 + 资产保全**两层意思,正是两个场景共同的定义性属性。
+      ⚠️ 主动挡掉的歧义:**冻结的是租户的操作能力,不是负载** —— k8s 里 `Job.spec.suspend` 是停负载,这里 Pod 继续跑
+- [x] ⭐ **改名时测出真缺陷:mode 根本没有校验**。写 `Revoked` 照样存进去,然后
+      **两层各读各的**:前门落到 read-only 分支(拒写、放读、文案还解释不了原因),
+      控制器却把上游 RBAC 留在**完整 admin**。一个笔误就能造出"半停机"。
+      修:① `Validate`/`ValidateUpdate` 拒绝非法 mode(实测 `Revoked` 现在被拒并列出合法值);
+      ② 两层的运行期兜底统一为**认不出就按最严处理**(存量对象用),而不是最松
+- [ ] ⛔ **Frozen 不覆盖租户自建的 RoleBinding —— 实测坐实,未实现中和**:
+      租户把 `admin` 绑给自己的 SA,冻结后该 SA 仍 `can-i delete pods = yes`,
       **能删证据**。欠费场景这是对的,取证场景是洞。
-      中和需要连带"可还原",没做;在做出来之前控制器**每次 Revoked 都打警告并列出具体绑定**。
-      ⚠️ **现阶段 Revoked 不能单独当取证冻结用**
+      中和需要连带"可还原",没做;在做出来之前控制器**每次 Frozen 都打警告并列出具体绑定**。
+      ⚠️ **现阶段 Frozen 不能单独当取证冻结用**
 
 ---
 

@@ -78,10 +78,20 @@ const (
 	// without manufacturing an incident, and a tenant that cannot see its own
 	// objects will reasonably conclude they are gone.
 	SuspensionReadOnly TenantSuspensionMode = "ReadOnly"
-	// SuspensionRevoked stops the tenant operating at all, while its workloads
+	// SuspensionFrozen stops the tenant operating at all, while its workloads
 	// keep running exactly as they are. It is the investigation case: the
 	// tenant must not touch anything, and the evidence must not move.
-	SuspensionRevoked TenantSuspensionMode = "Revoked"
+	//
+	// Frozen in the sense an account is frozen: reversible, and what was there
+	// is still there. It is deliberately not called revoked -- nothing is
+	// revoked. The tenant's certificate still authenticates; what is withdrawn
+	// is its authorization, and lifting the suspension gives it straight back.
+	//
+	// It is the tenant's ability to act that is frozen, not its workloads.
+	// Those keep running, which is the point in both the billing and the
+	// investigation case. Kubernetes uses "suspend" for the opposite -- a
+	// suspended Job stops -- so this is worth being explicit about.
+	SuspensionFrozen TenantSuspensionMode = "Frozen"
 )
 
 // TenantSuspension describes a suspension in force.
