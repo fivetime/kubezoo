@@ -255,7 +255,11 @@
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
-- [ ] **system CRD 共享机制未实现** —— FAQ 描述了但全仓零命中。决定:实现,还是把 FAQ 改成实话?
+- [ ] **system CRD 共享机制未实现** —— ~~决定:实现,还是把 FAQ 改成实话?~~
+      **FAQ 已改成实话**(中英文都改了,并附实测:平台装 `clonesets.platform.io` 后
+      租户 `api-resources`/`get crd` 全空、创建报 `no matches for kind`)。
+      剩下的只是产品决策:**要不要实现**。若要实现,与 findings I 否决掉的
+      "共享对象按租户投影"是同一个坑,合并设计
 
 ### 1.3 三方对象契约 ⭐ 必须先定再实现
 
@@ -506,6 +510,12 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       摘掉标签即**绕过整套策略**,此时他仍有全权建 Pod ⇒ B1 隔离前提全部落空
       - 同族问题仓库里已出现一次:配额 webhook 的 objectSelector(见 2.3)。
         **通用规则:排除条件只能建立在租户无法控制的东西上**
+- [ ] ⭐ **优先 MAP/VAP(进程内)而不是 webhook** —— 见架构文档 §8.0。
+      代价:MAP **没有 autogen**,PodSpec 那 8~9 个 kind 要逐个手写路径(`CronJob` 多一层)
+- [ ] **把三个 class 字段的丢弃从 kubezoo 迁到策略层** —— 现在是过渡态。
+      迁移时三个容易丢的点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`)、
+      `spec.priority` 要跟 `priorityClassName` 一起清、废弃的 `kubernetes.io/ingress.class`
+      注解要跟字段一起删。迁完即从 kubezoo 删除
 - [ ] 必备策略(前四条 PSA 管不了,必须策略引擎实现):
       - [ ] **P0 强制注入 `runtimeClassName=<kata>`** —— 租户不写默认是 runc(共享内核);
             且 RuntimeClass 是 cluster-scoped,租户写 `kata` 会被改写成 `<tid>-kata` 而不存在
@@ -518,6 +528,10 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       per-namespace RoleBinding(1.1)、`kubetron-network` ConfigMap(3.2)、PSA 标签、
       ResourceQuota/LimitRange
 - [ ] `failurePolicy` 定为 **`Fail` + 多副本 + PDB**(`Ignore` 的失效是静默的,直接击穿隔离前提)
+      - ⭐ **但这个两难可以绕开**:`MutatingAdmissionPolicy` 在 **1.36 已 GA 且默认开**,
+        跑在 apiserver 进程内,**根本没有 failurePolicy 这一说**。凡能用 CEL 表达的走 MAP/VAP
+      - ⚠️ 若确实用 Kyverno:`forceFailurePolicyIgnore` 环境变量能**一次性把所有策略变成 Ignore**
+        (`pkg/toggle/toggle.go:24`)。必须锁死并纳入巡检,否则 `Fail` 只是纸面上的
 - [ ] ⚠️ 实测租户看到的**拒绝消息**内容 —— `TrimTenantIDFromError` 能擦租户前缀,
       但擦不掉策略名和平台标签白名单(泄露面)
 - [ ] ⚠️ **能不用 Kyverno 的 `context` lookup 就别用** —— 它要 cache 集群状态,

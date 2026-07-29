@@ -391,7 +391,77 @@ merge patch 置 null、json patch remove、改成别的租户 id)上游标签一
 
 ---
 
-## 8. 准入策略层(Kyverno)
+## 8. 准入策略层
+
+### 8.0 ⭐ 职责划分判据(kubezoo vs 策略层)
+
+先定这条,后面每条策略往哪放都由它决定。**判据来自能力边界,不是口味。**
+
+#### 硬约束:准入只有写路径
+
+准入(webhook / VAP / MAP)只作用于 **AdmissionRequest**,**碰不到响应**。凡是"租户必须
+**看到**一个被翻译过的视图"的事,策略层结构上做不了:list/get/watch 的返回、discovery、
+openapi、错误文案里的前缀擦除。
+
+由此推出一条更强的:**前缀化天生是双向的**。策略引擎能在写入时加前缀,却**永远无法在读回时
+去掉** —— 租户会看到 `111111-default`。**所以寻址必须在 kubezoo,这不是取舍,是能力边界。**
+
+反过来:**只有写路径、不需要读回对应动作的约束,策略层就能做**。
+
+#### 判据
+
+| 这条规则… | 归属 |
+|---|---|
+| 需要租户**看到**翻译后的视图 | **kubezoo**(唯一能) |
+| 只在写路径,且**换个平台会变** | **策略层** |
+| 只在写路径,但保护的是**寻址边界**(集群级资源无 RBAC 兜底) | **kubezoo** |
+
+第三行的存在是因为 RBAC 的 `resourceNames` 是精确匹配,表达不了"名字以 `<tid>-` 开头" ——
+集群级资源上改写层是唯一防线,不能把它挪到一个可能失效的组件里。
+
+#### ⚠️ 前提已变:策略层不再等于 webhook
+
+本章原先假定策略层就是 Kyverno webhook。**1.36 起不成立**:
+
+- `MutatingAdmissionPolicy` 在 **1.36 已 GA 且默认开**
+  (`pkg/features/kube_features.go:2428-2431`,`v1` API),支持 `JSONPatch`
+  ⇒ **`op: remove` 能删字段**
+- 它**跑在 apiserver 进程内**:没有 webhook、没有网络跳、没有 `failurePolicy` 失效面,
+  **也就没有 §8.5 那个单点**
+
+⇒ 凡能用 CEL 表达的策略,**优先 MAP/VAP 而不是 webhook**。
+
+#### 三个候选家的实测能力差异
+
+| | kubezoo | Kyverno(webhook) | VAP/MAP(进程内) |
+|---|---|---|---|
+| 改写读路径 | ✅ **唯一能** | ❌ | ❌ |
+| 删字段 | ✅ | ✅ | ✅ JSONPatch |
+| **注入**值(如强制 kata) | 能但不该 | ✅ | ✅ |
+| **PodSpec 嵌 9 个 kind** | 手写(已做) | ✅ **autogen 自动派生** | ❌ **要逐 kind 手写路径** |
+| 失效模式 | 永在请求路径上 | 默认 `Fail`,但见下 | 无 |
+| 改策略成本 | **发版** | 改 CR | 改 CR |
+
+⚠️ **Kyverno 的运维炸弹**:`forceFailurePolicyIgnore` 环境变量
+(`pkg/toggle/toggle.go:24`)**一个开关把所有策略变成 Ignore**。默认 false,
+但意味着隔离前提可以被一个环境变量静默拆掉 —— 部署时必须锁死并纳入巡检。
+
+⚠️ **Kyverno 的 autogen 不含 `PodTemplate`**(`pkg/autogen/v1/autogen.go:19` 只有
+7 个控制器 + Pod)。kubezoo 现在覆盖 9 个。实际风险低(PodTemplate 的 spec 不会自己跑),
+但**迁移时这是个会静默缩小覆盖面的差异**。
+
+⚠️ **Gatekeeper 删不掉标量字段**:`Assign` 只能赋值,`ModifySet` 只管列表。
+做注入可以,做丢弃不行。
+
+#### 两层是依赖关系,不是并列
+
+策略层看到的是**改写后的上游对象**(namespace 是 `111111-default`),它按租户匹配靠的是
+`kubezoo.io/tenant` 标签 —— **而这个标签租户摘不掉,是 kubezoo 保证的**(四种摘法实测全失败,
+见 `isolation-audit-cn.md` 通过项)。
+
+**策略层的匹配条件建立在 kubezoo 提供的不变量上**,这正是 §8.1 铁律的落点。
+
+---
 
 ### 8.1 ⭐ 铁律:策略匹配一律反向写
 
@@ -420,7 +490,7 @@ exclude:
 
 | 策略 | 优先级 | 说明 |
 |---|---|---|
-| **约束 `runtimeClassName`** | **P0** | B1 的隔离前提。租户不写默认是 runc,与其他租户共享内核。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在,所以只能由平台强制注入"——**该字段根本不被改写**。#82 实测:租户写 `runtimeClassName: kata` **原样落到上游并生效**,尽管它 `get runtimeclass kata` 是 NotFound。所以真实情况不是"租户用不了"而是**"租户可以引用平台的任意 RuntimeClass",包括 runc ⇒ 直接跑出沙箱**。修法见 #82 findings I,尚未定案 |
+| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | **P0** | B1 的隔离前提。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`(全集群最高优先级)。<br>**定案:租户设置无效,平台决定。** 按 §8.0 判据这属于**策略层**(纯写路径 + 换平台会变)。<br>⚠️ **当前是过渡态**:实现暂放在 kubezoo(`pkg/convert/platformfields.go` + 代理层告警),因为策略层尚未部署,删了等于逃逸重开。**策略上线即从 kubezoo 移除**。<br>迁移时注意三点:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);要连 `spec.priority` 一起清;要连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
 | **拒绝 `spec.nodeName`** | **P0** | 直接绕过调度器,把 Pod 钉到任意节点 |
 | **清空/白名单 `tolerations`** | **P0** | 否则可跑到不该跑的节点,包括控制面节点 |
 | PSA `restricted` 等价规则 | **P0** | hostNetwork / hostPID / hostIPC / privileged / hostPath |
@@ -431,6 +501,9 @@ exclude:
 前四条 PSA 管不了(PSA 不覆盖 nodeName/tolerations/nodeSelector),必须由策略引擎实现。
 
 ### 8.3 为什么选 Kyverno 而非 Gatekeeper
+
+⚠️ **先看 §8.0**:能用 CEL 表达的策略应当**优先 MAP/VAP(进程内)**,本节比较的是
+"确实需要一个策略引擎"时选哪个。Kyverno 还能**生成** VAP/MAP,可作为过渡路径。
 
 | 理由 | 说明 |
 |---|---|
@@ -461,6 +534,11 @@ Gatekeeper 的优势(供将来重新评估):Rego 表达力更强、audit 机制�
 - `Ignore` → 策略**静默失效**,回到 §8.1 的绕过场景
 
 **建议 `Fail` + 多副本 + PDB**。理由:`Ignore` 的失效是静默的、且直接击穿隔离前提。
+
+⭐ **但这个两难本身可以绕开**:MAP/VAP 跑在 apiserver 进程内,**没有 failurePolicy 这一说**。
+凡能用 CEL 表达的,走 MAP/VAP 就不必在"全体建不了 Pod"和"策略静默失效"之间选。
+⚠️ 另外 Kyverno 有 `forceFailurePolicyIgnore` 环境变量能**一次性把所有策略变成 Ignore**
+(`pkg/toggle/toggle.go:24`),部署时必须锁死并纳入巡检 —— 否则 `Fail` 只是纸面上的。
 
 ---
 

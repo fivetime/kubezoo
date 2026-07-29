@@ -56,6 +56,23 @@ const legacyIngressClassAnnotation = "kubernetes.io/ingress.class"
 // by whatever means it likes -- a default class, an admission policy -- and what
 // the tenant writes here is dropped on the way in.
 //
+// ⚠️ This lives here as an interim measure, and should be removed.
+//
+// By the rule in the architecture document, a constraint that only touches the
+// write path and would differ from one platform to the next belongs to the
+// policy layer, not here. This one qualifies on both counts: nothing has to be
+// undone on the way back out, and which runtime a workload gets is exactly the
+// kind of thing a platform changes. Keeping it in Go means changing it needs a
+// release.
+//
+// It is here only because the policy layer is not deployed yet, and deleting it
+// before that would reopen the escape -- a tenant naming any runtime handler the
+// platform defines, or system-cluster-critical. It goes when the policy exists.
+// Three things are easy to lose in that move: the pod spec is embedded in nine
+// kinds and Kyverno's autogen covers eight of them, spec.priority has to be
+// cleared alongside the class name, and the deprecated
+// kubernetes.io/ingress.class annotation has to go with the field.
+//
 // Dropping rather than rejecting is deliberate: ingressClassName in particular
 // appears in almost every published example, and refusing those manifests would
 // break a great deal for no gain. So that the drop is not silent, the caller
