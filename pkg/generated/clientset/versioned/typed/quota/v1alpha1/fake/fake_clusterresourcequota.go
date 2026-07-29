@@ -19,116 +19,34 @@ limitations under the License.
 package fake
 
 import (
-	"context"
-
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
-	testing "k8s.io/client-go/testing"
-
 	v1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
+	gentype "k8s.io/client-go/gentype"
 )
 
-// FakeClusterResourceQuotas implements ClusterResourceQuotaInterface
-type FakeClusterResourceQuotas struct {
+// fakeClusterResourceQuotas implements ClusterResourceQuotaInterface
+type fakeClusterResourceQuotas struct {
+	*gentype.FakeClientWithList[*v1alpha1.ClusterResourceQuota, *v1alpha1.ClusterResourceQuotaList]
 	Fake *FakeQuotaV1alpha1
 }
 
-var clusterresourcequotasResource = schema.GroupVersionResource{Group: "quota.kubezoo.io", Version: "v1alpha1", Resource: "clusterresourcequotas"}
-
-var clusterresourcequotasKind = schema.GroupVersionKind{Group: "quota.kubezoo.io", Version: "v1alpha1", Kind: "ClusterResourceQuota"}
-
-// Get takes name of the clusterResourceQuota, and returns the corresponding clusterResourceQuota object, and an error if there is any.
-func (c *FakeClusterResourceQuotas) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.ClusterResourceQuota, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootGetAction(clusterresourcequotasResource, name), &v1alpha1.ClusterResourceQuota{})
-	if obj == nil {
-		return nil, err
+func newFakeClusterResourceQuotas(fake *FakeQuotaV1alpha1) quotav1alpha1.ClusterResourceQuotaInterface {
+	return &fakeClusterResourceQuotas{
+		gentype.NewFakeClientWithList[*v1alpha1.ClusterResourceQuota, *v1alpha1.ClusterResourceQuotaList](
+			fake.Fake,
+			"",
+			v1alpha1.SchemeGroupVersion.WithResource("clusterresourcequotas"),
+			v1alpha1.SchemeGroupVersion.WithKind("ClusterResourceQuota"),
+			func() *v1alpha1.ClusterResourceQuota { return &v1alpha1.ClusterResourceQuota{} },
+			func() *v1alpha1.ClusterResourceQuotaList { return &v1alpha1.ClusterResourceQuotaList{} },
+			func(dst, src *v1alpha1.ClusterResourceQuotaList) { dst.ListMeta = src.ListMeta },
+			func(list *v1alpha1.ClusterResourceQuotaList) []*v1alpha1.ClusterResourceQuota {
+				return gentype.ToPointerSlice(list.Items)
+			},
+			func(list *v1alpha1.ClusterResourceQuotaList, items []*v1alpha1.ClusterResourceQuota) {
+				list.Items = gentype.FromPointerSlice(items)
+			},
+		),
+		fake,
 	}
-	return obj.(*v1alpha1.ClusterResourceQuota), err
-}
-
-// List takes label and field selectors, and returns the list of ClusterResourceQuotas that match those selectors.
-func (c *FakeClusterResourceQuotas) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.ClusterResourceQuotaList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootListAction(clusterresourcequotasResource, clusterresourcequotasKind, opts), &v1alpha1.ClusterResourceQuotaList{})
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &v1alpha1.ClusterResourceQuotaList{ListMeta: obj.(*v1alpha1.ClusterResourceQuotaList).ListMeta}
-	for _, item := range obj.(*v1alpha1.ClusterResourceQuotaList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested clusterResourceQuotas.
-func (c *FakeClusterResourceQuotas) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewRootWatchAction(clusterresourcequotasResource, opts))
-}
-
-// Create takes the representation of a clusterResourceQuota and creates it.  Returns the server's representation of the clusterResourceQuota, and an error, if there is any.
-func (c *FakeClusterResourceQuotas) Create(ctx context.Context, clusterResourceQuota *v1alpha1.ClusterResourceQuota, opts v1.CreateOptions) (result *v1alpha1.ClusterResourceQuota, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootCreateAction(clusterresourcequotasResource, clusterResourceQuota), &v1alpha1.ClusterResourceQuota{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterResourceQuota), err
-}
-
-// Update takes the representation of a clusterResourceQuota and updates it. Returns the server's representation of the clusterResourceQuota, and an error, if there is any.
-func (c *FakeClusterResourceQuotas) Update(ctx context.Context, clusterResourceQuota *v1alpha1.ClusterResourceQuota, opts v1.UpdateOptions) (result *v1alpha1.ClusterResourceQuota, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootUpdateAction(clusterresourcequotasResource, clusterResourceQuota), &v1alpha1.ClusterResourceQuota{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterResourceQuota), err
-}
-
-// UpdateStatus was generated because the type contains a Status member.
-// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *FakeClusterResourceQuotas) UpdateStatus(ctx context.Context, clusterResourceQuota *v1alpha1.ClusterResourceQuota, opts v1.UpdateOptions) (*v1alpha1.ClusterResourceQuota, error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootUpdateSubresourceAction(clusterresourcequotasResource, "status", clusterResourceQuota), &v1alpha1.ClusterResourceQuota{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterResourceQuota), err
-}
-
-// Delete takes name of the clusterResourceQuota and deletes it. Returns an error if one occurs.
-func (c *FakeClusterResourceQuotas) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewRootDeleteActionWithOptions(clusterresourcequotasResource, name, opts), &v1alpha1.ClusterResourceQuota{})
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeClusterResourceQuotas) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	action := testing.NewRootDeleteCollectionAction(clusterresourcequotasResource, listOpts)
-
-	_, err := c.Fake.Invokes(action, &v1alpha1.ClusterResourceQuotaList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched clusterResourceQuota.
-func (c *FakeClusterResourceQuotas) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.ClusterResourceQuota, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewRootPatchSubresourceAction(clusterresourcequotasResource, name, pt, data, subresources...), &v1alpha1.ClusterResourceQuota{})
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*v1alpha1.ClusterResourceQuota), err
 }

@@ -19,11 +19,10 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
-
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
+	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
 )
 
 // TenantLister helps list Tenants.
@@ -31,39 +30,19 @@ import (
 type TenantLister interface {
 	// List lists all Tenants in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.Tenant, err error)
+	List(selector labels.Selector) (ret []*tenantv1alpha1.Tenant, err error)
 	// Get retrieves the Tenant from the index for a given name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1alpha1.Tenant, error)
+	Get(name string) (*tenantv1alpha1.Tenant, error)
 	TenantListerExpansion
 }
 
 // tenantLister implements the TenantLister interface.
 type tenantLister struct {
-	indexer cache.Indexer
+	listers.ResourceIndexer[*tenantv1alpha1.Tenant]
 }
 
 // NewTenantLister returns a new TenantLister.
 func NewTenantLister(indexer cache.Indexer) TenantLister {
-	return &tenantLister{indexer: indexer}
-}
-
-// List lists all Tenants in the indexer.
-func (s *tenantLister) List(selector labels.Selector) (ret []*v1alpha1.Tenant, err error) {
-	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*v1alpha1.Tenant))
-	})
-	return ret, err
-}
-
-// Get retrieves the Tenant from the index for a given name.
-func (s *tenantLister) Get(name string) (*v1alpha1.Tenant, error) {
-	obj, exists, err := s.indexer.GetByKey(name)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errors.NewNotFound(v1alpha1.Resource("tenant"), name)
-	}
-	return obj.(*v1alpha1.Tenant), nil
+	return &tenantLister{listers.New[*tenantv1alpha1.Tenant](indexer, tenantv1alpha1.Resource("tenant"))}
 }

@@ -19,10 +19,9 @@ limitations under the License.
 package fake
 
 import (
+	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
-
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1"
 )
 
 type FakeTenantV1alpha1 struct {
@@ -30,7 +29,7 @@ type FakeTenantV1alpha1 struct {
 }
 
 func (c *FakeTenantV1alpha1) Tenants() v1alpha1.TenantInterface {
-	return &FakeTenants{c}
+	return newFakeTenants(c)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

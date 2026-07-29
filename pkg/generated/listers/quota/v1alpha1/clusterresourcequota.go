@@ -19,11 +19,10 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
-
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	labels "k8s.io/apimachinery/pkg/labels"
+	listers "k8s.io/client-go/listers"
+	cache "k8s.io/client-go/tools/cache"
 )
 
 // ClusterResourceQuotaLister helps list ClusterResourceQuotas.
@@ -31,39 +30,19 @@ import (
 type ClusterResourceQuotaLister interface {
 	// List lists all ClusterResourceQuotas in the indexer.
 	// Objects returned here must be treated as read-only.
-	List(selector labels.Selector) (ret []*v1alpha1.ClusterResourceQuota, err error)
+	List(selector labels.Selector) (ret []*quotav1alpha1.ClusterResourceQuota, err error)
 	// Get retrieves the ClusterResourceQuota from the index for a given name.
 	// Objects returned here must be treated as read-only.
-	Get(name string) (*v1alpha1.ClusterResourceQuota, error)
+	Get(name string) (*quotav1alpha1.ClusterResourceQuota, error)
 	ClusterResourceQuotaListerExpansion
 }
 
 // clusterResourceQuotaLister implements the ClusterResourceQuotaLister interface.
 type clusterResourceQuotaLister struct {
-	indexer cache.Indexer
+	listers.ResourceIndexer[*quotav1alpha1.ClusterResourceQuota]
 }
 
 // NewClusterResourceQuotaLister returns a new ClusterResourceQuotaLister.
 func NewClusterResourceQuotaLister(indexer cache.Indexer) ClusterResourceQuotaLister {
-	return &clusterResourceQuotaLister{indexer: indexer}
-}
-
-// List lists all ClusterResourceQuotas in the indexer.
-func (s *clusterResourceQuotaLister) List(selector labels.Selector) (ret []*v1alpha1.ClusterResourceQuota, err error) {
-	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
-		ret = append(ret, m.(*v1alpha1.ClusterResourceQuota))
-	})
-	return ret, err
-}
-
-// Get retrieves the ClusterResourceQuota from the index for a given name.
-func (s *clusterResourceQuotaLister) Get(name string) (*v1alpha1.ClusterResourceQuota, error) {
-	obj, exists, err := s.indexer.GetByKey(name)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errors.NewNotFound(v1alpha1.Resource("clusterresourcequota"), name)
-	}
-	return obj.(*v1alpha1.ClusterResourceQuota), nil
+	return &clusterResourceQuotaLister{listers.New[*quotav1alpha1.ClusterResourceQuota](indexer, quotav1alpha1.Resource("clusterresourcequota"))}
 }
