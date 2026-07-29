@@ -113,7 +113,22 @@
         `certificates.k8s.io/v1`、`resource.k8s.io/v1`(DRA);以及已暴露 group 内部的
         `admissionregistration/v1` 策略对象、`networking/v1` 的 ipaddresses/servicecidrs
         —— 后两类是**集群级配置,租户大概率不该碰**
-- [ ] `pkg/util/util.go` 的 `groupKindNamespaced` 表(60+ 条)按 1.36 更新
+- [x] `pkg/util/util.go` 的 `groupKindNamespaced` 表按 1.36 更新 — `ad3e45c`。54 → 68 条
+      - 这张表决定 ownerReference/objectReference 走哪半边改写:**集群级 ⇒ 给 name 加租户前缀,
+        namespaced ⇒ 不加**(前缀在 namespace 上)。把集群级误标成 namespaced,
+        两个租户在同名集群对象上就直接撞车
+      - ⭐ **54 条已有条目作用域全部正确,零错** —— 这是个干净的负面结论,不是修复
+      - 真正的问题是**覆盖不全**:16 个 apiserver 提供的 kind 不在表里 ⇒ `IsGroupKindNamespaced`
+        报错 ⇒ 落到 `unregistered crd group`。其中 `resource.k8s.io/ResourceClaim`、
+        `ResourceClaimTemplate` 是**租户 Pod 现在就可能引用**的。已全部补上
+      - 删 `extensions/Ingress`、`policy/PodSecurityPolicy`(kind 已不存在)
+      - ⚠️ `autoscaling/Scale` 看着也像退役,**实际没有** —— 它作为 `deployments/scale` 的 kind
+        还活着(namespaced=true)。核实过才没误删
+      - **守卫测试**对比表与真实 discovery(旧表上精确报出 16 缺 + 2 陈旧)。两个必须做对的点:
+        只有**顶层资源**算基准(只有它们能被引用;子资源的 kind 是请求体,如 `PodExecOptions`/
+        `Eviction`/`TokenRequest`,不该进表);**只作为子资源 kind 出现的不算陈旧**(即 Scale,
+        discovery 把它挂在父资源的 group 下,不是表里用的 autoscaling)
+      - 需要真 apiserver ⇒ 归入 `make test-integration`(现在也覆盖 `pkg/util`),单元跑时 skip
 - [ ] `make codegen` 重新生成 + `make verify-codegen` 通过
 - [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
       —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
