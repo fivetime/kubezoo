@@ -304,6 +304,9 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
             并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
       - [ ] P1 **落点控制:每租户节点池 + 注入替换**(设计已定,见架构 §8.2.2)
+            > **一句话原则(用户定案):租户看不到节点,没有任何调度权,他写的东西会被平台替换掉。**
+            **完成判据 = 租户不能通过任何一条写入路径影响落点**,不只是 PodSpec 字段 ——
+            `pods/binding` 是 Pod 建好之后的**另一次写入**,替换够不到它(§Q)
             - 每租户有自己的 worker 节点池,**节点带污点**防普通应用调度过来
             - 平台**替换**租户 Pod 的落点字段:注入该池 `nodeSelector` + `toleration`
               + `topologySpreadConstraints`(**不是拒绝**)
