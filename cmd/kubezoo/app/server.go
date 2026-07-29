@@ -136,7 +136,12 @@ cluster's shared state through which all other components interact.`,
 	namedFlagSets := s.Flags()
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name())
-	options.AddCustomGlobalFlags(namedFlagSets.FlagSet("generic"))
+	// AddCustomGlobalFlags used to re-register flags that internal packages
+	// pushed into the global "flag" flagset. Nothing does that any more: the
+	// in-tree GCE provider was deleted, and default-{not-ready,unreachable}-
+	// toleration-seconds moved into AdmissionOptions.AddFlags, which s.Flags()
+	// above already calls. Re-registering them here now panics, because they
+	// are no longer in the global flagset to look up.
 	for _, f := range namedFlagSets.FlagSets {
 		fs.AddFlagSet(f)
 	}
