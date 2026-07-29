@@ -18,7 +18,7 @@
 | **F** | ⛔⛔ **租户可自建 `*` on `*` 的 ClusterRole 并绑给自己,完全废掉 #87** | ⛔ 最高 | **已修并实测** |
 | **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
 | H | 配额:每 namespace 各一份额度 / `objectSelector` 标签可绕过 / 单点 | ⛔ 高 | **绕过已修,其余坐实** |
-| **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | ⛔ **当前开着** —— 归策略层,策略层未部署 |
+| **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | **策略层已实现并实测**(`config/policy/`,lab 默认装 Kyverno) |
 | J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **已修并实测**(集群级残留=vanilla 行为) |
 | K | `serviceaccounts/token`、`pods/eviction`、`pods/binding` 解不出请求体 | ⚠️ 中 | **已修并实测** |
 | L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + 文档自相矛盾 | ⚠️ 中 | **已修并实测** |
@@ -391,19 +391,15 @@ priorityClassName: system-cluster-critical  → 上游 priority=2000000000
 按架构文档 §8.0 的判据,执行**属于策略层**:它只在写路径(丢了不需要反向还原),
 而"负载该用哪个 runtimeClass"**换个平台就会变**,放进 Go 代码意味着改策略要发版。
 
-### ⛔ 当前状态:**这条越权是开着的**
+### 现状:**由策略层执行,已实测**
 
-曾经在 kubezoo 里实现过一版(入站丢弃 + admission warning),**已按职责划分删除**
-(`pkg/convert/platformfields.go` 与代理层挂钩)。删除的理由是不越俎代庖,
-**代价是在策略层部署之前,下面这些照样成立**:
+曾经在 kubezoo 里实现过一版,**已按职责划分删除** —— 那是策略层的活。
+策略现在在 `config/policy/tenant-platform-classes.yaml`,**lab 默认装 Kyverno 并应用它**,
+所以测试环境跑的是完整形态。
 
-```
-租户的 Pod / Deployment 写 runtimeClassName: <平台任意 handler>  → 生效,可跑出沙箱
-租户写 priorityClassName: system-cluster-critical               → priority=2000000000,抢占其它租户
-租户写 ingressClassName: <平台的>                                → 接上平台 ingress 控制器
-```
-
-⚠️ **不要把这条当成已解决。** 策略上线前它是一条真实可用的越权。
+实测(租户侧提交,看上游落地):Pod / **Deployment 模板** / **CronJob 模板**(嵌两层)/
+Ingress(字段 + 废弃注解)**全部清空**,无关注解 `keep-me` 保留;
+⭐ 负向对照:**平台自己 `kube-system` 里的 Pod 保留 `runtimeClassName: kata`**,没有被误伤。
 
 ### 迁到策略层时,三个当时踩过的坑不要再踩
 

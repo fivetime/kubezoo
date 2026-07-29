@@ -26,7 +26,7 @@
 | 建**集群级**对象撞名 / 探测存在性 | 名字前缀是唯一防线,**RBAC 表达不了前缀** |
 | 建准入 webhook | 未收口时**全集群生效**,能打死其他租户和平台 |
 | 建 ClusterRole 给自己提权 | `escalate`/`bind` 动词就是那条豁免 |
-| 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | ⛔ **当前就是如此** —— 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 |
+| 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 —— 由策略层拦(`config/policy/`) |
 | 读发现面 / OpenAPI | 枚举出其它租户的 id、CRD 组名与 schema |
 | 摘掉自己 namespace 上的平台标签 | 策略匹配与退租清理同时失效 |
 | 退租时留下永不完成的 finalizer | namespace 永久 Terminating,租户 ID 不可复用 |
@@ -70,14 +70,14 @@
 
 | 约束 | 现状 |
 |---|---|
-| `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)由平台决定 | ⛔ **当前无人执行**,见下 |
-| 拒绝 DaemonSet | **未做**。实测租户能创建,并在平台节点上真跑起 Pod |
+| `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)由平台决定 | ✅ **策略已写并实测** `config/policy/` |
+| 拒绝 DaemonSet | ✅ **策略已写并实测**(租户被拒;平台自己的 DaemonSet 不受影响) |
 | PSA `restricted` 等价规则(hostNetwork / hostPID / hostIPC / privileged / hostPath) | 未做 |
 | 拒绝 `spec.nodeName`、约束 `tolerations` / `nodeSelector` | 未做 |
 
-⛔ **第一条当前完全没人执行**。kubezoo 里曾实现过一版(入站丢弃 + admission warning),
-已按 §2 的判据删除 —— 那是策略层的活,不该由控制面越俎代庖。**代价是在策略上线之前,
-租户可以跑出沙箱、可以抢占全集群**。这使它成为策略层待办里**最紧的一条**。
+⭐ **策略在 `config/policy/`,lab 默认安装 Kyverno 并应用它们** —— 没有它们的 lab
+测的不是完整形态,而上面每一条不生效时都是一条实测可用的越权。
+⚠️ 那个目录的 README 记了两个会让策略 **"Ready 但什么都不做"** 的坑,改策略前务必看。
 
 ⭐ **优先用 `MutatingAdmissionPolicy`(1.36 已 GA 且默认开)而不是 webhook**:
 它跑在 apiserver 进程内,没有 webhook、没有 `failurePolicy`、**没有单点**。

@@ -217,19 +217,13 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
 > 实测记录与负向对照都在那里,**那份是权威版本,不要在这里复述**。
 > 安全边界的总览见 [`docs/security-admission.md`](docs/security-admission.md)。
 
-findings A–M 共 13 条,除下列三条外全部已修并实测:
+findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSet 由**策略层**执行,
+策略在 `config/policy/`,lab 默认装 Kyverno 并应用):
 
-- [ ] ⛔⛔ **I:三个 class 字段 —— 当前开着的越权**。曾在 kubezoo 实现过一版,
-      **已按职责划分删除**(归策略层,判据见架构文档 §8.0)。在策略上线前:
-      租户写 `runtimeClassName: <平台任意 handler>` **生效,可跑出沙箱**;
-      写 `priorityClassName: system-cluster-critical` 拿到 **priority=2000000000** 抢占其它租户;
-      写 `ingressClassName` 接上平台 ingress 控制器。**不要当成已解决**
 - [ ] **`-A` 与 cluster-scoped 请求** —— #87 之后对租户直接 Forbidden。
       改成"逐 namespace 扇出合并"要先定两个语义让步,见 §4.1 与架构文档 §11.5:
       **分页**(kubectl 默认就带 `--chunk-size=500`)与 **resourceVersion**
       (跨 namespace 没有单一快照,而旧行为是有的)
-- [ ] **DaemonSet 未拒绝** —— 实测租户能创建,并在平台节点上真跑起 Pod。归策略层(§3.1),
-      ⚠️ 但策略层尚未部署,**这条目前完全没人管**
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次:
 > 脚本参数错位、前一步删过 Pod 导致用量归零、`nodeName` 造假让 Pod 被 GC、

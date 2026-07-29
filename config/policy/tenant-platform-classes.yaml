@@ -1,0 +1,156 @@
+# 平台自有的集群级"类"对象不由租户决定。
+#
+# 租户看不见平台的 RuntimeClass / PriorityClass / IngressClass(它们没有租户前缀,
+# 读路径按前缀过滤掉了),但**引用是按名字的**,所以不拦就能引用到:
+#   runtimeClassName: <平台任意 handler>       → 跑出沙箱
+#   priorityClassName: system-cluster-critical → priority=2000000000,抢占其它租户
+#   ingressClassName: <平台的>                 → 接上平台 ingress 控制器
+#
+# 丢弃而非拒绝:ingressClassName 几乎出现在每个公开示例里,拒绝会大面积破坏兼容性。
+# 平台要给负载指定哪个类,由平台另行注入(本策略只负责"租户说了不算")。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-platform-classes
+  annotations:
+    policies.kyverno.io/title: 平台自有的类对象不由租户决定
+    # ⚠️ autogen 覆盖 7 个 pod controller + Pod,不含 PodTemplate。
+    # 只写 Pod 规则、靠 autogen 派生,才不会漏掉 Deployment 这条最常见的路径。
+    pod-policies.kyverno.io/autogen-controllers: DaemonSet,Deployment,Job,StatefulSet,ReplicaSet,ReplicationController,CronJob
+spec:
+  # ⚠️ Fail,不是 Ignore。Ignore 的失效是静默的,直接击穿隔离前提。
+  failurePolicy: Fail
+  background: false
+  rules:
+    # ------------------------------------------------------------------
+    # Pod(及 autogen 派生出的各 pod controller)
+    # ------------------------------------------------------------------
+    - name: drop-pod-platform-classes
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        # ⭐ 铁律:排除平台自己的 namespace,匹配其余全部。
+        # 不用正向选租户标签 —— 新租户 namespace 不依赖任何标签就已被覆盖。
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - kyverno
+                - local-path-storage
+      mutate:
+        patchesJson6902: |-
+          - op: remove
+            path: /spec/runtimeClassName
+          - op: remove
+            path: /spec/priorityClassName
+          # ⚠️ priority 是解析出来的数值。只清名字会留下租户直接写进去的数字。
+          - op: remove
+            path: /spec/priority
+    # ------------------------------------------------------------------
+    # Ingress:字段与那个废弃注解必须一起删
+    # ------------------------------------------------------------------
+    - name: drop-ingress-class
+      match:
+        any:
+          - resources:
+              kinds: [Ingress]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - kyverno
+                - local-path-storage
+      mutate:
+        patchesJson6902: |-
+          - op: remove
+            path: /spec/ingressClassName
+          # ⚠️ 废弃但多数 ingress 控制器仍然认它。只清字段等于没清。
+          - op: remove
+            path: /metadata/annotations/kubernetes.io~1ingress.class
+
+    # ------------------------------------------------------------------
+    # ⚠️ pod controller 必须**显式**写,不能靠 autogen。
+    # autogen 只从 patchStrategicMerge 派生;而 patchStrategicMerge 的删除写法是置
+    # `null`,**null 会被 apiserver 在存 CRD 字段时剪掉** —— 实测存进去的是
+    # `{"patchStrategicMerge":{"spec":{}}}`,策略 Ready 且**什么都不做**。
+    # 所以这里用 JSON6902(能删),代价就是 autogen 不派生,得自己列全。
+    # 覆盖 7 个控制器,路径都是 /spec/template/spec;CronJob 多一层,单列。
+    # ------------------------------------------------------------------
+    - name: drop-controller-platform-classes
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet, ReplicaSet, ReplicationController, Job]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - kyverno
+                - local-path-storage
+      mutate:
+        patchesJson6902: |-
+          - op: remove
+            path: /spec/template/spec/runtimeClassName
+          - op: remove
+            path: /spec/template/spec/priorityClassName
+          - op: remove
+            path: /spec/template/spec/priority
+    - name: drop-cronjob-platform-classes
+      match:
+        any:
+          - resources:
+              kinds: [CronJob]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - kyverno
+                - local-path-storage
+      mutate:
+        patchesJson6902: |-
+          - op: remove
+            path: /spec/jobTemplate/spec/template/spec/runtimeClassName
+          - op: remove
+            path: /spec/jobTemplate/spec/template/spec/priorityClassName
+          - op: remove
+            path: /spec/jobTemplate/spec/template/spec/priority
+    - name: drop-podtemplate-platform-classes
+      match:
+        any:
+          - resources:
+              kinds: [PodTemplate]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - default
+                - kyverno
+                - local-path-storage
+      mutate:
+        patchesJson6902: |-
+          - op: remove
+            path: /template/spec/runtimeClassName
+          - op: remove
+            path: /template/spec/priorityClassName
+          - op: remove
+            path: /template/spec/priority
