@@ -361,9 +361,20 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
       - `ingressClassName`:自己的**静默失效**(Ingress 无准入期存在性校验),平台的直接接上控制器
       - `priorityClassName`:`system-cluster-critical` ⇒ **priority=2000000000**,
         全集群最高,抢占其它租户(已核 1.36 源码:该类不再有 kube-system 限制)
-      - [ ] 定架构再改:**不能简单加前缀**(会让租户永远用不了平台共享类)。
-        A=引用加前缀+按租户投影一份平台共享类(与"system CRD 共享机制"同一个坑,合并设计);
-        B=不改写但用 Kyverno 白名单限死取值(`priorityClassName` 只能走 B)
+      - [x] **已修并实测 —— 定为平台决策面,租户设置无效**(决定已下)。
+        加前缀+投影的方案否决了:前缀化会让租户永远用不了平台共享类(kata/nginx),
+        而那是唯一正确的用法。现在这三个字段**入站即丢**(`pkg/convert/platformfields.go`),
+        平台用什么手段决定是平台的事
+      - ⚠️ **丢弃而非拒绝**:`ingressClassName` 几乎在每个示例里,拒绝会大面积破坏兼容性。
+        代价是丢弃**是安静的**;要带上 admission warning 需要 handler chain 里的
+        warning recorder + 转换器接口带 ctx,两者都还没有 —— 记为后续
+      - ⭐ **坑:PodSpec 嵌在 9 个 kind 里**,只处理 Pod 会漏掉 Deployment 这条最常见路径
+        且看起来像做完了(与 Node 三处豁免同形)。加了守卫:**服务面里结构上带 PodSpec 的
+        kind 必须在覆盖清单里**(反射判定 —— 拿空对象调 `PodSpecOf` 会因 RC 的 nil Template
+        漏判;反射还能抓到"新增 kind 但 `PodSpecOf` 不认识")。摘掉 Deployment 立刻报红
+      - ⚠️ 仓库自带测试抓到:必须**同时认内部版与外部版类型**,两者各有各的 PodSpec;
+        只认内部版时,走外部版的路径**不报错、只安静地不清理**,等于逃逸重新打开
+      - 复测:Pod / Deployment / CronJob / Ingress(含废弃的 `ingress.class` 注解)全部清空,无关注解保留
 - [x] ⛔ **`kubectl auth can-i` 对租户全错** —— J 节。SAR 的 `resourceAttributes.namespace` 不转换。
       判据是四行对照:租户问=no / 租户做=成功 / 上游问转换后的 ns=yes / 上游问未转换的=no。
       ⚠️ **#87 之前看不见**(那时 `*` on `*` 问什么都回 yes)—— 这类缺陷会跟着每次权限收紧冒出来
