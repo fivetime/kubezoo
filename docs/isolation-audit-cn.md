@@ -14,6 +14,8 @@
 | C | PVC 的 `spec.volumeName` 未改写 | ⚠️ 中 | **已修并实测** |
 | D | `PVTranformer` / `PVCTransformer` 写好了但**从未接线** | ⚠️ 中(B/C 的成因) | **已接线,并加接线守卫** |
 | E | Node 对所有租户可见 | ⚠️ 中 | 实测确认(已知,TODO 1.2) |
+| **F** | ⛔⛔ **租户可自建 `*` on `*` 的 ClusterRole 并绑给自己,完全废掉 #87** | ⛔ 最高 | **已修并实测** |
+| **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
 | — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints | ✅ 正确 | 实测通过 |
 
 ---
@@ -151,6 +153,46 @@ NewPVCTransformer    被引用 0 次
 **实测**确认:租户 `kubectl get nodes` 能列出平台节点。
 成因是 `pkg/util/util.go` 里为通过 Conformance 加的 TODO 分支。已记在 TODO 1.2,取舍不是难题。
 
+## F. 租户可以把 #87 的兜底整个拆掉 ⛔⛔ —— 已修复
+
+`clusterScopedRules()` 对 rbac 资源授的是 `*` 动词。**`*` 包含 `escalate` 和 `bind`,
+而这两个动词的唯一用途就是"允许提权"** —— RBAC 本来拒绝你创建超出自身权限的角色,
+它们正是那条豁免。
+
+**实测(修前)**:租户三步拆掉 #87 ——
+
+1. 建 ClusterRole `escalate`,规则 `*` on `*` → 上游 `111111-escalate`,**创建成功**
+2. 建 ClusterRoleBinding 把 `admin`(改写后 = 自己的上游身份 `111111-admin`)绑上去,**成功**
+3. 上游判定:读 222222 的 secret → **yes**;读 kube-system → **yes**;全集群 list pods → **yes**
+
+**根因定位靠对照组**:同样授予 clusterroles 资源、但**显式列出动词且不含 escalate/bind** 的用户,
+第 1 步即 Forbidden。`auth can-i escalate clusterroles --as=111111-admin` → **yes**,坐实。
+
+**修法**:rbac 资源的动词改为显式列出(get/list/watch/create/update/patch/delete/deletecollection),
+**不含 escalate/bind**。修后重放:第 1 步 Forbidden;绑到平台现成的 `cluster-admin` 虽然创建成功,
+但 **roleRef 被改写层改成 `111111-cluster-admin`(租户自己的窄角色)⇒ 绑了等于没绑** —— 两层防御都在。
+正当用途保留:租户仍可创建自身权限范围内的 ClusterRole 并绑给自己的 SA。
+
+## G. `nodes/proxy` = 完整租户逃逸 ⛔⛔ —— 已修复
+
+**实测(修前)**:租户**经 kubezoo** 打 `/api/v1/nodes/<node>/proxy/pods`,
+列出该节点上**全部** Pod,含 `kube-system` 的 etcd。由此可读任意 Pod 日志、exec 进任意容器。
+绕过 kubezoo 直打上游同样成功。**这条路径是 proxy,改写层根本看不到 path**,所以纯靠上游 RBAC。
+
+⭐ **根因是方法学**:`clusterScopedRules()` 当初是**机械地从 apigroups.go 的暴露面推导**的 ——
+`nodes/proxy` 被服务,所以就被授权。**"授予一切被服务的"继承了暴露面里的每一个坏决定。**
+
+**修法**:授权改为逐资源指定动词,并新增 `notGrantedToTenants` 显式拒绝清单:
+`nodes/proxy`(本条逃逸)、`nodes/status`(写节点状态是 kubelet 的事)、
+`namespaces/status` 与 `namespaces/finalize`(namespace 控制器的事;finalize 还能强推终结)。
+守卫测试相应改形:**服务面 = 授权 ∪ 显式拒绝**,既保住同步性,又让拒绝读起来是决定而非遗漏。
+
+修后重放:两条路径均 Forbidden。
+
+⚠️ **kubectl 的坑**:`kubectl auth can-i get nodes/proxy` 的**斜杠写法会把 proxy 当成资源名**,
+答 `yes` 是错的;`--subresource=proxy` 才对(答 `no`),实际请求也确实 Forbidden。
+**判据要用实际请求,不能只信 can-i。**
+
 ## 通过的项(正向对照)
 
 均为**实测**:
@@ -169,7 +211,11 @@ NewPVCTransformer    被引用 0 次
 
 - **配额三条**(架构文档 §9)仍是**读码结论,未做运行时复现**:生效范围、
   `objectSelector` 标签绕过、`UpdateQuotaStatus` 空实现导致的并发超发
-- watch(含 `resourceVersion=0` 全量)、label/field selector、`kubectl auth can-i`、
+- **`-A` / 全集群 LIST 现在对租户直接 Forbidden**(#87 的副作用,实测)。
+  这顺带堵掉了 TODO 1.2 说的"全量 LIST + 过滤"规模墙与 DoS 面,
+  但也意味着 `kubectl get pods -A` 对租户**不可用** ⇒ 需按 TODO 1.2 改为
+  "先取租户 namespace 列表,再逐 namespace scoped LIST 合并"
+- watch(含 `resourceVersion=0` 全量)、label/field selector、
   SA token 换权、discovery/OpenAPI 泄露 —— 未测
 - `Pod.spec.runtimeClassName` / `Ingress.spec.ingressClassName` 未改写导致的**悬空引用**:
   读码可见,未实测。架构文档已就 runtimeClass 定过"只能由平台强制注入"

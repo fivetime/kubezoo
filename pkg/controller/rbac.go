@@ -80,34 +80,89 @@ func tenantClusterRole(tenantID string) string {
 // proxy, and tenants do create them.
 func clusterScopedRules() []rbacv1.PolicyRule {
 	return []rbacv1.PolicyRule{
-		rbacv1helpers.NewRule("*").Groups("").Resources(
-			"componentstatuses",
-			"namespaces", "namespaces/finalize", "namespaces/status",
-			"nodes", "nodes/proxy", "nodes/status",
-			"persistentvolumes", "persistentvolumes/status",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("admissionregistration.k8s.io").Resources(
-			"mutatingwebhookconfigurations", "validatingwebhookconfigurations",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("apiextensions.k8s.io").Resources(
-			"customresourcedefinitions", "customresourcedefinitions/status",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("authentication.k8s.io").Resources(
-			"tokenreviews",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("authorization.k8s.io").Resources(
-			"selfsubjectaccessreviews", "selfsubjectrulesreviews", "subjectaccessreviews",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("networking.k8s.io").Resources(
-			"ingressclasses",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("node.k8s.io").Resources(
-			"runtimeclasses",
-		).RuleOrDie(),
-		rbacv1helpers.NewRule("*").Groups("rbac.authorization.k8s.io").Resources(
-			"clusterroles", "clusterrolebindings",
-		).RuleOrDie(),
+		// Namespaces are the tenant's own, created through kubezoo, which
+		// prefixes them. status and finalize belong to the namespace controller.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch", "delete").
+			Groups("").Resources("namespaces").RuleOrDie(),
+
+		// Read-only. Whether tenants should see nodes at all is a separate
+		// question -- kubezoo shows them unconditionally today -- but nothing
+		// gives a tenant a reason to write one.
+		rbacv1helpers.NewRule("get", "list", "watch").
+			Groups("").Resources("nodes", "componentstatuses").RuleOrDie(),
+
+		// Prefixed by the convertor, so tenants cannot collide or reach each
+		// other's.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("").Resources("persistentvolumes", "persistentvolumes/status").RuleOrDie(),
+
+		// Confined by pkg/convert's webhook transformer, which forces the
+		// namespace selector, the rule scope and the client config.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("admissionregistration.k8s.io").
+			Resources("mutatingwebhookconfigurations", "validatingwebhookconfigurations").RuleOrDie(),
+
+		// The tenant's own CRDs, group-prefixed by the CRD convertor.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("apiextensions.k8s.io").
+			Resources("customresourcedefinitions", "customresourcedefinitions/status").RuleOrDie(),
+
+		// Create-only APIs: they take a request and return an answer, and there
+		// is nothing to list or delete.
+		rbacv1helpers.NewRule("create").Groups("authentication.k8s.io").
+			Resources("tokenreviews").RuleOrDie(),
+		rbacv1helpers.NewRule("create").Groups("authorization.k8s.io").
+			Resources("selfsubjectaccessreviews", "selfsubjectrulesreviews", "subjectaccessreviews").RuleOrDie(),
+
+		// Cluster-scoped but name-prefixed like any other.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("networking.k8s.io").Resources("ingressclasses").RuleOrDie(),
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("node.k8s.io").Resources("runtimeclasses").RuleOrDie(),
+
+		// Verbs are spelled out here rather than "*", and the two that are
+		// missing are the point.
+		//
+		// "escalate" and "bind" exist precisely to permit privilege escalation:
+		// RBAC normally refuses to let you create a role carrying permissions you
+		// do not hold, and those verbs are the documented exemption. Granting
+		// "*" grants them, and a tenant could then create a ClusterRole with "*"
+		// on "*", bind its own upstream identity to it, and undo every bound in
+		// this file. That was verified against a real cluster: with "*" the
+		// tenant reached other tenants' secrets and kube-system; with the verbs
+		// below it cannot create such a role at all.
+		rbacv1helpers.NewRule("get", "list", "watch", "create", "update", "patch",
+			"delete", "deletecollection").
+			Groups("rbac.authorization.k8s.io").
+			Resources("clusterroles", "clusterrolebindings").RuleOrDie(),
 	}
+}
+
+// notGrantedToTenants names cluster-scoped resources kubezoo serves that tenants
+// are deliberately not authorized for upstream, with the reason.
+//
+// The grant above used to be derived mechanically from what apigroups.go serves,
+// which kept the two in step but inherited every questionable decision in the
+// served surface. nodes/proxy is why that is not good enough: it was served, so
+// it was granted, and a tenant could then reach the kubelet API on any node --
+// verified, listing every pod on the node including kube-system's, and from
+// there the logs and a shell in any container of any tenant. It is a proxy, so
+// the rewriting layer never sees the path.
+var notGrantedToTenants = map[string][]string{
+	"": {
+		// The escape above. Nothing a tenant does needs it.
+		"nodes/proxy",
+		// Writing node status is the kubelet's job.
+		"nodes/status",
+		// The namespace controller's, not a tenant's; finalize in particular
+		// would let a tenant force a namespace through termination.
+		"namespaces/status", "namespaces/finalize",
+	},
 }
 
 // syncClusterRoles reconciles the two ClusterRoles a tenant needs.
@@ -319,4 +374,10 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 // comparison has to live there, since pkg cannot import cmd.
 func ClusterScopedRulesForTest() []rbacv1.PolicyRule {
 	return clusterScopedRules()
+}
+
+// NotGrantedToTenantsForTest exposes the deliberate exclusions so that
+// cmd/kubezoo/app can tell them apart from an accidental gap.
+func NotGrantedToTenantsForTest() map[string][]string {
+	return notGrantedToTenants
 }

@@ -78,10 +78,23 @@ func TestClusterScopedGrantsCoverWhatWeServe(t *testing.T) {
 		"apiextensions.k8s.io": {"customresourcedefinitions": true, "customresourcedefinitions/status": true},
 	}
 
+	// Serving a resource is not a reason to authorize tenants for it. The grant
+	// was once derived straight from the served surface, which is how
+	// nodes/proxy came to be granted and gave tenants the kubelet API on every
+	// node. Refusals are listed explicitly so they read as decisions, and so
+	// that an accidental gap still fails below.
+	refused := map[string]map[string]bool{}
+	for group, resources := range controller.NotGrantedToTenantsForTest() {
+		refused[group] = map[string]bool{}
+		for _, resource := range resources {
+			refused[group][resource] = true
+		}
+	}
+
 	var missing, extra []string
 	for group, resources := range served {
 		for resource := range resources {
-			if !granted[group][resource] {
+			if !granted[group][resource] && !refused[group][resource] {
 				missing = append(missing, group+"/"+resource)
 			}
 		}
@@ -98,8 +111,8 @@ func TestClusterScopedGrantsCoverWhatWeServe(t *testing.T) {
 	sort.Strings(extra)
 
 	for _, r := range missing {
-		t.Errorf("apigroups.go serves cluster-scoped %s but the tenant grant omits it; "+
-			"tenants would get Forbidden from upstream", r)
+		t.Errorf("apigroups.go serves cluster-scoped %s but the tenant grant omits it and it is "+
+			"not in notGrantedToTenants; either grant it or refuse it on purpose, with a reason", r)
 	}
 	for _, r := range extra {
 		t.Errorf("the tenant grant covers cluster-scoped %s, which apigroups.go no longer "+
