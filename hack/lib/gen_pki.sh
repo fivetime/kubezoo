@@ -155,14 +155,24 @@ EOF
     cd -
 }
 
+# base64file emits a file as one unwrapped base64 line.
+#
+# The wrapping flag differs between implementations, so try each rather than
+# asking who wrote it: the GNU test used to be a grep for "GNU" in --help, which
+# the Rust coreutils base64 fails while still taking -w 0, so it fell through to
+# the BSD branch and its -b was rejected. Nothing checked, so caBundle came out
+# empty and the webhook it configures failed its TLS handshake later, somewhere
+# else.
 base64file() {
     input=${1}
-    if base64 --help | grep GNU >/dev/null; then
-        # gnu base64
-        base64 -w 0 "${input}"
-    elif base64 --help | grep "input" >/dev/null; then
-        base64 -b 0 -i "${input}"
+    if base64 -w 0 "${input}" 2>/dev/null; then
+        return 0
     fi
+    if base64 -b 0 -i "${input}" 2>/dev/null; then
+        return 0
+    fi
+    echo "base64file: no known way to emit ${input} unwrapped; tried -w 0 and -b 0 -i" >&2
+    return 1
 }
 
 gen_quota_webhook_cert() {

@@ -336,10 +336,31 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
       - ⚠️ **方法学(踩了三次)**:配额测试对环境状态极敏感,连续三次拿到无效对照
         (脚本参数错位没加上标签 / 前一步删过 Pod 导致用量归零 / `nodeName` 造假让 Pod 被 GC)。
         **每次都"看起来得出了结论"。先确认起点状态,再做单一变量对照。**
-- [ ] watch(含 `resourceVersion=0` 全量)、label/field selector、`kubectl auth can-i`、
-      SA token 换跨租户权限、discovery/OpenAPI 泄露
-- [ ] `Pod.spec.runtimeClassName` / `Ingress.spec.ingressClassName` 未改写 ⇒ **悬空引用**(读码,未实测)
-- [ ] `Pod.spec.priorityClassName` 不改写 ⇒ 租户可引用平台 PriorityClass 抬高调度优先级(读码,未实测)
+- [x] watch / field selector / 发现面 —— **实测通过**(见 `docs/isolation-audit-cn.md` 通过项)
+      - watch 从 `resourceVersion=0` 看集群级资源:只回自己的,且做了去前缀转换;
+        负向对照是"窗口内平台和另一租户都写了东西"
+      - namespace 名字花招无效;⚠️ 差点误判:错误文案被 `TrimTenantIDFromError` 擦过前缀,
+        **看着像没加前缀**。错误文案不能当证据,要看上游落地的对象名
+- [x] ⛔ **三个"类"引用字段坐实,比读码结论更重** —— I 节。不只是悬空,还能引用平台的:
+      - `runtimeClassName`:自己的建不出来(Forbidden),**平台的 `kata` 建得出来**
+        ⇒ B1 架构里租户写 `runc` 就跑在 kata 沙箱外,**承重**
+      - `ingressClassName`:自己的**静默失效**(Ingress 无准入期存在性校验),平台的直接接上控制器
+      - `priorityClassName`:`system-cluster-critical` ⇒ **priority=2000000000**,
+        全集群最高,抢占其它租户(已核 1.36 源码:该类不再有 kube-system 限制)
+      - [ ] 定架构再改:**不能简单加前缀**(会让租户永远用不了平台共享类)。
+        A=引用加前缀+按租户投影一份平台共享类(与"system CRD 共享机制"同一个坑,合并设计);
+        B=不改写但用 Kyverno 白名单限死取值(`priorityClassName` 只能走 B)
+- [x] ⛔ **`kubectl auth can-i` 对租户全错** —— J 节。SAR 的 `resourceAttributes.namespace` 不转换。
+      判据是四行对照:租户问=no / 租户做=成功 / 上游问转换后的 ns=yes / 上游问未转换的=no。
+      ⚠️ **#87 之前看不见**(那时 `*` on `*` 问什么都回 yes)—— 这类缺陷会跟着每次权限收紧冒出来
+      - [ ] 补 SAR 转换器:`SubjectAccessReview` / `SelfSubjectAccessReview` / `LocalSubjectAccessReview`
+- [x] ⛔ **两个子资源解不出请求体** —— K 节。`serviceaccounts/token`(`kubectl create token` 唯一取法)
+      与 `pods/eviction`(PDB 生效路径)沿用了父资源 Kind。`scale` 没事是因为**只给 scale 想到了**
+      - [ ] 修:`StorageConfig` 支持子资源自带 body kind
+- [x] ⛔ **`/openapi/v2` 原样透传** —— L 节。任一租户能枚举其它租户 id + CRD 组名/Kind/schema;
+      自己的 CRD 也在错误组名下 ⇒ `kubectl explain widget` 失败而 `get widgets` 正常。
+      对照:自己的也是上游名字 ⇒ **整条路径一次转换都没有**。`/openapi/v3` 与 `/apis` 干净
+      - [ ] 修:v2 走与 v3 / discovery 相同的按租户过滤+转换
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次。
 

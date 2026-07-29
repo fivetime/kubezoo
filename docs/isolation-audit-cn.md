@@ -16,7 +16,12 @@
 | E | Node 对所有租户可见 | ⚠️ 中 | 实测确认(已知,TODO 1.2) |
 | **F** | ⛔⛔ **租户可自建 `*` on `*` 的 ClusterRole 并绑给自己,完全废掉 #87** | ⛔ 最高 | **已修并实测** |
 | **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
-| — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints | ✅ 正确 | 实测通过 |
+| H | 配额:每 namespace 各一份额度 / `objectSelector` 标签可绕过 / 单点 | ⛔ 高 | **绕过已修,其余坐实** |
+| **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | **坐实,待定架构** |
+| J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **坐实,待修** |
+| K | `serviceaccounts/token`、`pods/eviction` 解不出请求体 | ⚠️ 中 | **坐实,待修** |
+| L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + `explain` 失效 | ⚠️ 中 | **坐实,待修** |
+| — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints、**watch 过滤**、**field selector**、**发现面** | ✅ 正确 | 实测通过 |
 
 ---
 
@@ -264,19 +269,160 @@ webhook 原本用 `objectSelector: app NotIn [kubezoo-cluster-resource-quota]` �
 - **跨租户 ownerReference**:指向另一租户对象的 namespaced ownerReference 会悬空并被 GC 回收
   —— k8s 本身禁止跨 namespace 的 owner,所以这条不构成通道
 - **上游 RBAC 兜底**(#87 引入):跨租户 namespaced 访问被上游拒绝,已带负向对照
+- **watch 按租户过滤且做了反向转换**:租户 1 从 `resourceVersion=0` watch
+  **集群级**的 runtimeclasses,窗口内平台和租户 2 各建一个,两个都没出现在流里;
+  自己的对象以**去前缀**的名字出现(`myrc` 而非 `111111-myrc`)。
+  ⚠️ 负向对照就是"窗口内别人确实写了" —— 没有这一步,一条空流说明不了任何事
+- **namespace 名字花招无效**:租户 1 建名为 `222222-x` 的 namespace,
+  上游落成 `111111-222222-x`,租户 2 看不到。
+  ⚠️ 差点误判:租户请求 `-n 222222-default` 时报错文案写的是 namespace `"222222-default"`,
+  看着像没加前缀 —— 那是 `TrimTenantIDFromError` 把 `111111-` 从**错误消息**里擦掉了。
+  **错误文案不能当证据**,要看上游落地的对象名
+- **field selector 不构成通道**:`metadata.namespace=222222-default` 在自己 ns 内查,返回空
+- **CRD 发现面隔离**:租户 1 建 `widgets.acme.io`(上游 `widgets.111111-acme.io`),
+  租户 2 的 `api-resources --api-group=acme.io`、`get crd`、`/apis`、`/openapi/v3` 全为空
+  —— 但 `/openapi/v2` 泄露,见 L 节
+
+## I. 三个"按名引用集群级对象"的字段 ⛔ 坐实
+
+这三条此前都是读码结论。本轮在双租户 lab 里逐条跑通,**结论比读码更重**:
+不只是"悬空引用"这一半,另一半是**租户可以引用平台的同类对象**。
+
+集群级资源按**名字**加前缀,而引用它们的字段**原样透传**,于是同一个名字
+在两个方向上都错:自己的引用不到,别人的引用得到。
+
+| 字段 | 引用自己的 | 引用平台的 |
+|---|---|---|
+| `Pod.spec.runtimeClassName` | ⛔ **建不出来** | ⛔ **成功** |
+| `Ingress.spec.ingressClassName` | ⚠️ **静默失效** | ⛔ **成功** |
+| `Pod.spec.priorityClassName` | (不暴露 PriorityClass) | ⛔ **成功** |
+
+### ① RuntimeClass:自己的用不了,平台的用得上
+
+租户建 `RuntimeClass/myrc` → 上游是 `111111-myrc`。随后:
+
+```
+# 引用自己刚建的:
+Error from server (Forbidden): pod rejected: RuntimeClass "myrc" not found
+# 引用平台的(租户 get 它是 NotFound,看都看不见):
+pod/p-platform-rc created     上游 runtimeClassName=kata
+```
+
+**这一条对 B1 架构是承重的**:kata 是计算隔离边界,而 RuntimeClass 名字空间
+对租户是"看不见但可用"的全局空间 —— 租户写 `runtimeClassName: runc`
+(或任何平台其它 handler)就跑在沙箱外。RuntimeClass 还带
+`scheduling.nodeSelector` 与 `overhead`,引用平台的类同时把平台的节点选择器一起带上。
+
+### ② IngressClass:同样两头错,而且是静默的
+
+租户建 `IngressClass/myic` → 上游 `111111-myic`;租户的 Ingress 里
+`ingressClassName: myic` **原样落到上游**,指向一个不存在的类。
+Ingress **没有准入期存在性校验**,所以对象创建成功、读回来一字不差、
+永远没有控制器认领 —— 比 RuntimeClass 那个响亮的 Forbidden 更难查。
+
+反向:`ingressClassName: platform-nginx` 直接接上平台的 ingress 控制器。
+到这一步 host/path 归属就只由控制器裁决了,kubezoo 不参与。
+
+### ③ priorityClassName:可以拿到全集群最高优先级
+
+PriorityClass **根本没对租户暴露**(`api-resources` 里没有,LIST 报 404),
+但字段不改写,于是:
+
+```
+priorityClassName: platform-high            → 上游 priority=1000000
+priorityClassName: system-cluster-critical  → 上游 priority=2000000000
+```
+
+`system-cluster-critical` 不再有"仅限 kube-system"的准入限制
+(已核对 1.36 源码 `plugin/pkg/admission/priority/admission.go:359` 的
+`resolvePriorityClass`,只查存在性)。**任一租户可以把自己的 Pod 抬到
+全集群最高优先级,抢占其它租户的负载。**
+
+### 修法方向(未实施,需定架构)
+
+三条同源,不能简单"加前缀了事"——前缀化会让租户**永远用不了平台的共享类**
+(kata / nginx),而那恰恰是唯一正确的用法。可选:
+
+- **A(与现模型一致)**:引用字段加前缀,同时由租户控制器为每个租户
+  **复制一份**平台共享类(`<tid>-kata` 拷贝平台 kata 的 handler)。
+  租户写 `kata` 得到 `<tid>-kata`,handler 正确;写 `runc` 得到 `<tid>-runc`,不存在 ⇒ 拒绝。
+  逃逸和悬空同时关掉。代价:多一套"共享对象投影"机制(与 TODO 1.2 的
+  "system CRD 共享机制"是同一个坑,应合并设计)
+- **B**:字段不改写,但用准入策略把取值限死在平台白名单里(Kyverno,3.1)。
+  `priorityClassName` 只能这么办 —— PriorityClass 不对租户暴露,没有"自己的"可言
+
+## J. `kubectl auth can-i` 对租户全错 ⛔ 坐实
+
+SubjectAccessReview 的 `spec.resourceAttributes.namespace` **不经转换**直接送上游。
+
+```
+租户:  kubectl auth can-i create pods -n default   → no
+租户:  kubectl run ... -n default                  → pod/cani-control created
+上游:  can-i create pods -n 111111-default --as=111111-admin → yes
+上游:  can-i create pods -n default        --as=111111-admin → no
+```
+
+四行放在一起才是判据:**答案是"no",动作却成功**,而上游对转换后/未转换的
+namespace 分别给出 yes/no —— 定位到未转换的那一个。
+
+⚠️ **#87 之前这条是看不见的**:那时租户在上游是 `*` on `*` 集群级,
+问任何 namespace 都回 yes,恰好"看起来对"。收紧权限才让它显形。
+这类缺陷会跟着每一次权限收紧冒出来,不是 #87 引入的 bug 而是 #87 揭出的。
+
+`pkg/convert` 里没有 SAR 转换器(有 TokenReview 的,没有 SAR 的)。
+三个 kind 都要:`SubjectAccessReview` / `SelfSubjectAccessReview` /
+`LocalSubjectAccessReview`(后者本身 namespaced,路径与 body 两处都要一致)。
+
+## K. 两个子资源解不出请求体 ⛔ 坐实
+
+`apigroups.go` 里子资源沿用父资源的 Kind,而**请求体不是父资源**的那些就崩:
+
+```
+kubectl create token robot
+  → TokenRequest in version "v1" cannot be handled as a ServiceAccount:
+    converting (v1.TokenRequest) to (core.ServiceAccount): unknown conversion
+POST pods/<name>/eviction
+  → Eviction in version "v1" cannot be handled as a Pod: unknown conversion
+```
+
+`scale` 不受影响,因为它本来就有专门的 `groupVersionKindForScale`。
+所以这不是"没想到",而是**只给 scale 想到了**。
+
+影响:1.24 之后 `kubectl create token` 是取 SA token 的唯一方式;
+`eviction` 是 PDB 生效的路径,也就是说租户侧任何优雅驱逐都走不通。
+(Pod 内的 projected token 由上游 kubelet 签发,不走这条路,所以工作负载本身不受影响。)
+
+## L. `/openapi/v2` 原样透传 ⛔ 坐实
+
+`/openapi/v2` 是上游文档**未过滤、未转换**地发给每个租户:
+
+```
+租户 222222 拉 /openapi/v2,里面有:
+  /apis/111111-acme.io/v1/namespaces/{namespace}/widgets
+  io.111111-acme.v1.Widget
+```
+
+带对照:租户 222222 自己的 CRD 也是以 `222222-beta.io` 出现的 ——
+**两边都是上游名字**,证明这条路径上一次转换都没发生,不是"漏了某个租户"。
+
+两个后果:
+
+- **信息泄露**:任一租户能枚举出所有其它租户的 id、CRD 组名、Kind 与 schema
+- **功能坏掉**:租户自己的 CRD 也在错误的组名下,所以
+  `kubectl explain widget` → `couldn't find resource for "acme.io/v1, Resource=widgets"`,
+  尽管 `kubectl get widgets` 完全正常
+
+`/openapi/v3` 与 `/apis` 都是干净的(见"通过的项"),只有 v2 这条没接转换。
 
 ## 尚未覆盖
 
 诚实列出,不算做完:
 
-- (配额三条已完成,见下节)
 - **`-A` / 全集群 LIST 现在对租户直接 Forbidden**(#87 的副作用,实测)。
   这顺带堵掉了 TODO 1.2 说的"全量 LIST + 过滤"规模墙与 DoS 面,
   但也意味着 `kubectl get pods -A` 对租户**不可用** ⇒ 需按 TODO 1.2 改为
   "先取租户 namespace 列表,再逐 namespace scoped LIST 合并"
-- watch(含 `resourceVersion=0` 全量)、label/field selector、
-  SA token 换权、discovery/OpenAPI 泄露 —— 未测
-- `Pod.spec.runtimeClassName` / `Ingress.spec.ingressClassName` 未改写导致的**悬空引用**:
-  读码可见,未实测。架构文档已就 runtimeClass 定过"只能由平台强制注入"
-- `Pod.spec.priorityClassName`:PriorityClass 未对租户暴露,但该字段不改写,
-  租户可引用平台的 PriorityClass 抬高调度优先级 —— 读码结论,未实测
+- 跨租户 Ingress host/path 抢占:一旦两租户都接到平台 ingress 控制器上(见 I②),
+  归属由控制器裁决,kubezoo 不参与 —— 未测,属 3.1 策略层
+- 租户自建 webhook 的 `failurePolicy: Fail` 对平台组件的影响面(已限 Namespaced + 本租户 ns,
+  但同租户内仍可自锁)—— 未测
