@@ -271,22 +271,27 @@ kubezoo / kubetron / Kyverno **都会往租户的 Pod 上写东西**,而**只有
 
 ### 审计结论:三条待修 + 两条已知
 
-- [ ] ⛔ **A 最高:租户可注册全集群生效的准入 webhook** —— `apigroups.go` 暴露了
+- [x] ⛔ **A 最高(已修 `5609db5`):租户可注册全集群生效的准入 webhook** —— `apigroups.go` 暴露了
       mutating/validating webhookconfigurations,而 `pkg/convert` **完全没碰它们**:
       `rules` 不带租户范围、`namespaceSelector` 空 ⇒ 匹配全集群;`clientConfig.service`
       不加前缀 ⇒ 指向平台命名空间。**实测:一个租户的一个对象同时打死另一个租户和平台自身**。
       改 `failurePolicy: Ignore` + 指向自己可达的服务,即可**读到全集群每个被创建的对象**
       ⚠️ **per-namespace RBAC(#87)挡不住** —— 集群级资源,`resourceNames` 表达不了名字前缀
-      · 修法待决策:**不暴露**这两个资源(与 KAaaS 定位相符,最简单),或强制注入
-      `namespaceSelector` + 改写 `clientConfig.service`(还需同时挡住 update)
-- [ ] ⛔ **B 高:PersistentVolume 走 `nopeConvertor`,完全未改写**。写路径不加前缀、
+      · **已定案并实现:转换层强制改写**(用户定"按生产准入修,不能留纰漏")。四处强制缺一即有出口:
+      `clientConfig.service.namespace` 加前缀 / `namespaceSelector` 强制为租户标签 /
+      每条 rule 的 `scope` 强制 `Namespaced`(⚠️ 最易漏 —— nsSelector 对集群级资源不生效) /
+      `clientConfig.url` 直接拒绝。**CRD 的 `spec.conversion.webhook.clientConfig` 同样收口**
+      (它是第二条同类路径,"不暴露 webhookconfigurations"堵不住它)
+- [x] ⛔ **B 高(已修 `5c90901`):PersistentVolume 走 `nopeConvertor`,完全未改写**。写路径不加前缀、
       读路径按前缀过滤,两边不对称 ⇒ ①上游是裸名 ②**创建者自己都 get 不到** ③另一租户建同名得
       `AlreadyExists`(**跨租户存在性泄露**)④谁都删不掉 ⇒ **对象永久滞留、名字被永久占用**
-- [ ] ⚠️ **C 中:PVC 的 `spec.volumeName` 未改写**(PVC 只走 `defaultConvertor`)。
+- [x] ⚠️ **C 中(已修 `5c90901`):PVC 的 `spec.volumeName` 未改写**。
       配合 B,**PV↔PVC 绑定整条链路没有转换**
+      ⚠️ **迁移**:修复前产生的裸名 PV 仍滞留上游且对所有人不可见,需运维手工清理(非本次引入)
 - [x] **D 成因已定位**:`NewPVTransformer` / `NewPVCTransformer` 实现完整、**单元测试都通过**,
       但 `init.go` **从未注册它们**(各被引用 0 次)。
       ⭐ **方法学:单元测试测的是转换器本身,没有任何测试检查它是否被接上**
+      · **已加两个"接线守卫"测试**(webhook 与 PV/PVC 各一),均验证过摘掉注册会报红
 - [x] **E 已知项现场确认**:Node 对所有租户可见(见 1.2)
 
 ### 通过项(实测正向对照)
@@ -294,6 +299,22 @@ kubezoo / kubetron / Kyverno **都会往租户的 Pod 上写东西**,而**只有
 namespace/name 前缀 · CRD 同名隔离(`widgets.111111-...` vs `widgets.222222-...`) ·
 Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 本身禁止跨 ns owner) ·
 上游 RBAC 兜底(#87,带负向对照)
+
+### 审计期间顺带发现并修掉的两条(与隔离无关但更致命)
+
+- [x] ⛔ **所有 PATCH 请求 panic** — `fce8bf9`。kubezoo 自建的 handler chain 漏了
+      `WithAuditInit`(上游 `DefaultBuildHandlerChain` 总会装,因为审计辅助函数**无条件解引用**
+      AuditContext)⇒ `audit.LogRequestPatch` 空指针。影响 `kubectl annotate/label/patch/scale/set image`
+      ⚠️ **它还推翻过一个结论**:我验证"租户不能 update 改宽 webhook"时用的正是 `kubectl patch`
+      且吞了 stderr —— 那次请求其实 panic 了,**验证什么都没证明**。修后用 PATCH + PUT 重做,结论成立
+- [x] ⛔ **退租时租户可留下 finalizer 永久卡死自己的 namespace** — `fce8bf9`。一行 YAML 即可。
+      爆炸半径实测:其他租户与平台不受影响,但**该租户 ID 被毒化** —— 同 ID 重开会得到半残租户
+      (4 个系统 ns 回来 3 个,租户第一个请求就 Forbidden)。
+      修法(用户定 A):退租**最后**强制清理全部 namespaced 资源的 finalizer ——
+      此时 ns 已 Terminating(不收新对象)、集群级绑定已删,不存在被重新挂上的窗口。
+      实测 4 个地雷(3 种类型 2 个 ns)10 秒内清干净
+- [x] 修掉本会话 #87 引入的重试循环:namespace watch 对 terminating 的 ns 也入队 ⇒
+      租户已删时产生持续 `tenants not found`。现跳过 terminating ns,租户 NotFound 视为无事可做
 
 ### 尚未覆盖(不算做完)
 
