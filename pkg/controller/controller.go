@@ -29,23 +29,20 @@ import (
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	rbacclient "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/component-helpers/auth/rbac/reconciliation"
 	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/apis/rbac"
-	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
 
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/common"
@@ -71,6 +68,11 @@ const (
 	verbDelete         = "delete"
 )
 
+// namespaceResyncPeriod is the repair interval for the per-namespace
+// RoleBindings. Creation is event-driven; this only catches a binding that was
+// deleted out from under us.
+const namespaceResyncPeriod = 10 * time.Minute
+
 // Event indicate the informerEvent
 type Event struct {
 	tenantId  string
@@ -82,6 +84,7 @@ type Event struct {
 type TenantController struct {
 	queue                   workqueue.RateLimitingInterface
 	tenantInformer          cache.SharedIndexInformer
+	namespaceInformer       cache.SharedIndexInformer
 	tenantLister            tenantlister.TenantLister
 	tenantClient            tenantclient.TenantV1alpha1Interface
 	clusterquotaCli         quotaclient.QuotaV1alpha1Interface
@@ -153,6 +156,28 @@ func Run(stopCh <-chan struct{}, ti cache.SharedIndexInformer, tenantCli tenantc
 
 	go tc.tenantInformer.Run(stopCh)
 
+	// A tenant's namespaces are not a fixed set: it creates more at any time,
+	// and each one needs its own RoleBinding before the tenant can use it.
+	// Waiting for the tenant resync would leave a tenant Forbidden in a
+	// namespace it just created, for as long as the resync period.
+	//
+	// The selector is the label's presence, not a particular tenant, so one
+	// informer serves all of them. pkg/convert stamps it on every namespace on
+	// the way through and refuses to let a tenant claim another tenant's id.
+	nsFactory := informers.NewSharedInformerFactoryWithOptions(typedCli, namespaceResyncPeriod,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = common.TenantNamespaceLabelKey
+		}))
+	tc.namespaceInformer = nsFactory.Core().V1().Namespaces().Informer()
+	if _, err := tc.namespaceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { tc.enqueueNamespaceOwner(obj) },
+		UpdateFunc: func(_, obj interface{}) { tc.enqueueNamespaceOwner(obj) },
+	}); err != nil {
+		utilruntime.HandleError(fmt.Errorf("adding the namespace event handler: %w", err))
+		return
+	}
+	nsFactory.Start(stopCh)
+
 	if !cache.WaitForCacheSync(stopCh, tc.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
@@ -162,10 +187,28 @@ func Run(stopCh <-chan struct{}, ti cache.SharedIndexInformer, tenantCli tenantc
 	wait.Until(tc.runWorker, time.Second, stopCh)
 }
 
-// HasSynced returns true if the shared informer's store has been
+// enqueueNamespaceOwner queues the tenant that owns a namespace, so that its
+// RoleBindings are reconciled as soon as the namespace exists rather than at the
+// next tenant resync.
+func (tc *TenantController) enqueueNamespaceOwner(obj interface{}) {
+	ns, ok := obj.(*corev1.Namespace)
+	if !ok {
+		return
+	}
+	tenantID := ns.Labels[common.TenantNamespaceLabelKey]
+	if tenantID == "" {
+		return
+	}
+	tc.queue.Add(Event{tenantId: tenantID, eventType: Update})
+}
+
+// HasSynced returns true if the shared informers' stores have been
 // informed by at least one full LIST of the authoritative state
-// of the informer's object collection.
+// of their object collections.
 func (tc *TenantController) HasSynced() bool {
+	if tc.namespaceInformer != nil && !tc.namespaceInformer.HasSynced() {
+		return false
+	}
 	return tc.tenantInformer.HasSynced()
 }
 
@@ -232,6 +275,34 @@ func (tc *TenantController) onTenantCreate(tenantID string) error {
 
 func (tc *TenantController) onTenantUpdate(tenantID string) error {
 	if err := tc.onTenantAddOrUpdate(tenantID); err != nil {
+		return err
+	}
+
+	// Update used to skip syncResources, so nothing converged a tenant's
+	// upstream namespaces and RBAC after they were first created: a resync
+	// produces Update, not Create, and so does every subsequent event. Deleting
+	// one of those objects left it deleted until kubezoo restarted and the
+	// informer's initial LIST replayed it as an Add.
+	//
+	// It matters more now that a namespace appearing is what triggers its
+	// RoleBinding. syncResources is idempotent -- the namespaces are gets, the
+	// certificate returns early once issued -- so converging here is cheap.
+	//
+	// Not while the tenant is going away, though: deletion arrives as an update
+	// that sets deletionTimestamp, and converging then puts back the namespaces
+	// and roles that onTenantAddOrUpdate has just torn down.
+	tenant, err := tc.tenantClient.Tenants().Get(context.TODO(), tenantID, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !tenant.ObjectMeta.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
+	if err := tc.syncResources(tenantID); err != nil {
 		return err
 	}
 
@@ -407,6 +478,9 @@ func (tc *TenantController) syncResources(tenantId string) error {
 	if err := syncClusterRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId); err != nil {
 		return err
 	}
+	if err := syncNamespaceRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId); err != nil {
+		return err
+	}
 	if err := genCertAndKubeconfig(tc.tenantClient, tenantId, tc.tenantLister, tc.clientCAFile, tc.clientCAKeyFile, tc.kubeZooHostAddress); err != nil {
 		return err
 	}
@@ -541,106 +615,6 @@ func syncNamespaces(coreClient v1.CoreV1Interface, tenantId string) error {
 				klog.Warningf("Failed to update the tenant namespace %s with error %v", expectNamespace.Name, err)
 				return err
 			}
-		}
-	}
-	return nil
-}
-
-// syncClusterRoles synchronize the cluster roles to upstream cluster.
-func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string) error {
-	if _, err := rbacClient.ClusterRoles().List(context.TODO(), metav1.ListOptions{ResourceVersion: "0"}); err != nil {
-		klog.Warningf("Failed to list the clusterroles %s with error %v", tenantId, err)
-		return err
-	}
-
-	clusterRoles := []rbacv1.ClusterRole{
-		{
-			// a "root" role which can do absolutely anything
-			ObjectMeta: metav1.ObjectMeta{Name: tenantId + "-" + "cluster-admin"},
-			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("*").Groups("*").Resources("*").RuleOrDie(),
-				rbacv1helpers.NewRule("*").URLs("*").RuleOrDie(),
-			},
-		},
-		{
-			// a role for a namespace level admin.  It is `edit` plus the power to grant permissions to other users.
-			ObjectMeta: metav1.ObjectMeta{Name: tenantId + "-" + "admin"},
-			AggregationRule: &rbacv1.AggregationRule{
-				ClusterRoleSelectors: []metav1.LabelSelector{
-					{MatchLabels: map[string]string{"rbac.authorization.k8s.io/aggregate-to-admin": "true"}},
-				},
-			},
-		},
-	}
-
-	for _, clusterRole := range clusterRoles {
-		opts := reconciliation.ReconcileRoleOptions{
-			Role:    reconciliation.ClusterRoleRuleOwner{ClusterRole: &clusterRole},
-			Client:  reconciliation.ClusterRoleModifier{Client: rbacClient.ClusterRoles()},
-			Confirm: true,
-		}
-		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			result, err := opts.Run()
-			if err != nil {
-				return err
-			}
-			switch {
-			case result.Protected && result.Operation != reconciliation.ReconcileNone:
-				klog.Warningf("skipped reconcile-protected clusterrole.%s/%s with missing permissions: %v", rbac.GroupName, clusterRole.Name, result.MissingRules)
-			case result.Operation == reconciliation.ReconcileUpdate:
-				klog.V(2).Infof("updated clusterrole.%s/%s with additional permissions: %v", rbac.GroupName, clusterRole.Name, result.MissingRules)
-			case result.Operation == reconciliation.ReconcileCreate:
-				klog.V(2).Infof("created clusterrole.%s/%s", rbac.GroupName, clusterRole.Name)
-			}
-			return nil
-		})
-		if err != nil {
-			// don't fail on failures, try to create as many as you can
-			klog.Warningf("unable to reconcile clusterrole.%s/%s: %v", rbac.GroupName, clusterRole.Name, err)
-			return err
-		}
-	}
-	return nil
-}
-
-// syncClusterRoleBindings synchronize the clusterrolebindings to upstream cluster.
-func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantId string) error {
-	if _, err := rbacClient.ClusterRoleBindings().List(context.TODO(), metav1.ListOptions{ResourceVersion: "0"}); err != nil {
-		klog.Warningf("Failed to list the clusterrolebindings %s with error %v", tenantId, err)
-		return err
-	}
-
-	clusterRoleBindings := []rbacv1.ClusterRoleBinding{
-		rbacv1helpers.NewClusterBinding(tenantId + "-" + "cluster-admin").Users(tenantId + "-" + "admin").BindingOrDie(),
-	}
-
-	for _, clusterRoleBinding := range clusterRoleBindings {
-		opts := reconciliation.ReconcileRoleBindingOptions{
-			RoleBinding: reconciliation.ClusterRoleBindingAdapter{ClusterRoleBinding: &clusterRoleBinding},
-			Client:      reconciliation.ClusterRoleBindingClientAdapter{Client: rbacClient.ClusterRoleBindings()},
-			Confirm:     true,
-		}
-		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			result, err := opts.Run()
-			if err != nil {
-				return err
-			}
-			switch {
-			case result.Protected && result.Operation != reconciliation.ReconcileNone:
-				klog.Warningf("skipped reconcile-protected clusterrolebinding.%s/%s with missing subjects: %v", rbac.GroupName, clusterRoleBinding.Name, result.MissingSubjects)
-			case result.Operation == reconciliation.ReconcileUpdate:
-				klog.V(2).Infof("updated clusterrolebinding.%s/%s with additional subjects: %v", rbac.GroupName, clusterRoleBinding.Name, result.MissingSubjects)
-			case result.Operation == reconciliation.ReconcileCreate:
-				klog.V(2).Infof("created clusterrolebinding.%s/%s", rbac.GroupName, clusterRoleBinding.Name)
-			case result.Operation == reconciliation.ReconcileRecreate:
-				klog.V(2).Infof("recreated clusterrolebinding.%s/%s", rbac.GroupName, clusterRoleBinding.Name)
-			}
-			return nil
-		})
-		if err != nil {
-			// don't fail on failures, try to create as many as you can
-			klog.Warningf("unable to reconcile clusterrole.%s/%s: %v", rbac.GroupName, clusterRoleBinding.Name, err)
-			return err
 		}
 	}
 	return nil
