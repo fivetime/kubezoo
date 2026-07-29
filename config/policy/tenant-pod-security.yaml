@@ -1,0 +1,56 @@
+# 租户 Pod 必须满足 Pod Security 的 restricted 等级。
+#
+# ⭐ 为什么不用原生 PSA(namespace 标签 pod-security.kubernetes.io/enforce):
+# 因为那个标签**归租户控制**。kubezoo 的 NamespaceTransformer 只钉死
+# kubezoo.io/tenant 一个标签,其余标签原样转发到上游。实测(见 isolation-audit-cn.md):
+#   - 租户建 namespace 时自带 enforce: privileged  → 上游 ns 拿到该标签
+#   - 或事后 kubectl label 改成 privileged        → 同样生效
+#   两条路径都让 privileged + hostNetwork 的 Pod 建成并 Running,
+#   即使全局 AdmissionConfiguration 已经把默认值设成 restricted。
+# 这和配额组件当年栽的是同一个形状:判定条件建立在租户能控制的输入上。
+#
+# 本策略按 kubezoo.io/tenant 匹配 —— 那个标签租户摘不掉,是 kubezoo 保证的。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-pod-security-restricted
+  annotations:
+    policies.kyverno.io/title: 租户 Pod 强制 restricted
+spec:
+  failurePolicy: Fail
+  background: false
+  validationFailureAction: Enforce
+  rules:
+    - name: restricted
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      validate:
+        podSecurity:
+          level: restricted
+          version: latest
+    # ⭐ 纵深:把租户 namespace 的 PSA 标签钉回 restricted。
+    # 上面那条规则已经足够,这条是为它兜底 —— 原生 PSA 在 apiserver 进程内,
+    # 不走 webhook、没有单点。万一 Kyverno 挂掉或被 forceFailurePolicyIgnore
+    # 一把变成 Ignore(见 README),已建 namespace 上的标签仍然拦得住。
+    # 匹配租户 namespace 自身的标签(namespaceSelector 对 Namespace 本身无意义)。
+    - name: pin-psa-label
+      match:
+        any:
+          - resources:
+              kinds: [Namespace]
+              selector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/enforce-version: latest

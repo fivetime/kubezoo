@@ -15,12 +15,56 @@ ETCD=/root/.local/share/kubebuilder-envtest/k8s/1.36.2-linux-amd64/etcd
 mkdir -p "$LAB"
 
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  # PSA_DEFAULT=restricted makes the upstream cluster enforce a Pod Security
+  # level on every namespace that does not say otherwise. It is off by default
+  # because it constrains every pod any later test creates; set it to reproduce
+  # the measurement that native PSA is not a tenant-proof control here.
+  PSA_PATCH=""
+  if [ -n "${PSA_DEFAULT:-}" ]; then
+    mkdir -p "$LAB/psa"
+    cat >"$LAB/psa/admission.yaml" <<EOF
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+- name: PodSecurity
+  configuration:
+    apiVersion: pod-security.admission.config.k8s.io/v1
+    kind: PodSecurityConfiguration
+    defaults:
+      enforce: "$PSA_DEFAULT"
+      enforce-version: "latest"
+    exemptions:
+      namespaces: [kube-system, local-path-storage, kyverno, ingress-nginx]
+EOF
+    PSA_PATCH="$(cat <<EOF
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+      - name: admission-control-config-file
+        value: /etc/kubernetes/psa/admission.yaml
+      extraVolumes:
+      - name: psa
+        hostPath: /etc/kubernetes/psa
+        mountPath: /etc/kubernetes/psa
+        readOnly: true
+        pathType: DirectoryOrCreate
+  extraMounts:
+  - hostPath: $LAB/psa
+    containerPath: /etc/kubernetes/psa
+EOF
+)"
+  fi
   cat >"$LAB/kind.yaml" <<EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
   apiServerAddress: 127.0.0.1
   apiServerPort: 13486
+$PSA_PATCH
 EOF
   kind create cluster --name "$CLUSTER" --config "$LAB/kind.yaml" --image kindest/node:v1.36.1
 fi
@@ -32,7 +76,10 @@ cd "$ZOO"
 bash hack/lib/gen_pki.sh gen_pki_setup_ctx >"$LAB/pki.log" 2>&1
 
 echo "== etcd =="
-pkill -f "etcd --data-dir=" || true
+# Match this lab's own data directory, not "etcd --data-dir=". kind runs the
+# upstream etcd as a host-visible process too, and it is only the order of its
+# flags that keeps that looser pattern from matching and killing it.
+pkill -f "data-dir=$LAB/etcd" || true
 for i in $(seq 30); do
   ss -ltn 2>/dev/null | grep -q ':2380 ' || break
   sleep 1

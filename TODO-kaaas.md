@@ -281,20 +281,30 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
         **通用规则:排除条件只能建立在租户无法控制的东西上**
 - [ ] ⭐ **优先 MAP/VAP(进程内)而不是 webhook** —— 见架构文档 §8.0。
       代价:MAP **没有 autogen**,PodSpec 那 8~9 个 kind 要逐个手写路径(`CronJob` 多一层)
-- [ ] 必备策略(前四条 PSA 管不了,必须策略引擎实现):
-      - [ ] ⛔⛔ **P0(本清单最紧的一条)三个 class 字段由平台决定** ——
-            `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)。
-            kubezoo 侧实现已删除,**在这条上线前越权是开着的**(见阶段 2)
+- [ ] 必备策略(**都得策略引擎做**;原生 PSA 连它自己那一条都守不住,见下):
+      - [x] ✅ **三个 class 字段由平台决定** —— `runtimeClassName` / `ingressClassName` /
+            `priorityClassName`(含 `spec.priority`)。`config/policy/tenant-platform-classes.yaml`,
+            已在 7 个租户 namespace 上实测;kubezoo 侧实现已删除
             ⚠️ **本条原先的理由是错的**:曾写"租户写 `kata` 会被改写成 `<tid>-kata` 而不存在,
             所以只能由平台注入" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效。
             真实情况不是"租户用不了",而是**租户能引用平台的任意一个**
             - 三个坑:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`;
               MAP 没有 autogen,`CronJob` 多一层)、`spec.priority` 要跟名字一起清、
               废弃的 `kubernetes.io/ingress.class` 注解要跟字段一起删
-      - [ ] **P0 拒绝 `spec.nodeName`**(直接绕过调度器钉到任意节点)
-      - [ ] **P0 清空/白名单 `tolerations`**(否则可跑到控制面节点)
-      - [ ] **P0 PSA `restricted` 等价规则** + 保护那些标签不被租户改
-      - [ ] P1 限制 `nodeSelector`/`affinity` 到允许标签;强制 `schedulerName`;拒绝 DaemonSet
+      - [x] ✅ **拒绝 `spec.nodeName`** + **白名单 `tolerations`** ——
+            `config/policy/tenant-scheduling.yaml`,已实测(审计 §O)。
+            ⚠️ 三个坑:`tolerations` 不能一刀切(`DefaultTolerationSeconds` 是进程内插件,
+            在 webhook 之前就加了两条,实测确认)、规则只能匹配 `CREATE`(否则已调度的
+            Pod 再也改不动)、多策略并存时**判据是拒绝消息里的策略名**
+      - [x] ✅ **PSA `restricted` 等价规则** —— `config/policy/tenant-pod-security.yaml`,已实测。
+            ⛔ **原生 PSA 在这里是废的**:PSA 判定输入是 namespace 标签,而 kubezoo 只钉死
+            `kubezoo.io/tenant`,其余标签原样转发 ⇒ 租户把自己标成 `privileged`
+            (建时带 / 事后 patch 两条路)就拿到 **Running 的 privileged + hostNetwork Pod**,
+            即使全局默认已是 `restricted`。**又是"判定条件建在租户可控输入上"那个形状。**
+            修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
+            并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
+      - [ ] P1 限制 `nodeSelector`/`affinity` 到允许标签;强制 `schedulerName`
+      - [x] ✅ 拒绝 DaemonSet —— `config/policy/tenant-deny-daemonset.yaml`,已实测
 - [ ] 用 `generate` + `synchronize: true` 承接 namespace 配套对象(租户删了自动重建):
       per-namespace RoleBinding(1.1)、`kubetron-network` ConfigMap(3.2)、PSA 标签、
       ResourceQuota/LimitRange

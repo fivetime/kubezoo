@@ -585,6 +585,101 @@ kubectl explain deployment.spec.replicas → 原生仍正常
 **kubectl 把 openapi 文档缓存在 `~/.kube/cache`**,拿的是旧的。
 `rm -rf ~/.kube/cache` 之后才是真结果。**客户端缓存会让服务端的修复看起来没生效。**
 
+## N. 原生 PSA 被租户一个 namespace 标签整个绕开 ⛔ 坐实
+
+**起因**:待办里"PSA `restricted` 等价规则"一直挂着,以为只是没写。真去写的时候才发现
+**选哪一种实现是有对错的** —— 原生 PSA 在这里根本拦不住租户。
+
+原生 PSA 的判定输入是 namespace 标签 `pod-security.kubernetes.io/enforce`。
+而 `pkg/convert/namespace.go` 的 `Forward` **只钉死 `kubezoo.io/tenant` 一个标签**,
+其余标签原样转发上游 —— 包括这一个。
+
+### 实测(上游全局 `AdmissionConfiguration` 已把默认值设成 `restricted`)
+
+| 步骤 | 结果 |
+|---|---|
+| 正向对照:平台自己在普通 ns 建 privileged Pod | **Forbidden**,PSA 确实在强制 |
+| 租户建 ns `plain`(不带标签),再建 privileged+hostNetwork Pod | **Forbidden** ✅ |
+| 租户建 ns 时自带 `enforce: privileged` | 上游 ns **拿到该标签** |
+| ↑ 然后在里面建 privileged+hostNetwork Pod | ⛔ **`pod/p created`,Running,落在控制面节点上** |
+| 租户事后 `kubectl label` 把已有 ns 改成 `privileged` | ⛔ 同样成功,`pod/p2 created` |
+
+两条路径都能拿到 **privileged + hostNetwork 且真的在跑**的容器。
+这和配额组件当年栽的是**同一个形状**:判定条件建立在**租户能控制的输入**上
+(那次是 `objectSelector` 按 `app` 标签排除,租户打上那个标签就绕过)。
+
+### 修法:Kyverno `validate.podSecurity`,按租户改不动的标签匹配
+
+`config/policy/tenant-pod-security.yaml`,匹配条件是
+`namespaceSelector: kubezoo.io/tenant Exists` —— **不依赖任何租户可控输入**。
+
+复测(ns 标签仍是 `privileged` 的前提下):
+
+| | 结果 |
+|---|---|
+| 租户建 privileged Pod | **denied**,`validate.kyverno.svc-fail` |
+| 控制器路径:Deployment 里塞 privileged | **denied**(`validate.podSecurity` 有 autogen,不吃 JSON6902 那个坑) |
+| 负向对照:合规 Pod | **created** |
+
+另加一条 `pin-psa-label` 规则把租户 namespace 的 PSA 标签钉回 `restricted`,
+让**原生 PSA 反过来给 Kyverno 兜底** —— 它在 apiserver 进程内,不走 webhook、没有单点,
+Kyverno 挂掉或被 `forceFailurePolicyIgnore` 一把变成 Ignore 时仍然拦得住。
+
+### ⭐ 顺带测出来的三件事,部署时都会咬人
+
+**① 空更新不触发准入。** `kubectl label --overwrite` 设成**和现在一样的值**,
+patch 是空的,apiserver 短路,mutate webhook 根本没被调用 —— 我第一次就是这样看到
+"钉不回去",差点又归因错。改成一个**不同的值**立刻钉回。
+**判据:改标签验策略时,一定要改成不同的值。**
+
+**② 策略装上之前就带坏标签的 namespace 不会被追溯修正。** `plain` 一直是 `privileged`。
+上线时要补一次:
+
+```bash
+kubectl label ns -l kubezoo.io/tenant pod-security.kubernetes.io/enforce=restricted --overwrite
+```
+
+好在主规则不依赖这个标签,所以陈旧标签**没有把洞重新打开** —— 实测 `plain` 里再建
+privileged Pod 仍被 Kyverno 拒。兜底层过期只是少一层,不是漏一个。
+
+**③ 准入只管门口,不追溯。** 补完标签之后,之前漏进来的两个 Pod
+**至今仍在 Running,仍是 privileged + hostNetwork**;重新打标签只发了条 warning。
+封堵之后必须**主动清理已经进来的东西**,否则等于没封。
+
+## O. 租户指定节点:`spec.nodeName` 与 `tolerations` ✅ 已由策略层拦住
+
+`config/policy/tenant-scheduling.yaml`,两条 deny,匹配条件同样是
+`namespaceSelector: kubezoo.io/tenant Exists`。
+
+| | 结果 |
+|---|---|
+| 负向对照:干净合规 Pod | **created** |
+| `spec.nodeName` 指名节点 | **denied** — `tenant-scheduling: deny-nodename` |
+| 容忍 `node-role.kubernetes.io/control-plane` | **denied** — `tenant-scheduling: restrict-tolerations` |
+| 控制器路径:Deployment 模板里塞同样两样 | **denied**(autogen 覆盖) |
+| 负向对照:干净 Deployment | **created** |
+
+### 三个坑
+
+**① `tolerations` 不能一刀切。** `DefaultTolerationSeconds` 是**进程内**的 mutating 插件,
+在 webhook 之前就给每个 Pod 加上两条容忍。实测干净 Pod 上确实带着:
+
+```
+node.kubernetes.io/not-ready     NoExecute
+node.kubernetes.io/unreachable   NoExecute
+```
+
+写成"不许有 tolerations"会**拒掉每一个 Pod**。规则必须白名单这两个 key。
+
+**② 规则只能匹配 `CREATE`。** 调度器绑定走 `pods/binding` 子资源,但绑完之后
+`spec.nodeName` 就有值了 —— 规则若也匹配 `UPDATE`,任何后续改动(加个标签)都会被自己拒掉。
+实测已调度的 Pod `kubectl label` 仍然成功,说明范围收对了。
+
+**③ 多条策略同时生效时,别把拒绝归错。** 第一次测控制器路径,Deployment 被拒了,
+但拒它的是 `tenant-pod-security-restricted`(`kubectl create deploy` 的默认模板本身不合规),
+不是我要测的 `tenant-scheduling`。**判据是拒绝消息里的策略名和规则名**,不是"被拒了"。
+把模板改成完全合规、只留下被测的那一处违规,才测到真东西。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

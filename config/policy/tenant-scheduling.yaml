@@ -1,0 +1,64 @@
+# 租户不得自己决定 Pod 落在哪个节点。
+#
+# 两条都只在 CREATE 上匹配,不是偷懒:调度器把 Pod 绑到节点走的是 pods/binding 子资源,
+# 但绑定之后 spec.nodeName 就有值了,任何后续 UPDATE(改标签、加注解)都会带着它 ——
+# 规则若也匹配 UPDATE,已调度的 Pod 就再也改不动了。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-scheduling
+  annotations:
+    policies.kyverno.io/title: 租户不得指定节点
+spec:
+  failurePolicy: Fail
+  background: false
+  validationFailureAction: Enforce
+  rules:
+    - name: deny-nodename
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      validate:
+        message: >-
+          spec.nodeName is not available to tenants: setting it bypasses the
+          scheduler and pins the pod to a node of your choosing. Let the
+          scheduler place it.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.nodeName || '' }}"
+                operator: NotEquals
+                value: ""
+
+    # ⚠️ 白名单里那两个不是可选的:DefaultTolerationSeconds 是**进程内**的 mutating
+    # 插件,在 webhook 之前就给每个 Pod 加上 not-ready / unreachable 两条 NoExecute
+    # 容忍。一刀切"不许有 tolerations"会拒掉每一个 Pod —— 实测过。
+    - name: restrict-tolerations
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      validate:
+        message: >-
+          Only the tolerations Kubernetes adds itself are allowed. A tenant-set
+          toleration can place a pod on a tainted node -- the control plane, or
+          a node pool that belongs to someone else.
+        deny:
+          conditions:
+            any:
+              - key: >-
+                  {{ request.object.spec.tolerations[?!contains(['node.kubernetes.io/not-ready',
+                  'node.kubernetes.io/unreachable'], key)] || `[]` | length(@) }}
+                operator: GreaterThan
+                value: 0

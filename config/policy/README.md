@@ -65,7 +65,32 @@ Kyverno 的 `autogen` **只从 `patchStrategicMerge` 派生**。用 JSON6902 时
 3. **废弃的 `kubernetes.io/ingress.class` 注解要跟 `ingressClassName` 一起删** ——
    多数 ingress 控制器仍认它,只清字段等于没清
 
+### 4. 空更新不触发准入(验策略时最容易骗到自己)
+
+`kubectl label --overwrite` 把标签设成**和当前一样的值**,kubectl 发出的 patch 是空的,
+apiserver 直接短路,**mutate/validate webhook 根本不会被调用**。看起来就像策略没生效。
+验证时务必改成一个**不同的值**。
+
+### 5. 多条策略并存时,别把拒绝归错策略
+
+一个对象可能同时违反好几条规则,谁先拒的不一定是你在测的那条。实测踩过:测调度策略时
+Deployment 被拒,以为规则生效了,实际是 `kubectl create deploy` 的默认模板不满足
+`restricted`,拒它的是 pod security 那条。
+**判据是拒绝消息里的 `策略名: 规则名`**,并且要把被测对象改成**只剩下被测的那一处违规**。
+
 ## ⚠️ 部署注意
+
+### 装上策略之后,必须做一次存量修正 + 存量清理
+
+策略只在准入时生效,对**已经存在**的对象一律不追溯:
+
+```bash
+# 存量 namespace 的 PSA 标签(策略装上之前建的不会被自动钉回)
+kubectl label ns -l kubezoo.io/tenant pod-security.kubernetes.io/enforce=restricted --overwrite
+# 存量违规 Pod —— 实测:补完 namespace 标签后,已在跑的 privileged Pod 仍然 Running,
+# 只发了一条 warning。不主动删就等于没封。
+```
+
 
 - `failurePolicy` 用 `Fail`,并配多副本 + PDB。`Ignore` 的失效是**静默的**,直接击穿隔离前提
 - ⛔ **`forceFailurePolicyIgnore` 环境变量能一次性把所有策略变成 `Ignore`**

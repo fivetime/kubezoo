@@ -72,8 +72,16 @@
 |---|---|
 | `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)由平台决定 | ✅ **策略已写并实测** `config/policy/` |
 | 拒绝 DaemonSet | ✅ **策略已写并实测**(租户被拒;平台自己的 DaemonSet 不受影响) |
-| PSA `restricted` 等价规则(hostNetwork / hostPID / hostIPC / privileged / hostPath) | 未做 |
-| 拒绝 `spec.nodeName`、约束 `tolerations` / `nodeSelector` | 未做 |
+| PSA `restricted` 等价规则 | ✅ **策略已写并实测** `config/policy/tenant-pod-security.yaml`。⚠️ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见下 |
+| 拒绝 `spec.nodeName`、约束 `tolerations` | ✅ **策略已写并实测** `config/policy/tenant-scheduling.yaml`(审计 §O) |
+| 约束 `nodeSelector` / `affinity` 到允许标签 | 未做 |
+
+⛔ **原生 PSA(namespace 标签 `pod-security.kubernetes.io/enforce`)在这里是废的**:
+kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上游,所以租户
+**自己就能把自己的 namespace 标成 `privileged`** —— 建 ns 时带上、或事后 `kubectl label`,
+两条路实测都拿到了 **Running 的 privileged + hostNetwork Pod**(审计 §N)。
+又是"判定条件建立在租户可控输入上"那个形状。策略层按 `kubezoo.io/tenant` 匹配才立得住;
+原生 PSA 降级为**兜底**(由策略把标签钉回 `restricted`)。
 
 ⭐ **策略在 `config/policy/`,lab 默认安装 Kyverno 并应用它们** —— 没有它们的 lab
 测的不是完整形态,而上面每一条不生效时都是一条实测可用的越权。
@@ -130,6 +138,13 @@
 - [ ] 租户新建一个 namespace 后,能在里面正常创建对象(RoleBinding 自动下发)
 - [ ] 停机 `ReadOnly` / `Frozen` 期间 **Pod 保持 Running、restarts 不变**;解除后租户恢复可写
 - [ ] 配额:超额 Pod 加上任意租户可控的标签后**仍被拒**
+- [ ] 租户把自己 namespace 标成 `pod-security.kubernetes.io/enforce: privileged`(建时带 + 事后 patch 两条路),
+      privileged / hostNetwork Pod **仍被拒**
+      ⚠️ **改标签验策略时要改成不同的值**:设成同值是空更新,apiserver 短路,准入根本不跑
+- [ ] 租户设 `spec.nodeName` 或容忍控制面污点 → 被拒;**干净 Pod 仍能建**
+      ⚠️ 多条策略同时在时,**判据是拒绝消息里的策略名**,不是"被拒了"
+- [ ] 装完策略做过一次存量修正(namespace 标签)**和存量清理**(已在跑的违规 Pod
+      不会被自动干掉,实测只发 warning)
 
 ## 相关文档
 
