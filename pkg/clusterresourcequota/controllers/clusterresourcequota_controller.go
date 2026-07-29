@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
@@ -63,7 +62,7 @@ func (r *ClusterResourceQuotaReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&quotav1alpha1.ClusterResourceQuota{}).
 		Owns(&corev1.ResourceQuota{}).
-		Watches(&source.Kind{Type: &corev1.Namespace{}}, &namesapceForClusterResourceQuotaHandler{
+		Watches(&corev1.Namespace{}, &namesapceForClusterResourceQuotaHandler{
 			cache:  r.Cache,
 			logger: r.Logger,
 		}).
@@ -74,7 +73,10 @@ func (r *ClusterResourceQuotaReconciler) SetupWithManager(mgr ctrl.Manager) erro
 	}
 
 	server := mgr.GetWebhookServer()
-	a := NewAdmission(context.TODO(), r.Client)
+	a, err := NewAdmission(context.TODO(), r.Client)
+	if err != nil {
+		return err
+	}
 	server.Register("/admission/validating/clusterresourcequotas", &admission.Webhook{Handler: a})
 	return nil
 }
@@ -157,7 +159,7 @@ func (r *ClusterResourceQuotaReconciler) syncStatus(ctx context.Context, cluster
 
 	if dirty {
 		r.Logger.Info("sync status of cluster resource quota", "clusterResourceQuota", clusterquota.Name, "from", clusterquota.Status, "to", usage)
-		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, r.Client.Status(), clusterquota, func() error {
+		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, StatusUpdater(r.Client.Status()), clusterquota, func() error {
 			clusterquota.Status = usage
 			return nil
 		})
@@ -222,7 +224,7 @@ func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx cont
 	// update owner or spec
 	if ownerDirty || specDirty {
 		r.Logger.Info("sync resource quota in namespace", "resourceQuota", client.ObjectKeyFromObject(matchedquota).String(), "clusterResourceQuota", clusterquota.Name)
-		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, r.Client, matchedquota, func() error {
+		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, ObjectUpdater(r.Client), matchedquota, func() error {
 			if ownerDirty {
 				owner := metav1.NewControllerRef(clusterquota, quotav1alpha1.SchemeGroupVersion.WithKind(ClusterResourceQuotaKind))
 				matchedquota.OwnerReferences = append(matchedquota.OwnerReferences, *owner)
@@ -303,14 +305,14 @@ type namesapceForClusterResourceQuotaHandler struct {
 	logger logr.Logger
 }
 
-func (h *namesapceForClusterResourceQuotaHandler) Create(e event.CreateEvent, q workqueue.RateLimitingInterface) {
+func (h *namesapceForClusterResourceQuotaHandler) Create(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	ns, ok := e.Object.(*corev1.Namespace)
 	if !ok {
 		return
 	}
 
 	var quotaList quotav1alpha1.ClusterResourceQuotaList
-	err := h.cache.List(context.TODO(), &quotaList)
+	err := h.cache.List(ctx, &quotaList)
 	if err != nil {
 		h.logger.Error(err, "failed to list cluster resource quota")
 		return
@@ -330,13 +332,13 @@ func (h *namesapceForClusterResourceQuotaHandler) Create(e event.CreateEvent, q 
 	}
 }
 
-func (h *namesapceForClusterResourceQuotaHandler) Update(event.UpdateEvent, workqueue.RateLimitingInterface) {
+func (h *namesapceForClusterResourceQuotaHandler) Update(context.Context, event.UpdateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 }
 
-func (h *namesapceForClusterResourceQuotaHandler) Delete(event.DeleteEvent, workqueue.RateLimitingInterface) {
+func (h *namesapceForClusterResourceQuotaHandler) Delete(context.Context, event.DeleteEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 }
 
-func (h *namesapceForClusterResourceQuotaHandler) Generic(event.GenericEvent, workqueue.RateLimitingInterface) {
+func (h *namesapceForClusterResourceQuotaHandler) Generic(context.Context, event.GenericEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 }
 
 func matches(quota *quotav1alpha1.ClusterResourceQuota, ns *corev1.Namespace) bool {

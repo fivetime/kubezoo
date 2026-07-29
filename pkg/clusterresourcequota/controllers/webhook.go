@@ -43,31 +43,43 @@ import (
 
 type Admission struct {
 	evaluator resourcequota.Evaluator
-	decoder   *admission.Decoder
+	decoder   admission.Decoder
 	logger    logr.Logger
 }
 
-func NewAdmission(ctx context.Context, client client.Client) *Admission {
+// NewAdmission builds the quota admission handler.
+//
+// controller-runtime used to hand the decoder to the handler through
+// DecoderInjector, which was removed; the decoder is now built here from the
+// client's scheme. admission.Decoder also became an interface rather than a
+// struct pointer.
+func NewAdmission(ctx context.Context, client client.Client) (*Admission, error) {
 	accessor := &quotaAccessor{client: client}
+
+	// NewQuotaConfigurationForAdmission grew an informer factory and an
+	// APIResourceConfigSource. Both are safe to leave nil here: the factory is
+	// only dereferenced by the DRA evaluators, and only when both
+	// DynamicResourceAllocation and DRAExtendedResource are on, and a nil
+	// resource config means every resource is enabled. Upstream likewise passes
+	// a nil lister func on the admission path, because admission measures the
+	// incoming object rather than recomputing usage from a lister.
+	quotaConfiguration, err := quotainstall.NewQuotaConfigurationForAdmission(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Admission{
+		decoder: admission.NewDecoder(client.Scheme()),
 		evaluator: resourcequota.NewQuotaEvaluator(
 			accessor,
 			nil,
-			quotageneric.NewRegistry(quotainstall.NewQuotaConfigurationForAdmission().Evaluators()),
+			quotageneric.NewRegistry(quotaConfiguration.Evaluators()),
 			nil,
 			nil,
 			10,
 			ctx.Done(),
 		),
-	}
-}
-
-var _ admission.DecoderInjector = &Admission{}
-
-// InjectDecoder injects the decoder into a validatingHandler.
-func (a *Admission) InjectDecoder(d *admission.Decoder) error {
-	a.decoder = d
-	return nil
+	}, nil
 }
 
 // InjectDecoder injects the decoder into a validatingHandler.

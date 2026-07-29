@@ -74,6 +74,8 @@ import (
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/capabilities"
 	master "k8s.io/kubernetes/pkg/controlplane"
+	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
+	controlplaneoptions "k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/controlplane/reconcilers"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
 	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
@@ -165,7 +167,7 @@ func Run(completeOptions completedServerRunOptions, stopCh <-chan struct{}) erro
 		return err
 	}
 
-	prepared := server.GenericAPIServer.PrepareRun()
+	prepared := server.ControlPlane.GenericAPIServer.PrepareRun()
 
 	return prepared.Run(stopCh)
 }
@@ -178,9 +180,9 @@ func CreateServerChain(completedOptions completedServerRunOptions, stopCh <-chan
 	}
 
 	// If additional API servers are added, they should be gated.
-	apiExtensionsConfig, err := createAPIExtensionsConfig(*kubeAPIServerConfig.GenericConfig, kubeAPIServerConfig.ExtraConfig.VersionedInformers, completedOptions.ServerRunOptions, completedOptions.MasterCount,
-		serviceResolver, webhook.NewDefaultAuthenticationInfoResolverWrapper(nil, kubeAPIServerConfig.GenericConfig.EgressSelector, kubeAPIServerConfig.GenericConfig.LoopbackClientConfig,
-			kubeAPIServerConfig.GenericConfig.TracerProvider))
+	apiExtensionsConfig, err := createAPIExtensionsConfig(*kubeAPIServerConfig.ControlPlane.Generic, kubeAPIServerConfig.ControlPlane.VersionedInformers, completedOptions.ServerRunOptions, completedOptions.MasterCount,
+		serviceResolver, webhook.NewDefaultAuthenticationInfoResolverWrapper(nil, kubeAPIServerConfig.ControlPlane.Generic.EgressSelector, kubeAPIServerConfig.ControlPlane.Generic.LoopbackClientConfig,
+			kubeAPIServerConfig.ControlPlane.Generic.TracerProvider))
 	if err != nil {
 		return nil, err
 	}
@@ -226,10 +228,10 @@ func InstallLegacyAPI(m *master.Instance,
 		if err != nil {
 			klog.Fatalf("Error building PostStartHook: %v", err)
 		}
-		m.GenericAPIServer.AddPostStartHookOrDie(name, hook)
+		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie(name, hook)
 	}
 
-	if err := m.GenericAPIServer.InstallLegacyAPIGroup(
+	if err := m.ControlPlane.GenericAPIServer.InstallLegacyAPIGroup(
 		genericapiserver.DefaultLegacyAPIPrefix, &apiGroupInfo); err != nil {
 		return fmt.Errorf("error in registering group versions: %v", err)
 	}
@@ -243,24 +245,30 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 	controlPlaneConfig *ControlPlaneConfig) (*master.Instance, error) {
 	c := kubeAPIServerConfig.Complete()
 	// disable admission
-	c.GenericConfig.AdmissionControl = nil
-	s, err := c.GenericConfig.New("kube-zoo-server", delegateAPIServer)
+	c.ControlPlane.Generic.AdmissionControl = nil
+	s, err := c.ControlPlane.Generic.New("kube-zoo-server", delegateAPIServer)
 	if err != nil {
 		return nil, err
 	}
 
-	if c.ExtraConfig.EnableLogsSupport {
+	if c.ControlPlane.EnableLogsSupport {
 		routes.Logs{}.Install(s.Handler.GoRestfulContainer)
 	}
 	m := &master.Instance{
-		GenericAPIServer:          s,
-		ClusterAuthenticationInfo: c.ExtraConfig.ClusterAuthenticationInfo,
+		ControlPlane: &controlplaneapiserver.Server{
+			GenericAPIServer:          s,
+			ClusterAuthenticationInfo: c.ControlPlane.ClusterAuthenticationInfo,
+			// InstallAPIs reads these off the server now instead of taking them
+			// as arguments.
+			APIResourceConfigSource: kubeAPIServerConfig.ControlPlane.APIResourceConfigSource,
+			RESTOptionsGetter:       c.ControlPlane.Generic.RESTOptionsGetter,
+		},
 	}
 
 	proxyConfig.ApplyToGroup(&legacyGroup)
 	if err := InstallLegacyAPI(
-		m, kubeAPIServerConfig.ExtraConfig.APIResourceConfigSource,
-		&c, c.GenericConfig.RESTOptionsGetter, legacyGroup); err != nil {
+		m, kubeAPIServerConfig.ControlPlane.APIResourceConfigSource,
+		&c, c.ControlPlane.Generic.RESTOptionsGetter, legacyGroup); err != nil {
 		return nil, err
 	}
 
@@ -274,11 +282,11 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 
 	providers = append(providers, tenantrest.RESTStorageProvider{})
 
-	if err := m.InstallAPIs(kubeAPIServerConfig.ExtraConfig.APIResourceConfigSource, kubeAPIServerConfig.GenericConfig.RESTOptionsGetter, providers...); err != nil {
+	if err := m.ControlPlane.InstallAPIs(providers...); err != nil {
 		return nil, err
 	}
 
-	m.GenericAPIServer.AddPostStartHookOrDie("start-tenant-controller", func(context genericapiserver.PostStartHookContext) error {
+	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("start-tenant-controller", func(context genericapiserver.PostStartHookContext) error {
 		go controller.Run(make(chan struct{}),
 			controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Informer(),
 			controlPlaneConfig.tenantClient.TenantV1alpha1(),
@@ -293,10 +301,10 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 			proxyConfig.proxySecurePort)
 		return nil
 	})
-	m.GenericAPIServer.AddPostStartHookOrDie("tenant-informer-synced", func(context genericapiserver.PostStartHookContext) error {
+	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("tenant-informer-synced", func(context genericapiserver.PostStartHookContext) error {
 		return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 			return controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Informer().HasSynced(), nil
-		}, context.StopCh)
+		}, context.Done())
 	})
 
 	return m, nil
@@ -346,7 +354,7 @@ func CreateKubeAPIServerConfig(
 		metrics.SetShowHidden()
 	}
 
-	serviceIPRange, apiServerServiceIP, err := master.ServiceIPRange(s.PrimaryServiceClusterIPRange)
+	serviceIPRange, apiServerServiceIP, err := controlplaneoptions.ServiceIPRange(s.PrimaryServiceClusterIPRange)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -355,20 +363,27 @@ func CreateKubeAPIServerConfig(
 	var secondaryServiceIPRange net.IPNet
 	// process secondary range only if provided by user
 	if s.SecondaryServiceClusterIPRange.IP != nil {
-		secondaryServiceIPRange, _, err = master.ServiceIPRange(s.SecondaryServiceClusterIPRange)
+		secondaryServiceIPRange, _, err = controlplaneoptions.ServiceIPRange(s.SecondaryServiceClusterIPRange)
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
 	}
 
 	config := &master.Config{
-		GenericConfig: genericConfig,
-		ExtraConfig: master.ExtraConfig{
-			APIResourceConfigSource: storageFactory.APIResourceConfigSource,
-			StorageFactory:          storageFactory,
-			EventTTL:                s.EventTTL,
+		ControlPlane: controlplaneapiserver.Config{
+			Generic: genericConfig,
+			Extra: controlplaneapiserver.Extra{
+				APIResourceConfigSource: storageFactory.APIResourceConfigSource,
+				StorageFactory:          storageFactory,
+				EventTTL:                s.EventTTL,
+				EnableLogsSupport:       s.EnableLogsHandler,
+
+				ServiceAccountIssuer:        s.ServiceAccountIssuer,
+				ServiceAccountMaxExpiration: s.ServiceAccountTokenMaxExpiration,
+			},
+		},
+		Extra: master.Extra{
 			KubeletClientConfig:     s.KubeletConfig,
-			EnableLogsSupport:       s.EnableLogsHandler,
 			ServiceIPRange:          serviceIPRange,
 			APIServerServiceIP:      apiServerServiceIP,
 			SecondaryServiceIPRange: secondaryServiceIPRange,
@@ -380,9 +395,6 @@ func CreateKubeAPIServerConfig(
 
 			EndpointReconcilerType: reconcilers.Type(s.EndpointReconcilerType),
 			MasterCount:            s.MasterCount,
-
-			ServiceAccountIssuer:        s.ServiceAccountIssuer,
-			ServiceAccountMaxExpiration: s.ServiceAccountTokenMaxExpiration,
 		},
 	}
 
@@ -390,18 +402,18 @@ func CreateKubeAPIServerConfig(
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	config.ExtraConfig.ClusterAuthenticationInfo.ClientCA = clientCAProvider
+	config.ControlPlane.ClusterAuthenticationInfo.ClientCA = clientCAProvider
 
 	requestHeaderConfig, err := s.Authentication.RequestHeader.ToAuthenticationRequestHeaderConfig()
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
 	if requestHeaderConfig != nil {
-		config.ExtraConfig.ClusterAuthenticationInfo.RequestHeaderCA = requestHeaderConfig.CAContentProvider
-		config.ExtraConfig.ClusterAuthenticationInfo.RequestHeaderAllowedNames = requestHeaderConfig.AllowedClientNames
-		config.ExtraConfig.ClusterAuthenticationInfo.RequestHeaderExtraHeaderPrefixes = requestHeaderConfig.ExtraHeaderPrefixes
-		config.ExtraConfig.ClusterAuthenticationInfo.RequestHeaderGroupHeaders = requestHeaderConfig.GroupHeaders
-		config.ExtraConfig.ClusterAuthenticationInfo.RequestHeaderUsernameHeaders = requestHeaderConfig.UsernameHeaders
+		config.ControlPlane.ClusterAuthenticationInfo.RequestHeaderCA = requestHeaderConfig.CAContentProvider
+		config.ControlPlane.ClusterAuthenticationInfo.RequestHeaderAllowedNames = requestHeaderConfig.AllowedClientNames
+		config.ControlPlane.ClusterAuthenticationInfo.RequestHeaderExtraHeaderPrefixes = requestHeaderConfig.ExtraHeaderPrefixes
+		config.ControlPlane.ClusterAuthenticationInfo.RequestHeaderGroupHeaders = requestHeaderConfig.GroupHeaders
+		config.ControlPlane.ClusterAuthenticationInfo.RequestHeaderUsernameHeaders = requestHeaderConfig.UsernameHeaders
 	}
 
 	// Load the public keys.
@@ -414,9 +426,13 @@ func CreateKubeAPIServerConfig(
 		pubKeys = append(pubKeys, keys...)
 	}
 	// Plumb the required metadata through ExtraConfig.
-	config.ExtraConfig.ServiceAccountIssuerURL = s.Authentication.ServiceAccounts.Issuers[0]
-	config.ExtraConfig.ServiceAccountJWKSURI = s.Authentication.ServiceAccounts.JWKSURI
-	config.ExtraConfig.ServiceAccountPublicKeys = pubKeys
+	config.ControlPlane.ServiceAccountIssuerURL = s.Authentication.ServiceAccounts.Issuers[0]
+	config.ControlPlane.ServiceAccountJWKSURI = s.Authentication.ServiceAccounts.JWKSURI
+	publicKeysGetter, err := serviceaccount.StaticPublicKeysGetter(pubKeys)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	config.ControlPlane.ServiceAccountPublicKeysGetter = publicKeysGetter
 
 	return config, insecureServingInfo, serviceResolver, proxyConfig, controlPlaneConfig, nil
 }
@@ -877,7 +893,7 @@ func getServiceIPAndRanges(serviceClusterIPRanges string) (net.IP, net.IPNet, ne
 	// nothing provided by user, use default range (only applies to the Primary)
 	if len(serviceClusterIPRangeList) == 0 {
 		var primaryServiceClusterCIDR net.IPNet
-		primaryServiceIPRange, apiServerServiceIP, err = master.ServiceIPRange(primaryServiceClusterCIDR)
+		primaryServiceIPRange, apiServerServiceIP, err = controlplaneoptions.ServiceIPRange(primaryServiceClusterCIDR)
 		if err != nil {
 			return net.IP{}, net.IPNet{}, net.IPNet{}, fmt.Errorf("error determining service IP ranges: %v", err)
 		}
@@ -890,7 +906,7 @@ func getServiceIPAndRanges(serviceClusterIPRanges string) (net.IP, net.IPNet, ne
 			return net.IP{}, net.IPNet{}, net.IPNet{}, fmt.Errorf("service-cluster-ip-range[0] is not a valid cidr")
 		}
 
-		primaryServiceIPRange, apiServerServiceIP, err = master.ServiceIPRange(*(primaryServiceClusterCIDR))
+		primaryServiceIPRange, apiServerServiceIP, err = controlplaneoptions.ServiceIPRange(*(primaryServiceClusterCIDR))
 		if err != nil {
 			return net.IP{}, net.IPNet{}, net.IPNet{}, fmt.Errorf("error determining service IP ranges for primary service cidr: %v", err)
 		}

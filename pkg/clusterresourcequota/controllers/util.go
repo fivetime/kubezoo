@@ -35,8 +35,29 @@ var DefaultRetry = wait.Backoff{
 	Jitter:   0.1,
 }
 
+// Updater applies an update to an object. It exists because client.Writer and
+// client.SubResourceWriter take different option types and so cannot satisfy one
+// interface directly; ObjectUpdater and StatusUpdater adapt them.
 type Updater interface {
-	Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error
+	Update(ctx context.Context, obj client.Object) error
+}
+
+// ObjectUpdater updates the object itself.
+func ObjectUpdater(w client.Writer) Updater { return objectUpdater{w: w} }
+
+// StatusUpdater updates the object's status subresource.
+func StatusUpdater(w client.SubResourceWriter) Updater { return statusUpdater{w: w} }
+
+type objectUpdater struct{ w client.Writer }
+
+func (u objectUpdater) Update(ctx context.Context, obj client.Object) error {
+	return u.w.Update(ctx, obj)
+}
+
+type statusUpdater struct{ w client.SubResourceWriter }
+
+func (u statusUpdater) Update(ctx context.Context, obj client.Object) error {
+	return u.w.Update(ctx, obj)
 }
 
 func UpdateOnConflict(

@@ -27,7 +27,7 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	master "k8s.io/kubernetes/pkg/controlplane"
+	master "k8s.io/kubernetes/pkg/controlplane/apiserver"
 
 	"github.com/kubewharf/kubezoo/pkg/common"
 )

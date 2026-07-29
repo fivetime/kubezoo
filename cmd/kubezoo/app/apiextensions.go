@@ -155,11 +155,16 @@ func createAPIExtensionsConfig(
 	//}
 
 	// copy the etcd options so we don't mutate originals.
+	// StorageConfig.Paging and the APIListChunking gate are both gone: chunking is
+	// unconditional now. SimpleRestOptionsFactory went with them, and upstream
+	// wires the getter through EtcdOptions.ApplyTo instead, which is what we follow.
 	etcdOptions := *commandOptions.Etcd
-	etcdOptions.StorageConfig.Paging = utilfeature.DefaultFeatureGate.Enabled(features.APIListChunking)
 	etcdOptions.StorageConfig.Codec = apiextensionsapiserver.Codecs.LegacyCodec(v1beta1.SchemeGroupVersion, v1.SchemeGroupVersion)
 	etcdOptions.StorageConfig.EncodeVersioner = runtime.NewMultiGroupVersioner(v1beta1.SchemeGroupVersion, schema.GroupKind{Group: v1beta1.GroupName})
-	genericConfig.RESTOptionsGetter = &genericoptions.SimpleRestOptionsFactory{Options: etcdOptions}
+	etcdOptions.SkipHealthEndpoints = true // avoid double wiring of health checks
+	if err := etcdOptions.ApplyTo(&genericConfig); err != nil {
+		return nil, err
+	}
 
 	// override MergedResourceConfig with apiextensions defaults and registry
 	if err := commandOptions.APIEnablement.ApplyTo(
@@ -175,7 +180,7 @@ func createAPIExtensionsConfig(
 			SharedInformerFactory: externalInformers,
 		},
 		ExtraConfig: apiextensionsapiserver.ExtraConfig{
-			CRDRESTOptionsGetter: apiextensionsoptions.NewCRDRESTOptionsGetter(etcdOptions),
+			CRDRESTOptionsGetter: apiextensionsoptions.NewCRDRESTOptionsGetter(etcdOptions, genericConfig.ResourceTransformers, genericConfig.StorageObjectCountTracker),
 			MasterCount:          masterCount,
 			AuthResolverWrapper:  authResolverWrapper,
 			ServiceResolver:      serviceResolver,
@@ -251,7 +256,7 @@ func createKubeAPIExtensionsServer(apiextensionsConfig *apiextensionsapiserver.C
 	s.GenericAPIServer.Handler.NonGoRestfulMux.HandlePrefix("/apis/", crdHandler)
 
 	s.GenericAPIServer.AddPostStartHookOrDie("start-apiextensions-informers", func(context genericapiserver.PostStartHookContext) error {
-		s.Informers.Start(context.StopCh)
+		s.Informers.Start(context.Done())
 		return nil
 	})
 
@@ -261,7 +266,7 @@ func createKubeAPIExtensionsServer(apiextensionsConfig *apiextensionsapiserver.C
 	s.GenericAPIServer.AddPostStartHookOrDie("upstream-crd-informer-synced", func(context genericapiserver.PostStartHookContext) error {
 		return wait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 			return s.Informers.Apiextensions().V1().CustomResourceDefinitions().Informer().HasSynced(), nil
-		}, context.StopCh)
+		}, context.Done())
 	})
 
 	return s, nil

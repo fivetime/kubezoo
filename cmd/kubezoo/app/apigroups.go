@@ -12,8 +12,6 @@ import (
 	authorizationv1beta1 "k8s.io/api/authorization/v1beta1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	autoscalingv2beta1 "k8s.io/api/autoscaling/v2beta1"
-	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	batchapiv1 "k8s.io/api/batch/v1"
 	batchapiv1beta1 "k8s.io/api/batch/v1beta1"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
@@ -850,14 +848,8 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewFunc:         func() runtime.Object { return &policy.PodDisruptionBudget{} },
 					NewListFunc:     func() runtime.Object { return &policy.PodDisruptionBudgetList{} },
 				},
-				"podsecuritypolicies": {
-					Kind:            policyv1beta1.SchemeGroupVersion.WithKind("PodSecurityPolicy"),
-					Resource:        "podsecuritypolicies",
-					NamespaceScoped: false,
-					ShortNames:      []string{"psp"},
-					NewFunc:         func() runtime.Object { return &policy.PodSecurityPolicy{} },
-					NewListFunc:     func() runtime.Object { return &policy.PodSecurityPolicyList{} },
-				},
+				// PodSecurityPolicy was removed from Kubernetes in 1.25; Pod Security
+				// admission replaced it and is not an API served from here.
 			},
 			"v1": {
 				"poddisruptionbudgets": {
@@ -1066,42 +1058,8 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
 				},
 			},
-			"v2beta1": {
-				"horizontalpodautoscalers": {
-					Kind:            autoscalingv2beta1.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),
-					Resource:        "horizontalpodautoscalers",
-					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
-					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
-					NewListFunc:     func() runtime.Object { return &autoscaling.HorizontalPodAutoscalerList{} },
-				},
-				"horizontalpodautoscalers/status": {
-					Kind:            autoscalingv2beta1.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),
-					Resource:        "horizontalpodautoscalers",
-					Subresource:     "status",
-					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
-					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
-				},
-			},
-			"v2beta2": {
-				"horizontalpodautoscalers": {
-					Kind:            autoscalingv2beta2.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),
-					Resource:        "horizontalpodautoscalers",
-					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
-					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
-					NewListFunc:     func() runtime.Object { return &autoscaling.HorizontalPodAutoscalerList{} },
-				},
-				"horizontalpodautoscalers/status": {
-					Kind:            autoscalingv2beta2.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),
-					Resource:        "horizontalpodautoscalers",
-					Subresource:     "status",
-					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
-					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
-				},
-			},
+			// autoscaling/v2beta1 and v2beta2 were removed from Kubernetes in 1.26.
+			// v2 is the successor and is served below.
 			"v2": {
 				"horizontalpodautoscalers": {
 					Kind:            autoscalingv2.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),

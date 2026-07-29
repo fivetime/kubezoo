@@ -22,7 +22,6 @@ import (
 
 	// ensure libs have a chance to globally register their flags
 	_ "k8s.io/apiserver/pkg/admission"
-	_ "k8s.io/kubernetes/pkg/cloudprovider/providers"
 )
 
 // AddCustomGlobalFlags explicitly registers flags that internal packages register
@@ -31,16 +30,11 @@ import (
 func AddCustomGlobalFlags(fs *pflag.FlagSet) {
 	// Lookup flags in global flag set and re-register the values with our flagset.
 
-	// Adds flags from k8s.io/kubernetes/pkg/cloudprovider/providers.
-	registerLegacyGlobalFlags(fs)
+	// The in-tree GCE cloud provider used to register cloud-provider-gce-*-src-cidrs
+	// here. It was removed from kube-apiserver upstream, along with the package that
+	// registered the flags, so there is nothing left to re-register.
 
 	// Adds flags from k8s.io/apiserver/pkg/admission.
 	globalflag.Register(fs, "default-not-ready-toleration-seconds")
 	globalflag.Register(fs, "default-unreachable-toleration-seconds")
-}
-
-func registerLegacyGlobalFlags(fs *pflag.FlagSet) {
-	globalflag.Register(fs, "cloud-provider-gce-lb-src-cidrs")
-	globalflag.Register(fs, "cloud-provider-gce-l7lb-src-cidrs")
-	_ = fs.MarkDeprecated("cloud-provider-gce-lb-src-cidrs", "This flag will be removed once the GCE Cloud Provider is removed from kube-apiserver")
 }
