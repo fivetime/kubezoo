@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	openapi_v2 "github.com/google/gnostic/openapiv2"
+	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	v1 "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/version"
@@ -87,8 +87,14 @@ func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupR
 	if apiGroupList == nil {
 		return nil
 	}
+	// Set the TypeMeta rather than copying the upstream one. client-go used to
+	// hand back the decoded APIGroupList with kind/apiVersion intact, but since
+	// the aggregated-discovery rewrite ServerGroups builds a fresh object and
+	// leaves TypeMeta empty. Copying that through would strip kind/apiVersion
+	// from what tenants see at /apis, while our /apis/{group} and
+	// /apis/{group}/{version} responses still carry theirs.
 	filtered := &metav1.APIGroupList{
-		TypeMeta: apiGroupList.TypeMeta,
+		TypeMeta: metav1.TypeMeta{Kind: "APIGroupList", APIVersion: "v1"},
 		Groups:   make([]metav1.APIGroup, 0, len(apiGroupList.Groups)),
 	}
 

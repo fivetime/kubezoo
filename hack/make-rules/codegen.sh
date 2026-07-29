@@ -46,7 +46,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 BIN_DIR="${REPO_ROOT}/bin"
-STAGE_DIR="${REPO_ROOT}/_output/codegen"
 MODULE="github.com/kubewharf/kubezoo"
 HEADER="${REPO_ROOT}/hack/boilerplate.go.txt"
 
@@ -124,90 +123,123 @@ mod_version() {
   go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' "$1"
 }
 
+# Installs a generator at the version go.mod pins, keyed by that version.
+#
+# This used to skip the install whenever a binary of the right name existed. A
+# dependency bump then left the old generators in place forever, which is how
+# the 1.36 move ended up running 1.24-era generators against 1.36 types: they
+# take a different command line, so the recipe silently stopped matching the
+# toolchain it claimed to follow.
 install_gen() {
   local bin="$1" pkg="$2" module="$3"
-  local version
+  local version stamped
   version="$(mod_version "${module}")"
-  if [[ -x "${BIN_DIR}/${bin}" ]]; then
-    return
+  stamped="${BIN_DIR}/${bin}-${version}"
+  if [[ ! -x "${stamped}" ]]; then
+    echo "  installing ${bin} from ${module}@${version}"
+    GOBIN="${BIN_DIR}" go install "${pkg}@${version}"
+    mv "${BIN_DIR}/${bin}" "${stamped}"
   fi
-  echo "  installing ${bin} from ${module}@${version}"
-  GOBIN="${BIN_DIR}" go install "${pkg}@${version}"
+  ln -sf "$(basename "${stamped}")" "${BIN_DIR}/${bin}"
 }
 
-# Copies staged output over the tree, or diffs it under --verify.
-land() {
-  local staged="${STAGE_DIR}/${MODULE}"
-  [[ -d "${staged}" ]] || return 0
-  local rel
-  while IFS= read -r rel; do
-    if [[ "${VERIFY}" == true ]]; then
-      if ! diff -q "${staged}/${rel}" "${REPO_ROOT}/${rel}" >/dev/null 2>&1; then
-        echo "OUT OF DATE: ${rel}" >&2
-        diff -u "${REPO_ROOT}/${rel}" "${staged}/${rel}" | head -40 >&2 || true
-        return 1
-      fi
-    else
-      mkdir -p "$(dirname "${REPO_ROOT}/${rel}")"
-      cp "${staged}/${rel}" "${REPO_ROOT}/${rel}"
-    fi
-  done < <(cd "${staged}" && find . -name '*.go' | sed 's|^\./||')
+# Where generation writes.
+#
+# deepcopy-gen, defaulter-gen and register-gen have no output directory of their
+# own any more: they resolve each input package through the module and write
+# beside its source. So there is nothing to stage, and --verify cannot diff a
+# staging area. Instead it copies the module to a scratch tree, generates there,
+# and compares the two trees. Regeneration just uses the repository itself.
+prepare_work_tree() {
+  if [[ "${VERIFY}" != true ]]; then
+    WORK_ROOT="${REPO_ROOT}"
+    return
+  fi
+  WORK_ROOT="$(mktemp -d)/kubezoo"
+  mkdir -p "${WORK_ROOT}"
+  tar -c --exclude=./.git --exclude=./_output --exclude=./bin -C "${REPO_ROOT}" . \
+    | tar -x -C "${WORK_ROOT}"
+}
+
+# Compares the scratch tree with the repository. Anything that differs is
+# generated output that the checked-in copy no longer matches -- the scratch
+# tree started as a copy, so untouched files cannot differ.
+compare_work_tree() {
+  local out status=0
+  out="$(diff -ru -x .git -x _output -x bin "${REPO_ROOT}" "${WORK_ROOT}" 2>&1)" || status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    echo "OUT OF DATE: generated code does not match the checked-in tree" >&2
+    echo "${out}" | head -60 >&2
+    return 1
+  fi
+}
+
+# Runs a generator, dropping the "API rule violation" chatter but keeping its
+# exit status. Piping into grep and appending "|| true" -- which is what this
+# used to do -- hid a hard generation failure behind a successful run, so
+# --verify passed while the file it was meant to guard was never produced.
+run_quiet() {
+  local log status=0
+  log="$(mktemp)"
+  "$@" >"${log}" 2>&1 || status=$?
+  grep -v 'API rule violation' "${log}" >&2 || true
+  rm -f "${log}"
+  return "${status}"
 }
 
 run_deepcopy() {
   install_gen deepcopy-gen k8s.io/code-generator/cmd/deepcopy-gen k8s.io/code-generator
-  "${BIN_DIR}/deepcopy-gen" \
+  run_quiet "${BIN_DIR}/deepcopy-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(IFS=,; echo "${OWNED_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/apis" \
-    --output-file-base zz_generated.deepcopy \
-    --bounding-dirs "${MODULE}/pkg/apis"
+    --output-file zz_generated.deepcopy.go \
+    "${OWNED_APIS[@]}"
 }
 
 run_defaulter() {
   install_gen defaulter-gen k8s.io/code-generator/cmd/defaulter-gen k8s.io/code-generator
-  "${BIN_DIR}/defaulter-gen" \
+  run_quiet "${BIN_DIR}/defaulter-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(IFS=,; echo "${GENERATED_REGISTER_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/apis" \
-    --output-file-base zz_generated.defaults
+    --output-file zz_generated.defaults.go \
+    "${GENERATED_REGISTER_APIS[@]}"
 }
 
 run_register() {
   install_gen register-gen k8s.io/code-generator/cmd/register-gen k8s.io/code-generator
-  "${BIN_DIR}/register-gen" \
+  run_quiet "${BIN_DIR}/register-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(IFS=,; echo "${GENERATED_REGISTER_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/apis" \
-    --output-file-base zz_generated.register
+    --output-file zz_generated.register.go \
+    "${GENERATED_REGISTER_APIS[@]}"
 }
 
 # OpenAPI for the APIs this repository owns -> pkg/apis/generated/openapi
 run_openapi() {
   install_gen openapi-gen k8s.io/kube-openapi/cmd/openapi-gen k8s.io/kube-openapi
-  "${BIN_DIR}/openapi-gen" \
+  run_quiet "${BIN_DIR}/openapi-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "k8s.io/apimachinery/pkg/apis/meta/v1,k8s.io/apimachinery/pkg/api/resource,k8s.io/apimachinery/pkg/version,k8s.io/apimachinery/pkg/runtime,k8s.io/apimachinery/pkg/util/intstr,$(IFS=,; echo "${OWNED_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/apis/generated/openapi" \
-    --report-filename "${REPO_ROOT}/pkg/apis/generated/openapi/violations.report" \
-    2>&1 | grep -v 'API rule violation' || true
+    --output-dir "${WORK_ROOT}/pkg/apis/generated/openapi" \
+    --output-pkg "${MODULE}/pkg/apis/generated/openapi" \
+    --output-file openapi_generated.go \
+    --report-filename "${WORK_ROOT}/pkg/apis/generated/openapi/violations.report" \
+    k8s.io/apimachinery/pkg/apis/meta/v1 \
+    k8s.io/apimachinery/pkg/api/resource \
+    k8s.io/apimachinery/pkg/version \
+    k8s.io/apimachinery/pkg/runtime \
+    k8s.io/apimachinery/pkg/util/intstr \
+    "${OWNED_APIS[@]}"
 }
 
 # OpenAPI for the Kubernetes APIs KubeZoo proxies -> pkg/apis/openapi
 # This is the file that previously had no recipe.
 run_openapi_served() {
   install_gen openapi-gen k8s.io/kube-openapi/cmd/openapi-gen k8s.io/kube-openapi
-  "${BIN_DIR}/openapi-gen" \
+  local inputs
+  IFS=, read -r -a inputs <<< "$(openapi_served_inputs)"
+  run_quiet "${BIN_DIR}/openapi-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(openapi_served_inputs)" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/apis/openapi" \
-    --output-file-base zz_generated.openapi \
-    2>&1 | grep -v 'API rule violation' || true
+    --output-dir "${WORK_ROOT}/pkg/apis/openapi" \
+    --output-pkg "${MODULE}/pkg/apis/openapi" \
+    --output-file zz_generated.openapi.go \
+    "${inputs[@]}"
 }
 
 run_client() {
@@ -215,27 +247,27 @@ run_client() {
   install_gen lister-gen k8s.io/code-generator/cmd/lister-gen k8s.io/code-generator
   install_gen informer-gen k8s.io/code-generator/cmd/informer-gen k8s.io/code-generator
 
-  "${BIN_DIR}/client-gen" \
+  run_quiet "${BIN_DIR}/client-gen" \
     --go-header-file "${HEADER}" \
     --clientset-name versioned \
     --input-base "" \
     --input "$(IFS=,; echo "${OWNED_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/generated/clientset"
+    --output-dir "${WORK_ROOT}/pkg/generated/clientset" \
+    --output-pkg "${MODULE}/pkg/generated/clientset"
 
-  "${BIN_DIR}/lister-gen" \
+  run_quiet "${BIN_DIR}/lister-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(IFS=,; echo "${OWNED_APIS[*]}")" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/generated/listers"
+    --output-dir "${WORK_ROOT}/pkg/generated/listers" \
+    --output-pkg "${MODULE}/pkg/generated/listers" \
+    "${OWNED_APIS[@]}"
 
-  "${BIN_DIR}/informer-gen" \
+  run_quiet "${BIN_DIR}/informer-gen" \
     --go-header-file "${HEADER}" \
-    --input-dirs "$(IFS=,; echo "${OWNED_APIS[*]}")" \
     --versioned-clientset-package "${MODULE}/pkg/generated/clientset/versioned" \
     --listers-package "${MODULE}/pkg/generated/listers" \
-    --output-base "${STAGE_DIR}" \
-    --output-package "${MODULE}/pkg/generated/informers"
+    --output-dir "${WORK_ROOT}/pkg/generated/informers" \
+    --output-pkg "${MODULE}/pkg/generated/informers" \
+    "${OWNED_APIS[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -248,8 +280,8 @@ run_client() {
 # ---------------------------------------------------------------------------
 
 mkdir -p "${BIN_DIR}"
-rm -rf "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}"
+prepare_work_tree
+cd "${WORK_ROOT}"
 
 for target in ${TARGETS}; do
   echo "==> ${target}"
@@ -264,10 +296,8 @@ for target in ${TARGETS}; do
   esac
 done
 
-land
-rm -rf "${STAGE_DIR}"
-
 if [[ "${VERIFY}" == true ]]; then
+  compare_work_tree
   echo "generated code is up to date"
 else
   echo "done; review 'git diff' before committing"

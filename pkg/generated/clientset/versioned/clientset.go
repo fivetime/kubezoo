@@ -19,15 +19,14 @@ limitations under the License.
 package versioned
 
 import (
-	"fmt"
-	"net/http"
-
-	discovery "k8s.io/client-go/discovery"
-	rest "k8s.io/client-go/rest"
-	flowcontrol "k8s.io/client-go/util/flowcontrol"
+	fmt "fmt"
+	http "net/http"
 
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/tenant/v1alpha1"
+	discovery "k8s.io/client-go/discovery"
+	rest "k8s.io/client-go/rest"
+	flowcontrol "k8s.io/client-go/util/flowcontrol"
 )
 
 type Interface interface {
@@ -36,8 +35,7 @@ type Interface interface {
 	TenantV1alpha1() tenantv1alpha1.TenantV1alpha1Interface
 }
 
-// Clientset contains the clients for groups. Each group has exactly one
-// version included in a Clientset.
+// Clientset contains the clients for groups.
 type Clientset struct {
 	*discovery.DiscoveryClient
 	quotaV1alpha1  *quotav1alpha1.QuotaV1alpha1Client

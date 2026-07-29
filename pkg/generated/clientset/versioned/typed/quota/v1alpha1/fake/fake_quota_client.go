@@ -19,10 +19,9 @@ limitations under the License.
 package fake
 
 import (
+	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
-
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 )
 
 type FakeQuotaV1alpha1 struct {
@@ -30,7 +29,7 @@ type FakeQuotaV1alpha1 struct {
 }
 
 func (c *FakeQuotaV1alpha1) ClusterResourceQuotas() v1alpha1.ClusterResourceQuotaInterface {
-	return &FakeClusterResourceQuotas{c}
+	return newFakeClusterResourceQuotas(c)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

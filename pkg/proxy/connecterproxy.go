@@ -215,6 +215,10 @@ func (cp *ConnecterProxy) ConnectMethods() []string {
 	return upgradeableMethods
 }
 
+// Destroy releases resources held by the storage. rest.Storage grew this method
+// in Kubernetes 1.26; the connecter holds no resources of its own.
+func (cp *ConnecterProxy) Destroy() {}
+
 func NewConnecterProxy(transport http.RoundTripper, upstreamMaster *url.URL) (rest.Storage, error) {
 	return &ConnecterProxy{
 		transport:      transport,

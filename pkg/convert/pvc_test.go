@@ -52,7 +52,7 @@ func TestPVCTranformerForward(t *testing.T) {
 					AccessModes: []internal.PersistentVolumeAccessMode{
 						internal.ReadWriteOnce,
 					},
-					Resources: internal.ResourceRequirements{
+					Resources: internal.VolumeResourceRequirements{
 						Requests: internal.ResourceList{
 							internal.ResourceStorage: resource.MustParse("20Gi"),
 						},
@@ -75,7 +75,7 @@ func TestPVCTranformerForward(t *testing.T) {
 					AccessModes: []internal.PersistentVolumeAccessMode{
 						internal.ReadWriteOnce,
 					},
-					Resources: internal.ResourceRequirements{
+					Resources: internal.VolumeResourceRequirements{
 						Requests: internal.ResourceList{
 							internal.ResourceStorage: resource.MustParse("20Gi"),
 						},
@@ -128,7 +128,7 @@ func TestPVCTranformerBackward(t *testing.T) {
 					AccessModes: []internal.PersistentVolumeAccessMode{
 						internal.ReadWriteOnce,
 					},
-					Resources: internal.ResourceRequirements{
+					Resources: internal.VolumeResourceRequirements{
 						Requests: internal.ResourceList{
 							internal.ResourceStorage: resource.MustParse("20Gi"),
 						},
@@ -151,7 +151,7 @@ func TestPVCTranformerBackward(t *testing.T) {
 					AccessModes: []internal.PersistentVolumeAccessMode{
 						internal.ReadWriteOnce,
 					},
-					Resources: internal.ResourceRequirements{
+					Resources: internal.VolumeResourceRequirements{
 						Requests: internal.ResourceList{
 							internal.ResourceStorage: resource.MustParse("20Gi"),
 						},

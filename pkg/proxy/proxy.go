@@ -183,6 +183,10 @@ func (tp *tenantProxy) getClient(ctx context.Context) (dynamic.ResourceInterface
 	return client, nil
 }
 
+// Destroy releases resources held by the storage. rest.Storage grew this method
+// in Kubernetes 1.26; the proxy holds no resources of its own.
+func (tp *tenantProxy) Destroy() {}
+
 // convertUnstructuredToOutput convert the unstructured to runtime object.
 func (tp *tenantProxy) convertUnstructuredToOutput(utd *unstructured.Unstructured, output runtime.Object) error {
 	if o, ok := output.(*unstructured.Unstructured); ok {

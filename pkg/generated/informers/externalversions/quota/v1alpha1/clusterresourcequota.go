@@ -19,25 +19,25 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	runtime "k8s.io/apimachinery/pkg/runtime"
-	watch "k8s.io/apimachinery/pkg/watch"
-	cache "k8s.io/client-go/tools/cache"
-
-	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	apisquotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
 	versioned "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
 	internalinterfaces "github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions/internalinterfaces"
-	v1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/listers/quota/v1alpha1"
+	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/generated/listers/quota/v1alpha1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	runtime "k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
+	watch "k8s.io/apimachinery/pkg/watch"
+	cache "k8s.io/client-go/tools/cache"
 )
 
 // ClusterResourceQuotaInformer provides access to a shared informer and lister for
 // ClusterResourceQuotas.
 type ClusterResourceQuotaInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1alpha1.ClusterResourceQuotaLister
+	Lister() quotav1alpha1.ClusterResourceQuotaLister
 }
 
 type clusterResourceQuotaInformer struct {
@@ -49,42 +49,67 @@ type clusterResourceQuotaInformer struct {
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
 func NewClusterResourceQuotaInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredClusterResourceQuotaInformer(client, resyncPeriod, indexers, nil)
+	return NewClusterResourceQuotaInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
 }
 
 // NewFilteredClusterResourceQuotaInformer constructs a new informer for ClusterResourceQuota type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredClusterResourceQuotaInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
-			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+	return NewClusterResourceQuotaInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewClusterResourceQuotaInformerWithOptions constructs a new informer for ClusterResourceQuota type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewClusterResourceQuotaInformerWithOptions(client versioned.Interface, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	gvr := schema.GroupVersionResource{Group: "quota.kubezoo.io", Version: "v1alpha1", Resource: "clusterresourcequotas"}
+	identifier := options.InformerName.WithResource(gvr)
+	tweakListOptions := options.TweakListOptions
+	return cache.NewSharedIndexInformerWithOptions(
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
+			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.QuotaV1alpha1().ClusterResourceQuotas().List(context.TODO(), options)
+				return client.QuotaV1alpha1().ClusterResourceQuotas().List(context.Background(), opts)
 			},
-			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.QuotaV1alpha1().ClusterResourceQuotas().Watch(context.TODO(), options)
+				return client.QuotaV1alpha1().ClusterResourceQuotas().Watch(context.Background(), opts)
 			},
+			ListWithContextFunc: func(ctx context.Context, opts v1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&opts)
+				}
+				return client.QuotaV1alpha1().ClusterResourceQuotas().List(ctx, opts)
+			},
+			WatchFuncWithContext: func(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&opts)
+				}
+				return client.QuotaV1alpha1().ClusterResourceQuotas().Watch(ctx, opts)
+			},
+		}, client),
+		&apisquotav1alpha1.ClusterResourceQuota{},
+		cache.SharedIndexInformerOptions{
+			ResyncPeriod: options.ResyncPeriod,
+			Indexers:     options.Indexers,
+			Identifier:   identifier,
 		},
-		&quotav1alpha1.ClusterResourceQuota{},
-		resyncPeriod,
-		indexers,
 	)
 }
 
 func (f *clusterResourceQuotaInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredClusterResourceQuotaInformer(client, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewClusterResourceQuotaInformerWithOptions(client, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *clusterResourceQuotaInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&quotav1alpha1.ClusterResourceQuota{}, f.defaultInformer)
+	return f.factory.InformerFor(&apisquotav1alpha1.ClusterResourceQuota{}, f.defaultInformer)
 }
 
-func (f *clusterResourceQuotaInformer) Lister() v1alpha1.ClusterResourceQuotaLister {
-	return v1alpha1.NewClusterResourceQuotaLister(f.Informer().GetIndexer())
+func (f *clusterResourceQuotaInformer) Lister() quotav1alpha1.ClusterResourceQuotaLister {
+	return quotav1alpha1.NewClusterResourceQuotaLister(f.Informer().GetIndexer())
 }

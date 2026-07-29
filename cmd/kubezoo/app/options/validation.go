@@ -23,11 +23,9 @@ import (
 	"strings"
 
 	apiextensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/component-base/metrics"
 	aggregatorscheme "k8s.io/kube-aggregator/pkg/apiserver/scheme"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/features"
 	netutils "k8s.io/utils/net"
 )
 
@@ -52,11 +50,10 @@ func validateClusterIPFlags(options *ServerRunOptions) []error {
 		errs = append(errs, errors.New("specified --service-cluster-ip-range is too large"))
 	}
 
-	// Secondary IP validation
+	// Secondary IP validation. The IPv6DualStack gate that used to guard this
+	// graduated and was removed in Kubernetes 1.27, so a secondary range no
+	// longer needs to be gated on anything.
 	secondaryServiceClusterIPRangeUsed := (options.SecondaryServiceClusterIPRange.IP != nil)
-	if secondaryServiceClusterIPRangeUsed && !utilfeature.DefaultFeatureGate.Enabled(features.IPv6DualStack) {
-		errs = append(errs, fmt.Errorf("--secondary-service-cluster-ip-range can only be used if %v feature is enabled", string(features.IPv6DualStack)))
-	}
 
 	// note: While the cluster might be dualstack (i.e. pods with multiple IPs), the user may choose
 	// to only ingress traffic within and into the cluster on one IP family only. this family is decided

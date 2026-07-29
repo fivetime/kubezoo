@@ -39,45 +39,121 @@
 - [x] controller-runtime `v0.24.1`、apiserver-runtime `v1.1.1`、structured-merge-diff `v4→v6` — `58959f1` `22e6133`
 - [x] `go mod tidy` 通过 — `58959f1`
 
-### 0.3 编译修复
+### 0.3 编译修复 ✅
 
 - [x] `pkg/` 全部 + `cmd/clusterresourcequota` 编译通过 — `58959f1` `22e6133` `6ce59fc`
-- [ ] **`cmd/kubezoo/app/customresource_handler.go`(5 个错误)** — **#88**,方法见下
-- [ ] `cmd/kubezoo/app/server.go`(6 个错误):`Features.ApplyTo` 参数、`genericConfig.Version` 已移除、
-      `storageFactoryConfig.Complete` 返回值数量
-- [ ] `go build ./...` 全绿
+- [x] `cmd/kubezoo/app/customresource_handler.go` — `ec1827f`(见 0.4)
+- [x] `cmd/kubezoo/app/server.go` — `60e130b`。实际改动比预估的三条多:
+      `Features.ApplyTo` 参数 / `genericConfig.Version` 移除 / `storageFactoryConfig.Complete` 返回值,
+      外加 `ToAuthorizationConfig` 加 error、authenticator `New` 收 ctx 返 5 值、
+      `HandlerChainWaitGroup` 拆分、`WithAuthentication` 加 RequestHeaderConfig、
+      `IsValidServiceAccountKeyFile` 移除
+- [x] `go build ./...` 全绿 — `60e130b`
 
-### 0.4 CRD handler 重新 fork(#88)
+### 0.4 CRD handler 重新 fork(#88)✅ — `ec1827f`
 
-它是上游同名文件的 fork,已与 1.36 **结构性脱节**。逐编译错误改会漏掉上游 900 多行演进
-(编译过但行为停在 1.24),而这个文件是 **CRD 的租户隔离路径**。
+按三方合并做完(base=上游 v1.24.0 / ours=kubezoo fork / theirs=上游 v1.36.3),
+14 个冲突块全解,约 900 行上游演进自动合入,文件 1450 → 1624 行。
 
-- [ ] 按**三方合并**解 14 个冲突块(base=上游 v1.24.0 / ours=kubezoo fork / theirs=上游 v1.36.3)
-      - 产物已在 `_output/refork/`(gitignore),复现命令在 #88
-      - ⚠️ 先看两个大块:**#11 行 1273-1348(76 行)、#12 行 1413-1468(56 行)**
-- [ ] 解冲突时保住 kubezoo 语义:CRD 名字/group 的租户前缀转换(`util.ConvertCRDNameToUpstream`)、
-      `getTenantCRD`、文件末尾新增的 ~55 行
-- [ ] 合并后确认这些**已解的改动没被回退**:fieldmanager→`apimachinery/util/managedfields`、
-      `StaticOpenAPISpec` 换 `map[string]*spec.Schema`、openapi V3、
-      `fieldpath.NewExcludeFilterSetMap`、ServerSideApply 门移除
-- [ ] 对齐仍未解的 1.36 API:`customresource.NewStorage` 返回 2 值、`NewStrategy` 参数表
-      (structural 由 map 变单个 + 末尾新增 `[]apiextensionsv1.SelectableField`)、
-      `NewSchemaValidator` 收 `*JSONSchemaProps`、`GetRESTOptions` 加参数
+- [x] 解 14 个冲突块
+- [x] kubezoo 语义全部保住:`getTenantCRD` / `util.ConvertCRDNameToUpstream` /
+      每个 verb 的 `proxyStorage` / nil admission 链 / `upstreamConfig`
+- [x] 确认已解的 1.36 改动没被回退(managedfields、`map[string]*spec.Schema`、
+      openapi V3、`NewExcludeFilterSetMap`、ServerSideApply 门移除)
+- [x] 对齐剩余 1.36 API(`GetRESTOptions` 加参数等)
+
+⭐ **解冲突时发现的两件事,值得记住**:
+
+1. **kubezoo 的 fork 基线其实比 1.24 更老** —— 它缺 `StrictSerializer`、缺
+   `StorageObjectCountTracker`、`unstructuredSchemaCoercer.apply` 还是单返回值。
+   所以多数"冲突"是基线错位造成的**假冲突**,upstream 侧直接就是对的。
+   顺带补回了整条 **unknown-field-paths / strict-decoding 管道**(此前完全没有)。
+2. **一处有意与上游分道**:上游 1.26 把"CRD terminating 时拒绝 create"从直接报错
+   改成用 `forbidCreateAdmission` 包住 admission 链。那个 wrapper 会解引用 delegate,
+   而 kubezoo 传的是 **nil admission 链**(admission 在上游 apiserver 跑),所以这里
+   保留直接拒绝。文件里有注释说明。
+3. `CRDRESTOptionsGetter` 本地副本已删 —— 上游挪了位置,`apiextensions.go` 早就在用
+   `apiextensionsoptions.NewCRDRESTOptionsGetter`。
 
 ### 0.5 收尾
 
-- [ ] `apigroups.go`(1225 行)按 1.36 **全面核对**资源/版本清单
-      (目前只删了编译报错的 autoscaling v2beta1/v2beta2 与 PodSecurityPolicy)
-- [ ] `pkg/util/util.go` 的 `groupKindNamespaced` 表(60+ 条)按 1.36 更新
-- [ ] `make codegen` 重新生成 + `make verify-codegen` 通过
-- [ ] ⚠️⚠️ **`go test ./...`** —— 整个移植至今**唯一证据只有"能编译"**。重点验:
-      - `NewQuotaConfigurationForAdmission(nil, nil)` 两个新参传 nil 是否安全
-      - controller-runtime 事件处理器的泛型迁移
-      - CRD handler 的 openapi V2→V3 改动
+- [x] ⚠️⚠️ **`go test ./...`** —— 已跑,`make test` 全绿 — `60e130b`
+      - 单元测试全过;`pkg/controller` 集成测试在**真 etcd + kube-apiserver 1.36**
+        下通过(envtest 从 1.24 抬到 1.36,`ENVTEST_K8S_VERSION` / `SETUP_ENVTEST_VERSION`)
+      - `NewQuotaConfigurationForAdmission(nil, nil)` 传 nil:测试通过,但**没有构造
+        DRA 场景**去打那条唯一会解引用 informer factory 的分支
+      - 修掉的:client-go 聚合发现改写导致 `/apis` 响应丢 `kind`/`apiVersion`
+        (**真回归**,已确认兄弟端点 `/apis/{group}` 与 `/apis/{group}/{version}` 不受影响);
+        两处测试夹具的类型更名(gnostic→gnostic-models、PVC 的
+        `ResourceRequirements`→`VolumeResourceRequirements`)
+- [x] 二进制能启动 — `fe885dd`。⚠️ **"编译过 + 测试绿"没能挡住启动即 panic**:
+      `AddCustomGlobalFlags` 去全局 flagset 找 `default-not-ready-toleration-seconds`,
+      1.36 已把它挪进 `AdmissionOptions.AddFlags`,`globalflag.Register` 找不到就 panic。
+      整个函数已过时,连同 `globalflags.go` 一起删掉
+- [x] `apigroups.go` 按 1.36 **全面核对**资源/版本清单 — `3747fb7`。1183 → 935 行。
+      方法:envtest 起**真 1.36 apiserver** 导出 discovery 当基准,与表格机器比对(不靠记忆)
+      - **删掉 12 个陈旧 group-version**。其中 7 个(`extensions/v1beta1`、`policy/v1beta1`、
+        `batch/v1beta1`、`discovery/v1beta1`、`authorization/v1beta1`、`rbac/v1alpha1`、
+        `rbac/v1beta1`)1.36 apiserver **完全不认识**;另 5 个"还认识但默认关闭",且**已被改作
+        完全不同的资源** —— 显式 `--runtime-config` 打开后实测:
+        `admissionregistration/v1beta1` 给的是 mutatingadmissionpolicies(不是 webhookconfigurations)、
+        `coordination/v1beta1` 是 leasecandidates(不是 leases)、
+        `networking/v1beta1` 是 ipaddresses/servicecidrs(不是 ingresses)、
+        `authentication/v1beta1` 与 `certificates/v1beta1` **什么都不给**
+      - ⭐ **这些不是死代码,是活端点**:`NewRESTStorage` **忽略了传进来的
+        `APIResourceConfigSource`**,表里写什么就装什么,而 scheme 仍给这些版本优先级 ⇒
+        kubezoo 真的对外提供 `/apis/extensions/v1beta1/...`,转发到上游得 404。
+        副作用是 **`--runtime-config` 对所有被代理的 group 全部失效**。已改成按 config source 过滤
+      - 补两个 1.36 有而这边缺的:`pods/resize`、`persistentvolumeclaims/status`
+        (后者是纯遗漏 —— 其他 core 资源都有 status 子资源)
+      - **加了两个常驻守卫测试**(都在旧表上验证过会红,第一个抓 7 个、第二个抓全部 12 个):
+        声明的 GV 必须是 1.36 apiserver 认识的;声明的每个资源必须能活着穿过 resource-config 过滤
+      - ⚠️ **有意没加,需要产品决策而非移植决定**:上游启用但这边没有的
+        `storage.k8s.io/v1`(StorageClass!PVC 要引用它)、`scheduling.k8s.io/v1`、
+        `certificates.k8s.io/v1`、`resource.k8s.io/v1`(DRA);以及已暴露 group 内部的
+        `admissionregistration/v1` 策略对象、`networking/v1` 的 ipaddresses/servicecidrs
+        —— 后两类是**集群级配置,租户大概率不该碰**
+- [x] `pkg/util/util.go` 的 `groupKindNamespaced` 表按 1.36 更新 — `ad3e45c`。54 → 68 条
+      - 这张表决定 ownerReference/objectReference 走哪半边改写:**集群级 ⇒ 给 name 加租户前缀,
+        namespaced ⇒ 不加**(前缀在 namespace 上)。把集群级误标成 namespaced,
+        两个租户在同名集群对象上就直接撞车
+      - ⭐ **54 条已有条目作用域全部正确,零错** —— 这是个干净的负面结论,不是修复
+      - 真正的问题是**覆盖不全**:16 个 apiserver 提供的 kind 不在表里 ⇒ `IsGroupKindNamespaced`
+        报错 ⇒ 落到 `unregistered crd group`。其中 `resource.k8s.io/ResourceClaim`、
+        `ResourceClaimTemplate` 是**租户 Pod 现在就可能引用**的。已全部补上
+      - 删 `extensions/Ingress`、`policy/PodSecurityPolicy`(kind 已不存在)
+      - ⚠️ `autoscaling/Scale` 看着也像退役,**实际没有** —— 它作为 `deployments/scale` 的 kind
+        还活着(namespaced=true)。核实过才没误删
+      - **守卫测试**对比表与真实 discovery(旧表上精确报出 16 缺 + 2 陈旧)。两个必须做对的点:
+        只有**顶层资源**算基准(只有它们能被引用;子资源的 kind 是请求体,如 `PodExecOptions`/
+        `Eviction`/`TokenRequest`,不该进表);**只作为子资源 kind 出现的不算陈旧**(即 Scale,
+        discovery 把它挂在父资源的 group 下,不是表里用的 autoscaling)
+      - 需要真 apiserver ⇒ 归入 `make test-integration`(现在也覆盖 `pkg/util`),单元跑时 skip
+- [x] `make codegen` 重新生成 + `make verify-codegen` 通过 — `d7bb1fc`
+      - ⚠️ **改之前 `make verify-codegen` 是通过的,而且毫无意义** —— 配方(`4fadaa5`,我自己写的)
+        有两个洞:① `install_gen` 只按**二进制名**判断是否已装,不看版本 ⇒ 依赖抬升后一直在用
+        **1.24 时代的生成器**跑 1.36 类型;② 两个 openapi 目标结尾是
+        `| grep -v 'API rule violation' || true`,`|| true` 把**所有失败**都吞了。
+        旧生成器实际是**硬失败**的(`AzureDiskVolumeSource.CachingMode` 的 `+default=ref(...)`
+        它解析不了)⇒ 什么都没生成 ⇒ diff 无从比较 ⇒ **verify 对它唯一要守护的那个文件报了成功**。
+        换成 go.mod 钉的生成器后该错误消失(新版认识 `ref()`),纯属旧二进制的产物
+      - 换正确生成器后命令行要迁到 **gengo v2**:输入变位置参数、
+        `--output-base/--output-package/--output-file-base` → `--output-dir/--output-pkg/--output-file`;
+        **deepcopy/defaulter/register 已经没有输出目录了,直接写在输入包旁边** ⇒ staging 模型失效,
+        `--verify` 改为把模块复制到临时树、在那里生成、再整树 diff
+      - 全量重新生成:`pkg/apis/openapi/zz_generated.openapi.go` 54776 → 65753 行(1.24→1.36 类型集)
+      - **双向验证过**:刚生成完的树上 verify 通过;篡改生成文件里的一行 ⇒ verify 精确报错
+      - ⚠️ **教训同"编译过≠能跑"**:`make verify-codegen` 通过也不等于配方是对的。
+        新增/修改校验类脚本时,**必须做一次负向对照**(故意弄脏,确认它会红)
+- [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
+      —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
 - [ ] 合并回 main
 
-> ⚠️ **方法学**:"还剩 N 个错误"**不是可靠进度指标** —— 每修好一处就暴露下一处
-> (server.go 曾 6→3→又 6)。已据此低估过一次工作量,排期时别按错误数估。
+> ⚠️ **方法学**,两条都在这次移植里应验了:
+> 1. **"还剩 N 个错误"不是可靠进度指标** —— 每修好一处就暴露下一处(server.go 曾
+>    6→3→又 6,最后实际改了 8 类 API 而不是预估的 3 类)。排期别按错误数估。
+> 2. **"能编译"和"测试绿"都不等于"能跑"** —— 全树编译通过、`make test` 全绿之后,
+>    二进制仍然启动即 panic。**每个移植里程碑都要真正执行一次产物**,而不是只看构建结果。
 
 ---
 

@@ -2,3 +2,8 @@
 _output
 bin
 .vscode
+
+# Binaries hack/build.sh drops in the repo root. One of these was committed
+# by accident during the 1.36 port -- 75MB of it.
+/kubezoo
+/clusterresourcequota

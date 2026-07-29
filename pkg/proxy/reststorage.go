@@ -26,8 +26,9 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	master "k8s.io/kubernetes/pkg/controlplane"
+	master "k8s.io/kubernetes/pkg/controlplane/apiserver"
 
 	"github.com/kubewharf/kubezoo/pkg/common"
 )
@@ -47,8 +48,21 @@ func (r RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorag
 	}
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(r.apiGroupConfig.Group, scheme, runtime.NewParameterCodec(scheme), serializer.NewCodecFactory(scheme))
 	for version, resources := range r.apiGroupConfig.StorageConfigs {
+		gv := schema.GroupVersion{Group: r.apiGroupConfig.Group, Version: version}
 		storage := map[string]rest.Storage{}
 		for resource, config := range resources {
+			// Honour the resource config the way every upstream storage provider
+			// does. Without this, whatever apigroups.go happens to declare gets
+			// served, so a group-version the apiserver no longer knows still gets
+			// a live endpoint that proxies to an upstream path returning 404, and
+			// --runtime-config has no effect on any proxied group. Subresources
+			// follow their parent, which is why this checks config.Resource
+			// rather than the map key.
+			if apiResourceConfigSource != nil && !apiResourceConfigSource.ResourceEnabled(gv.WithResource(config.Resource)) {
+				klog.V(1).Infof("Skipping disabled resource %s, resource %q", gv, resource)
+				continue
+			}
+
 			// remove FieldLabelConversionFunc for kind, so that KubeZoo talks with upstream cluster apiserver with versioned field labels
 			if err := removeFieldLabelConversionFunc(scheme, config.Kind); err != nil {
 				return genericapiserver.APIGroupInfo{}, err
@@ -59,6 +73,10 @@ func (r RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorag
 				return genericapiserver.APIGroupInfo{}, err
 			}
 			storage[resource] = ps
+		}
+		if len(storage) == 0 {
+			klog.V(1).Infof("Skipping API %s, no enabled resources", gv)
+			continue
 		}
 		apiGroupInfo.VersionedResourcesStorageMap[version] = storage
 	}

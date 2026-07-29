@@ -34,6 +34,11 @@ func NewProxyREST(transport http.RoundTripper, upstreamMaster *url.URL) (rest.St
 	}, nil
 }
 
+// Destroy releases resources held by the storage. rest.Storage grew this method
+// in Kubernetes 1.26. The proxy owns nothing of its own: the transport is passed
+// in and outlives it.
+func (r *ProxyREST) Destroy() {}
+
 // Implement Connecter
 var _ = rest.Connecter(&ProxyREST{})
 

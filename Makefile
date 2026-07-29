@@ -6,8 +6,8 @@ WHAT ?= $(TARGETS)
 IMAGE_REPO ?= ghcr.io/kubewharf
 IMAGE_TAG ?= $(shell git describe --tags --always --dirty)
 TARGET_PLATFORMS ?= linux/amd64
-ENVTEST_K8S_VERSION ?= 1.24.x
-SETUP_ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.36.x
+SETUP_ENVTEST_VERSION ?= release-0.24
 
 .DEFAULT_GOAL := build
 
@@ -23,10 +23,13 @@ test-unit:
 envtest:
 	@GOBIN="$(CURDIR)/bin" $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
+# pkg/util is here for the scope-table check, which needs a real apiserver to
+# compare against. Its other tests run in test-unit and skip that one. -count=1
+# because the result depends on the envtest binaries, not just on the sources.
 .PHONY: test-integration
 test-integration: envtest
 	@KUBEBUILDER_ASSETS="$$($(CURDIR)/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
-		$(GO) test ./pkg/controller
+		$(GO) test -count=1 ./pkg/controller ./pkg/util
 
 .PHONY: test
 test: test-unit test-integration

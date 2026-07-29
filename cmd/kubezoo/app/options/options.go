@@ -45,7 +45,6 @@ type ServerRunOptions struct {
 	Admission                 *kubeoptions.AdmissionOptions
 	Authentication            *kubeoptions.BuiltInAuthenticationOptions
 	Authorization             *kubeoptions.BuiltInAuthorizationOptions
-	CloudProvider             *kubeoptions.CloudProviderOptions
 	APIEnablement             *genericoptions.APIEnablementOptions
 	EgressSelector            *genericoptions.EgressSelectorOptions
 	Proxy                     *ProxyOptions
@@ -92,7 +91,6 @@ func NewServerRunOptions() *ServerRunOptions {
 		Admission:               kubeoptions.NewAdmissionOptions(),
 		Authentication:          kubeoptions.NewBuiltInAuthenticationOptions().WithAll(),
 		Authorization:           kubeoptions.NewBuiltInAuthorizationOptions(),
-		CloudProvider:           kubeoptions.NewCloudProviderOptions(),
 		APIEnablement:           genericoptions.NewAPIEnablementOptions(),
 		EgressSelector:          genericoptions.NewEgressSelectorOptions(),
 		Proxy:                   NewProxyOptions(),
@@ -136,7 +134,6 @@ func (s *ServerRunOptions) Flags() (fss cliflag.NamedFlagSets) {
 	s.Features.AddFlags(fss.FlagSet("features"))
 	s.Authentication.AddFlags(fss.FlagSet("authentication"))
 	s.Authorization.AddFlags(fss.FlagSet("authorization"))
-	s.CloudProvider.AddFlags(fss.FlagSet("cloud provider"))
 	s.APIEnablement.AddFlags(fss.FlagSet("API enablement"))
 	s.EgressSelector.AddFlags(fss.FlagSet("egress selector"))
 	s.Admission.AddFlags(fss.FlagSet("admission"))
@@ -212,13 +209,13 @@ func (s *ServerRunOptions) Flags() (fss cliflag.NamedFlagSets) {
 	fs.DurationVar(&s.KubeletConfig.HTTPTimeout, "kubelet-timeout", s.KubeletConfig.HTTPTimeout,
 		"Timeout for kubelet operations.")
 
-	fs.StringVar(&s.KubeletConfig.CertFile, "kubelet-client-certificate", s.KubeletConfig.CertFile,
+	fs.StringVar(&s.KubeletConfig.TLSClientConfig.CertFile, "kubelet-client-certificate", s.KubeletConfig.TLSClientConfig.CertFile,
 		"Path to a client cert file for TLS.")
 
-	fs.StringVar(&s.KubeletConfig.KeyFile, "kubelet-client-key", s.KubeletConfig.KeyFile,
+	fs.StringVar(&s.KubeletConfig.TLSClientConfig.KeyFile, "kubelet-client-key", s.KubeletConfig.TLSClientConfig.KeyFile,
 		"Path to a client key file for TLS.")
 
-	fs.StringVar(&s.KubeletConfig.CAFile, "kubelet-certificate-authority", s.KubeletConfig.CAFile,
+	fs.StringVar(&s.KubeletConfig.TLSClientConfig.CAFile, "kubelet-certificate-authority", s.KubeletConfig.TLSClientConfig.CAFile,
 		"Path to a cert file for the certificate authority.")
 
 	fs.BoolVar(&s.EnableAggregatorRouting, "enable-aggregator-routing", s.EnableAggregatorRouting,
