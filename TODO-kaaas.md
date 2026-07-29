@@ -263,22 +263,52 @@ kubezoo / kubetron / Kyverno **都会往租户的 Pod 上写东西**,而**只有
 
 ⚠️ 应在 **1.1 之后**做。
 
-- [ ] **静态覆盖审计**:枚举 k8s 全部资源 × 全部含引用的字段,对照 `pkg/convert/` 找漏网。
-      重点:ownerReference、objectReference、Service/Endpoints/EndpointSlice、PV↔PVC 绑定、
-      RoleBinding 的 subjects、CRD group 前缀、webhook 的 clientConfig.service、Event 的
-      involvedObject、`cross-object.go`。确认哪些资源落到了默认放行的 `default.go`/`nope.go`
-- [ ] **双租户黑盒穿越测试**(真实 kubectl/client-go,优先于单测):按名直取、label/field selector、
-      watch(含 `resourceVersion=0` 全量)、跨租户 ownerReference 触发级联删除、CRD 同名不同租户、
-      PVC 绑别人的 PV、Service 指向别人的 Endpoints、SA token 换跨租户权限、`kubectl auth can-i`、
-      discovery/OpenAPI 泄露
-- [ ] **配额验证**(架构文档 §9,以下均为读码结论,**未做运行时复现**):
-      - [ ] 生效范围:预期只有 compute 类 + `pods` 计数受"租户总量"约束;
+> ⭐ **审计报告见 [`docs/isolation-audit-cn.md`](docs/isolation-audit-cn.md)**(真实上游集群双租户实测,
+> 每条注明实测/读码)。以下勾选项按该报告。
+
+- [x] **静态覆盖审计** —— 枚举转换器接线情况,发现两个**写好但从未接线**的转换器
+- [x] **双租户黑盒穿越测试**(真 kubectl,kind v1.35 + 移植版 kubezoo + etcd)
+
+### 审计结论:三条待修 + 两条已知
+
+- [ ] ⛔ **A 最高:租户可注册全集群生效的准入 webhook** —— `apigroups.go` 暴露了
+      mutating/validating webhookconfigurations,而 `pkg/convert` **完全没碰它们**:
+      `rules` 不带租户范围、`namespaceSelector` 空 ⇒ 匹配全集群;`clientConfig.service`
+      不加前缀 ⇒ 指向平台命名空间。**实测:一个租户的一个对象同时打死另一个租户和平台自身**。
+      改 `failurePolicy: Ignore` + 指向自己可达的服务,即可**读到全集群每个被创建的对象**
+      ⚠️ **per-namespace RBAC(#87)挡不住** —— 集群级资源,`resourceNames` 表达不了名字前缀
+      · 修法待决策:**不暴露**这两个资源(与 KAaaS 定位相符,最简单),或强制注入
+      `namespaceSelector` + 改写 `clientConfig.service`(还需同时挡住 update)
+- [ ] ⛔ **B 高:PersistentVolume 走 `nopeConvertor`,完全未改写**。写路径不加前缀、
+      读路径按前缀过滤,两边不对称 ⇒ ①上游是裸名 ②**创建者自己都 get 不到** ③另一租户建同名得
+      `AlreadyExists`(**跨租户存在性泄露**)④谁都删不掉 ⇒ **对象永久滞留、名字被永久占用**
+- [ ] ⚠️ **C 中:PVC 的 `spec.volumeName` 未改写**(PVC 只走 `defaultConvertor`)。
+      配合 B,**PV↔PVC 绑定整条链路没有转换**
+- [x] **D 成因已定位**:`NewPVTransformer` / `NewPVCTransformer` 实现完整、**单元测试都通过**,
+      但 `init.go` **从未注册它们**(各被引用 0 次)。
+      ⭐ **方法学:单元测试测的是转换器本身,没有任何测试检查它是否被接上**
+- [x] **E 已知项现场确认**:Node 对所有租户可见(见 1.2)
+
+### 通过项(实测正向对照)
+
+namespace/name 前缀 · CRD 同名隔离(`widgets.111111-...` vs `widgets.222222-...`) ·
+Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 本身禁止跨 ns owner) ·
+上游 RBAC 兜底(#87,带负向对照)
+
+### 尚未覆盖(不算做完)
+
+- [ ] **配额三条仍是读码结论,未做运行时复现**:
+      - [ ] 生效范围:预期只有 compute 类 + `pods` 计数受总量约束;
             `configmaps`/`secrets`/`services`/`pvc`/`count/*`/`requests.storage` **无总量**,
             且 per-namespace 限额 == 总量额度 ⇒ **多建一个 namespace 就多拿一份额度**
-      - [ ] ⭐ **objectSelector 绕过**:`quota.tmpl.yaml` 按 `app` 标签排除,而**标签归租户**
-            ⇒ 打个标签即绕过总量约束。**修法:改为按 namespace 排除**
-      - [ ] 并发超发:`UpdateQuotaStatus` 是空实现,关闭了 admission 期乐观并发记账。压测出幅度
-      - [ ] 配额组件 `replicas: 1` + `failurePolicy: Fail` = 单点,改多副本 + PDB
+      - [ ] ⭐ **objectSelector 绕过**:按 `app` 标签排除,而**标签归租户** ⇒ 打个标签即绕过。
+            **修法:改为按 namespace 排除**
+      - [ ] 并发超发:`UpdateQuotaStatus` 空实现,关闭了 admission 期乐观并发记账
+      - [ ] 配额组件 `replicas: 1` + `failurePolicy: Fail` = 单点
+- [ ] watch(含 `resourceVersion=0` 全量)、label/field selector、`kubectl auth can-i`、
+      SA token 换跨租户权限、discovery/OpenAPI 泄露
+- [ ] `Pod.spec.runtimeClassName` / `Ingress.spec.ingressClassName` 未改写 ⇒ **悬空引用**(读码,未实测)
+- [ ] `Pod.spec.priorityClassName` 不改写 ⇒ 租户可引用平台 PriorityClass 抬高调度优先级(读码,未实测)
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次。
 
