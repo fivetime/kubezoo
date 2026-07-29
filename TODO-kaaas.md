@@ -211,31 +211,37 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       要先摘探针再冻(未实测)
 ---
 
-### 1.6 ⛔⛔ P0 未修:租户新建的 namespace 永远拿不到 RoleBinding
+### 1.6 ⚠️ 撤回的一条"P0" —— 以及它换来的真实教训
 
-**复现**(实测,lab 带 Kyverno 的完整形态):
+我一度记录了一条 P0:"租户新建的 namespace 永远拿不到 RoleBinding,永久不可用"。
+**这条是错的,已撤回。**
+
+**干净 lab 里逐点验证,整条链路是通的**(加临时日志确认):
 
 ```
-租户 kubectl create ns team-a          → namespace 建出来了,带 kubezoo.io/tenant 标签
-上游 111111-team-a 的 RoleBinding      → 0,等 35 分钟仍是 0(resync 周期才 10 分钟)
-租户在该 ns 里做任何事                 → Forbidden(上游 RBAC 没有授权)
+租户 create ns probe-ns
+  → DIAG enqueueNamespaceOwner ns=111111-probe-ns tenant=111111   ← informer 投递了
+  → DIAG processNextItem got {tenantId:111111 eventType:1}         ← worker 处理了
+  → 111111-probe-ns 的 RoleBinding = 1                             ← 下发了
+删掉某个 namespace 的 RoleBinding → 下一次 Update 立刻补回来        ← 收敛也是好的
 ```
 
-⇒ **租户自己建的 namespace 是永久不可用的。** 这是 #87 那套 per-namespace RBAC 的窟窿:
-权限按 namespace 下发,而新 namespace 的那一份从来没下发。
+**当初为什么会看错**:测到一半我在后台重跑了一次 `up.sh`,它会重建 PKI 并重启整个栈。
+那之后的每一次观测,都是打在一个**被我自己搅动过、状态不明**的 lab 上。
 
-**已经查清的部分**(用于接手):
+⭐ **这是本次会话第四次同一形状的失误**(前三次:二进制没重新编译就归因、
+`jsonpath` 读一个不存在的对象、`wc -l` 把 "No resources found" 数成 1)。
+**共同点:环境没有先自证,就开始解释现象。**
 
-- **Create 路径是好的**:新建租户 222222,4 个系统 namespace 立刻都有 RoleBinding
-- **Update/收敛路径是死的**:
-  - 建 namespace → 控制器**一行日志都没有**(namespace informer 没投递,或事件没被处理)
-  - 直接 annotate 租户对象强制产生 Update → **同样没有反应**
-  - ⭐ **把一个本来正常的 namespace(`111111-team-a`)的 RoleBinding 删掉 → 不会被补回来**
-    ⇒ 所以现存那些 RoleBinding 是**租户创建时留下的遗产**,不是持续收敛的结果
-- 排除项:namespace 都是 `Active`、无 `deletionTimestamp`、标签齐全;控制器 worker 活着
-- ⚠️ **根因未定位,不要照着猜测去改**。一个待验的方向:`queue.Add(Event{tenantId, Update})`
-  用结构体做 key,若某个 `Event{111111,Update}` 陷入失败重试,后续同 key 的 Update 会
-  **全部去重并进同一个失败项** —— 与"Create 正常、Update 全死"的现象吻合,但**没有证据**
+> **规矩**:测出异常时,第一步不是解释,是**确认被测环境就是你以为的那个** ——
+> 二进制是不是新的、对象是不是真存在、跑的进程是不是那一个。
+
+### 1.7 ✅ 顺手修掉一个真缺陷(读码发现,与上面那次误报无关)
+
+租户 informer 的三个 handler **共用同一个 `Event` 变量和同一个 `err`**,
+逐字段赋值后再入队。informer 从自己的 goroutine 调 handler,所以两个事件并发时
+可以在"写 tenantId"和"写 eventType"之间交错,**入队一个张冠李戴的事件** ——
+比如一个 create 被当成 delete 处理。改成每个 handler 各自构造事件。
 
 ## 阶段 2:隔离正确性审计(#82)✅ 主体完成
 

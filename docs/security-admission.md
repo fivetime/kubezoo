@@ -127,8 +127,7 @@
 - [ ] 租户 A 的 `/openapi/v2` 与 `/openapi/v3` 里没有租户 B 的任何痕迹
 - [ ] 四种写法都摘不掉 `kubezoo.io/tenant` 标签
 - [ ] 租户留 finalizer 后退租 → namespace 仍能终结,租户 ID 可复用
-- [ ] ⛔ **租户新建一个 namespace 后,能在里面正常创建对象**
-      —— 当前**不能**(RoleBinding 从不下发,见 `TODO-kaaas.md` §1.6)
+- [ ] 租户新建一个 namespace 后,能在里面正常创建对象(RoleBinding 自动下发)
 - [ ] 停机 `ReadOnly` / `Frozen` 期间 **Pod 保持 Running、restarts 不变**;解除后租户恢复可写
 - [ ] 配额:超额 Pod 加上任意租户可控的标签后**仍被拒**
 

@@ -103,31 +103,29 @@ type TenantController struct {
 // newTenantController create a controller to handler the events of tenant.
 func newTenantController(ti cache.SharedIndexInformer, tenantCli tenantclient.TenantV1alpha1Interface, coreCli v1.CoreV1Interface, rbacCli rbacclient.RbacV1Interface, quotaClient quotaclient.QuotaV1alpha1Interface, discoveryCli *discovery.DiscoveryClient, dynamicCli dynamic.Interface, crdClient *apiextensions.Clientset, clientCAFile, clientCAKeyFile, kubeZooBindAddress string, kubeZooSecurePort int) *TenantController {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	var (
-		newEvent Event
-		err      error
-	)
+	// Each handler builds its own event. They used to share one Event value and
+	// one err declared out here, mutating it field by field before queueing it:
+	// two handlers running at once could interleave between setting tenantId and
+	// setting eventType, and queue an event with one tenant's id and another
+	// event's type -- a create processed as a delete, or the reverse. The
+	// informer calls handlers from its own goroutines, so nothing prevented it.
+	enqueue := func(obj interface{}, eventType EventType, keyFunc cache.KeyFunc) {
+		tenantId, err := keyFunc(obj)
+		if err != nil {
+			utilruntime.HandleError(fmt.Errorf("deriving the key of a tenant event: %w", err))
+			return
+		}
+		queue.Add(Event{tenantId: tenantId, eventType: eventType})
+	}
 	ti.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			newEvent.tenantId, err = cache.MetaNamespaceKeyFunc(obj)
-			if err == nil {
-				newEvent.eventType = Create
-				queue.Add(newEvent)
-			}
+			enqueue(obj, Create, cache.MetaNamespaceKeyFunc)
 		},
 		UpdateFunc: func(_, new interface{}) {
-			newEvent.tenantId, err = cache.MetaNamespaceKeyFunc(new)
-			if err == nil {
-				newEvent.eventType = Update
-				queue.Add(newEvent)
-			}
+			enqueue(new, Update, cache.MetaNamespaceKeyFunc)
 		},
 		DeleteFunc: func(obj interface{}) {
-			newEvent.tenantId, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				newEvent.eventType = Delete
-				queue.Add(newEvent)
-			}
+			enqueue(obj, Delete, cache.DeletionHandlingMetaNamespaceKeyFunc)
 		},
 	})
 
