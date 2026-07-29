@@ -137,22 +137,6 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 		// silently.
 	}
 
-	// runtimeClassName, ingressClassName and priorityClassName name objects the
-	// platform owns; a tenant setting them has no effect. The list is in
-	// pkg/convert rather than spelled out here because cmd/kubezoo/app checks it
-	// against the resources actually served -- PodSpec is embedded in nine
-	// kinds, and covering only Pod would leave a Deployment untouched.
-	platformFields := NewPlatformFieldsTransformer()
-	for _, gk := range PlatformFieldGroupKinds() {
-		if existing, ok := nativeKindToConvertors[gk]; ok {
-			// Chain rather than replace, so a kind that already has a
-			// transformer keeps it.
-			nativeKindToConvertors[gk] = NewCrossReferenceConverter(existing, platformFields)
-			continue
-		}
-		nativeKindToConvertors[gk] = NewCrossReferenceConverter(defaultConvertor, platformFields)
-	}
-
 	nativeConvertor = NewNativeObjectConvertor(defaultConvertor, nativeKindToConvertors)
 	customConvertor = NewCrossReferenceConverter(defaultConvertor, NewCustomResourceTransformer())
 	return nativeConvertor, customConvertor

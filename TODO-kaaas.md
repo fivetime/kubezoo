@@ -365,9 +365,12 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
         加前缀+投影的方案否决了:前缀化会让租户永远用不了平台共享类(kata/nginx),
         而那是唯一正确的用法。现在这三个字段**入站即丢**(`pkg/convert/platformfields.go`),
         平台用什么手段决定是平台的事
-      - ⚠️ **丢弃而非拒绝**:`ingressClassName` 几乎在每个示例里,拒绝会大面积破坏兼容性。
-        代价是丢弃**是安静的**;要带上 admission warning 需要 handler chain 里的
-        warning recorder + 转换器接口带 ctx,两者都还没有 —— 记为后续
+      - [x] **丢弃但不静默**:租户 apply 时收到 admission warning,只列真正被丢掉的字段;
+        一个都没设的租户不会被提示(实测)。为此把清理从转换器挪到**代理层**
+        (warning 需要 ctx,而两层转换接口都没有;这一步本来也不是租户↔上游映射,
+        而是准入性质的策略),并给 handler chain 补上 `WithWarningRecorder` ——
+        ⚠️ **没有它 `AddWarning` 是空操作**,代码看着在提示、实际什么都不发。
+        位置照上游放在 timeout handler 内侧(超时触发时写 header 才线程安全)
       - ⭐ **坑:PodSpec 嵌在 9 个 kind 里**,只处理 Pod 会漏掉 Deployment 这条最常见路径
         且看起来像做完了(与 Node 三处豁免同形)。加了守卫:**服务面里结构上带 PodSpec 的
         kind 必须在覆盖清单里**(反射判定 —— 拿空对象调 `PodSpecOf` 会因 RC 的 nil Template

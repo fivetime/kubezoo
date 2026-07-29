@@ -17,7 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -35,8 +34,8 @@ import (
 // would leave the choice open through the annotation.
 const legacyIngressClassAnnotation = "kubernetes.io/ingress.class"
 
-// PlatformFieldsTransformer clears the fields that name platform-owned
-// cluster-scoped objects, so that a tenant setting them has no effect.
+// The fields that name platform-owned cluster-scoped objects are cleared on the
+// way in, so that a tenant setting them has no effect.
 //
 // runtimeClassName, ingressClassName and priorityClassName each name an object
 // the platform owns and the tenant cannot see. Left alone they were wrong in
@@ -59,54 +58,67 @@ const legacyIngressClassAnnotation = "kubernetes.io/ingress.class"
 //
 // Dropping rather than rejecting is deliberate: ingressClassName in particular
 // appears in almost every published example, and refusing those manifests would
-// break a great deal for no gain. The cost is that the removal is quiet -- the
-// tenant reads the object back without the field. Returning an admission warning
-// would say so in band, and needs a warning recorder in the handler chain and a
-// context on the transformer interface, neither of which exists yet.
-type PlatformFieldsTransformer struct{}
-
-var _ ObjectTransformer = &PlatformFieldsTransformer{}
-
-// NewPlatformFieldsTransformer initiates a transformer that drops the fields
-// naming platform-owned classes.
-func NewPlatformFieldsTransformer() ObjectTransformer {
-	return &PlatformFieldsTransformer{}
-}
-
-// Forward transforms tenant object reference to upstream object reference.
+// break a great deal for no gain. So that the drop is not silent, the caller
+// turns what is reported here into an admission warning, which kubectl prints on
+// apply.
+// DropPlatformOwnedFields clears the platform-owned class references on an
+// object and reports which ones it actually cleared.
+//
+// It reports rather than only clearing so the caller can tell the tenant. A
+// field dropped without saying so is the shape of defect this repository keeps
+// turning up: the write succeeds, the value is not there, and nothing says so.
 //
 // Both the internal and the versioned form of each kind are handled. Requests
 // arrive as internal objects, but the two families are distinct Go types with
 // distinct PodSpecs, and a path that passed the versioned one would otherwise
 // stop being covered -- which does not fail, it just quietly leaves the field in
 // place and the escape open.
-func (t *PlatformFieldsTransformer) Forward(obj runtime.Object, tenantID string) (runtime.Object, error) {
+func DropPlatformOwnedFields(obj runtime.Object) []string {
 	if podSpec := PodSpecOf(obj); podSpec != nil {
-		podSpec.RuntimeClassName = nil
-		podSpec.PriorityClassName = ""
-		// Priority is the resolved number. Admission sets it from the class, but
-		// clearing only the name would leave a value a tenant had written
-		// directly.
-		podSpec.Priority = nil
-		return obj, nil
+		return dropFromPodSpec(&podSpec.RuntimeClassName, &podSpec.PriorityClassName, &podSpec.Priority)
 	}
 	if podSpec := versionedPodSpecOf(obj); podSpec != nil {
-		podSpec.RuntimeClassName = nil
-		podSpec.PriorityClassName = ""
-		podSpec.Priority = nil
-		return obj, nil
+		return dropFromPodSpec(&podSpec.RuntimeClassName, &podSpec.PriorityClassName, &podSpec.Priority)
 	}
-	if ingress, ok := obj.(*networking.Ingress); ok {
-		ingress.Spec.IngressClassName = nil
-		delete(ingress.Annotations, legacyIngressClassAnnotation)
-		return obj, nil
+	switch ingress := obj.(type) {
+	case *networking.Ingress:
+		return dropFromIngress(&ingress.Spec.IngressClassName, ingress.Annotations)
+	case *networkingv1.Ingress:
+		return dropFromIngress(&ingress.Spec.IngressClassName, ingress.Annotations)
 	}
-	if ingress, ok := obj.(*networkingv1.Ingress); ok {
-		ingress.Spec.IngressClassName = nil
-		delete(ingress.Annotations, legacyIngressClassAnnotation)
-		return obj, nil
+	return nil
+}
+
+func dropFromPodSpec(runtimeClassName **string, priorityClassName *string, priority **int32) []string {
+	var dropped []string
+	if *runtimeClassName != nil {
+		dropped = append(dropped, "spec.runtimeClassName")
+		*runtimeClassName = nil
 	}
-	return nil, errors.Errorf("fail to assert the runtime object to a kind carrying platform-owned class references")
+	if *priorityClassName != "" {
+		dropped = append(dropped, "spec.priorityClassName")
+		*priorityClassName = ""
+	}
+	// Priority is the resolved number. Admission sets it from the class, but
+	// clearing only the name would leave a value written directly.
+	if *priority != nil {
+		dropped = append(dropped, "spec.priority")
+		*priority = nil
+	}
+	return dropped
+}
+
+func dropFromIngress(className **string, annotations map[string]string) []string {
+	var dropped []string
+	if *className != nil {
+		dropped = append(dropped, "spec.ingressClassName")
+		*className = nil
+	}
+	if _, ok := annotations[legacyIngressClassAnnotation]; ok {
+		dropped = append(dropped, "the "+legacyIngressClassAnnotation+" annotation")
+		delete(annotations, legacyIngressClassAnnotation)
+	}
+	return dropped
 }
 
 // versionedPodSpecOf is PodSpecOf for the versioned types. They are a separate
@@ -138,16 +150,6 @@ func versionedPodSpecOf(obj runtime.Object) *corev1.PodSpec {
 		return nil
 	}
 }
-
-// Backward transforms upstream object reference to tenant object reference.
-//
-// Nothing to undo: the tenant's value was dropped, and whatever the platform put
-// there instead is what is really in effect, so it is what the tenant should
-// see.
-func (t *PlatformFieldsTransformer) Backward(obj runtime.Object, tenantID string) (runtime.Object, error) {
-	return obj, nil
-}
-
 // PodSpecOf returns the pod spec an object carries, or nil if it carries none.
 //
 // The point of having this in one place is that runtimeClassName and

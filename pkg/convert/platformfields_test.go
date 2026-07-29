@@ -63,11 +63,11 @@ func TestPlatformFieldsAreDroppedFromEveryWorkload(t *testing.T) {
 
 	for name, obj := range workloads {
 		t.Run(name, func(t *testing.T) {
-			out, err := NewPlatformFieldsTransformer().Forward(obj, testTenant)
-			if err != nil {
-				t.Fatalf("Forward: %v", err)
+			dropped := DropPlatformOwnedFields(obj)
+			if len(dropped) != 3 {
+				t.Errorf("dropped = %v, want all three reported so the tenant can be told", dropped)
 			}
-			podSpec := PodSpecOf(out)
+			podSpec := PodSpecOf(obj)
 			if podSpec == nil {
 				t.Fatalf("PodSpecOf does not reach the pod spec of a %s", name)
 			}
@@ -104,11 +104,11 @@ func TestIngressClassIsDroppedBothWays(t *testing.T) {
 		Spec: networking.IngressSpec{IngressClassName: &className},
 	}
 
-	out, err := NewPlatformFieldsTransformer().Forward(ingress, testTenant)
-	if err != nil {
-		t.Fatalf("Forward: %v", err)
+	dropped := DropPlatformOwnedFields(ingress)
+	if len(dropped) != 2 {
+		t.Errorf("dropped = %v, want both the field and the annotation reported", dropped)
 	}
-	converted := out.(*networking.Ingress)
+	converted := ingress
 	if converted.Spec.IngressClassName != nil {
 		t.Errorf("ingressClassName = %q survived", *converted.Spec.IngressClassName)
 	}
@@ -121,11 +121,18 @@ func TestIngressClassIsDroppedBothWays(t *testing.T) {
 	}
 }
 
-// TestPlatformFieldsRefusesWhatItCannotHandle: the transformer is registered per
-// kind, so being handed something else means the registration is wrong, and
-// quietly returning it unchanged would hide that.
-func TestPlatformFieldsRefusesWhatItCannotHandle(t *testing.T) {
-	if _, err := NewPlatformFieldsTransformer().Forward(&core.ConfigMap{}, testTenant); err == nil {
-		t.Error("Forward accepted a ConfigMap, which carries none of these fields")
+// TestPlatformFieldsLeavesOtherKindsAlone -- this now runs on every write, so
+// it has to be a no-op for the kinds that carry none of these fields.
+func TestPlatformFieldsLeavesOtherKindsAlone(t *testing.T) {
+	if dropped := DropPlatformOwnedFields(&core.ConfigMap{}); len(dropped) != 0 {
+		t.Errorf("dropped %v from a ConfigMap, which carries none of these fields", dropped)
+	}
+}
+
+// TestNothingSetMeansNothingReported: a tenant that never set these must not be
+// warned about them.
+func TestNothingSetMeansNothingReported(t *testing.T) {
+	if dropped := DropPlatformOwnedFields(&core.Pod{}); len(dropped) != 0 {
+		t.Errorf("dropped %v from a pod that set none of them", dropped)
 	}
 }

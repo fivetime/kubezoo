@@ -987,6 +987,11 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		handler = tenantfilters.WithTenantInfo(handler)
 		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences, c.Authentication.RequestHeaderConfig)
 		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
+		// Records the warnings the request path emits -- without it AddWarning is
+		// a no-op and a tenant is never told that a field it set was dropped.
+		// Upstream places it exactly here, inside the timeout handler, so that
+		// adding a header stays threadsafe when the timeout fires.
+		handler = genericapifilters.WithWarningRecorder(handler)
 		handler = genericfilters.WithTimeoutForNonLongRunningRequests(handler, c.LongRunningFunc)
 		// HandlerChainWaitGroup was split in 1.29 into a wait group for
 		// non-long-running requests and a rate-limited one for watches.
