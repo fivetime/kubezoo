@@ -6,8 +6,8 @@ WHAT ?= $(TARGETS)
 IMAGE_REPO ?= ghcr.io/kubewharf
 IMAGE_TAG ?= $(shell git describe --tags --always --dirty)
 TARGET_PLATFORMS ?= linux/amd64
-ENVTEST_K8S_VERSION ?= 1.24.x
-SETUP_ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.36.x
+SETUP_ENVTEST_VERSION ?= release-0.24
 
 .DEFAULT_GOAL := build
 

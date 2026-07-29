@@ -20,6 +20,7 @@ limitations under the License.
 package app
 
 import (
+	"context"
 	stdx509 "crypto/x509"
 	"fmt"
 	"net"
@@ -55,7 +56,6 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3/preflight"
 	"k8s.io/apiserver/pkg/util/webhook"
 	clidiscovery "k8s.io/client-go/discovery"
-	clientgoinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -78,7 +78,6 @@ import (
 	controlplaneoptions "k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 	"k8s.io/kubernetes/pkg/controlplane/reconcilers"
 	"k8s.io/kubernetes/pkg/kubeapiserver"
-	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
 	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 	"k8s.io/kubernetes/pkg/routes"
 	"k8s.io/kubernetes/pkg/serviceaccount"
@@ -641,7 +640,15 @@ func buildGenericConfig(
 	if lastErr = s.SecureServing.ApplyTo(&genericConfig.SecureServing, &genericConfig.LoopbackClientConfig); lastErr != nil {
 		return
 	}
-	if lastErr = s.Features.ApplyTo(genericConfig); lastErr != nil {
+	// In 1.24 FeatureOptions.ApplyTo only copied the profiling flags. In 1.36 it
+	// also builds the priority-and-fairness filter, for which it needs a core
+	// client and an informer factory someone will start. kubezoo has never had
+	// P&F -- genericConfig.FlowControl is set nowhere in this tree -- and wiring
+	// it would mean pointing a client at our own loopback, which proxies every
+	// request upstream and rewrites flowschema names per tenant. Keep the old
+	// behaviour explicitly rather than half-wiring it.
+	s.Features.EnablePriorityAndFairness = false
+	if lastErr = s.Features.ApplyTo(genericConfig, nil, nil); lastErr != nil {
 		return
 	}
 	if lastErr = s.APIEnablement.ApplyTo(genericConfig, master.DefaultAPIResourceConfigSource(), legacyscheme.Scheme); lastErr != nil {
@@ -660,17 +667,13 @@ func buildGenericConfig(
 		sets.NewString("attach", "exec", "proxy", "log", "portforward"),
 	)
 
-	kubeVersion := version.Get()
-	genericConfig.Version = &kubeVersion
+	// genericConfig.Version is gone in 1.36; the version now travels as
+	// genericConfig.EffectiveVersion, which GenericServerRunOptions.ApplyTo has
+	// already set above. Upstream's buildGenericConfig no longer sets it here.
 
 	storageFactoryConfig := kubeapiserver.NewStorageFactoryConfig()
 	storageFactoryConfig.APIResourceConfig = genericConfig.MergedResourceConfig
-	completedStorageFactoryConfig, err := storageFactoryConfig.Complete(s.Etcd)
-	if err != nil {
-		lastErr = err
-		return
-	}
-	storageFactory, lastErr = completedStorageFactoryConfig.New()
+	storageFactory, lastErr = storageFactoryConfig.Complete(s.Etcd).New()
 	if lastErr != nil {
 		return
 	}
@@ -696,7 +699,7 @@ func buildGenericConfig(
 		return
 	}
 
-	if lastErr = applyAuthenticationOptions(s.Authentication, genericConfig); lastErr != nil {
+	if lastErr = applyAuthenticationOptions(utilwait.ContextForChannel(genericConfig.DrainedNotify()), s.Authentication, genericConfig); lastErr != nil {
 		return
 	}
 
@@ -710,15 +713,27 @@ func buildGenericConfig(
 			genericConfig.Authentication.Authenticator)
 	}
 
-	genericConfig.Authorization.Authorizer, genericConfig.RuleResolver, err = s.Authorization.ToAuthorizationConfig(nil).New()
+	// ToAuthorizationConfig gained an error return in 1.36, and New now takes a
+	// server-lifecycle context plus the apiserver ID. The nil informer factory
+	// is pre-existing: kubezoo authorizes with AlwaysAllow and defers real
+	// authorization to the upstream apiserver, so no RBAC informers are needed.
+	authorizationConfig, err := s.Authorization.ToAuthorizationConfig(nil)
 	if err != nil {
 		lastErr = fmt.Errorf("invalid authorization config: %v", err)
 		return
 	}
+	if authorizationConfig != nil {
+		ctx := utilwait.ContextForChannel(genericConfig.DrainedNotify())
+		genericConfig.Authorization.Authorizer, genericConfig.RuleResolver, err = authorizationConfig.New(ctx, genericConfig.APIServerID)
+		if err != nil {
+			lastErr = fmt.Errorf("invalid authorization config: %v", err)
+			return
+		}
+	}
 	return
 }
 
-func applyAuthenticationOptions(o *kubeoptions.BuiltInAuthenticationOptions, genericConfig *server.Config) error {
+func applyAuthenticationOptions(ctx context.Context, o *kubeoptions.BuiltInAuthenticationOptions, genericConfig *server.Config) error {
 	authenticatorConfig, err := o.ToAuthenticationConfig()
 	if err != nil {
 		return err
@@ -742,7 +757,15 @@ func applyAuthenticationOptions(o *kubeoptions.BuiltInAuthenticationOptions, gen
 	if o.ServiceAccounts != nil && len(o.ServiceAccounts.Issuers) > 0 && o.ServiceAccounts.Issuers[0] != "" && len(o.APIAudiences) == 0 {
 		authInfo.APIAudiences = authenticator.Audiences{o.ServiceAccounts.Issuers[0]}
 	}
-	authInfo.Authenticator, _, err = authenticatorConfig.New()
+	// The handler chain now needs the request-header config to strip inbound
+	// X-Remote-* headers, so carry it over the way upstream's Authentication
+	// .ApplyTo does.
+	authInfo.RequestHeaderConfig = authenticatorConfig.RequestHeaderConfig
+
+	// New took no arguments and returned 3 values in 1.24; it now takes a
+	// server-lifecycle context and also returns the config reloader and the
+	// OpenAPI v3 security schemes, neither of which kubezoo uses.
+	authInfo.Authenticator, _, _, _, err = authenticatorConfig.New(ctx)
 	return err
 }
 
@@ -799,7 +822,9 @@ func Complete(s *options.ServerRunOptions) (completedServerRunOptions, error) {
 	if s.ServiceAccountSigningKeyFile == "" {
 		// Default to the private server key for service account token signing
 		if len(s.Authentication.ServiceAccounts.KeyFiles) == 0 && s.SecureServing.ServerCert.CertKey.KeyFile != "" {
-			if kubeauthenticator.IsValidServiceAccountKeyFile(s.SecureServing.ServerCert.CertKey.KeyFile) {
+			// kubeauthenticator.IsValidServiceAccountKeyFile is gone in 1.36; it
+			// was a one-line wrapper over keyutil.PublicKeysFromFile.
+			if _, keyErr := keyutil.PublicKeysFromFile(s.SecureServing.ServerCert.CertKey.KeyFile); keyErr == nil {
 				s.Authentication.ServiceAccounts.KeyFiles = []string{s.SecureServing.ServerCert.CertKey.KeyFile}
 			} else {
 				klog.Warning("No TLS key provided, service account token authentication disabled")
@@ -861,24 +886,14 @@ func Complete(s *options.ServerRunOptions) (completedServerRunOptions, error) {
 	return options, nil
 }
 
-func buildServiceResolver(enabledAggregatorRouting bool, hostname string, informer clientgoinformers.SharedInformerFactory) webhook.ServiceResolver {
-	var serviceResolver webhook.ServiceResolver
-	if enabledAggregatorRouting {
-		serviceResolver = aggregatorapiserver.NewEndpointServiceResolver(
-			informer.Core().V1().Services().Lister(),
-			informer.Core().V1().Endpoints().Lister(),
-		)
-	} else {
-		serviceResolver = aggregatorapiserver.NewClusterIPServiceResolver(
-			informer.Core().V1().Services().Lister(),
-		)
-	}
-	// resolve kubernetes.default.svc locally
-	if localHost, err := url.Parse(hostname); err == nil {
-		serviceResolver = aggregatorapiserver.NewLoopbackServiceResolver(serviceResolver, localHost)
-	}
-	return serviceResolver
-}
+// buildServiceResolver used to live here, copied from kube-apiserver and never
+// called: kubezoo runs no aggregator and no admission webhooks, so nothing ever
+// needed to resolve a Service to a URL. In 1.36 NewEndpointServiceResolver takes
+// an EndpointSlice getter instead of an Endpoints lister, so keeping it would
+// have meant migrating code no test and no code path exercises -- which is how
+// the CRD handler ended up stranded at its fork point. Removed instead; upstream
+// buildServiceResolver in cmd/kube-apiserver/app/server.go is the reference if
+// aggregation is ever added.
 
 func getServiceIPAndRanges(serviceClusterIPRanges string) (net.IP, net.IPNet, net.IPNet, error) {
 	serviceClusterIPRangeList := []string{}
@@ -929,10 +944,12 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy) func(apiHandle
 		failedHandler := genericapifilters.Unauthorized(c.Serializer)
 		handler = tenantfilters.WithDiscoveryProxy(handler, discoveryProxy)
 		handler = tenantfilters.WithTenantInfo(handler)
-		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences)
+		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences, c.Authentication.RequestHeaderConfig)
 		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
 		handler = genericfilters.WithTimeoutForNonLongRunningRequests(handler, c.LongRunningFunc)
-		handler = genericfilters.WithWaitGroup(handler, c.LongRunningFunc, c.HandlerChainWaitGroup)
+		// HandlerChainWaitGroup was split in 1.29 into a wait group for
+		// non-long-running requests and a rate-limited one for watches.
+		handler = genericfilters.WithWaitGroup(handler, c.LongRunningFunc, c.NonLongRunningRequestWaitGroup)
 		handler = genericapifilters.WithRequestInfo(handler, c.RequestInfoResolver)
 		if c.SecureServing != nil && !c.SecureServing.DisableHTTP2 && c.GoawayChance > 0 {
 			handler = genericfilters.WithProbabilisticGoaway(handler, c.GoawayChance)
