@@ -191,21 +191,47 @@
 
 ## 阶段 1:安全基线
 
-### 1.1 per-namespace RBAC(#87)⭐ 最高优先
+### 1.1 per-namespace RBAC(#87)✅ — `e01e169`
 
-现状:每租户在上游被授予 `*` on `*`(`pkg/controller/controller.go:556`,绑定 `:614`),
-kubezoo 自身 `--authorization-mode=AlwaysAllow` ⇒ **隔离完全依赖改写层,零兜底**。
+原状:每租户在上游被授予 `*` on `*`,kubezoo 自身 `--authorization-mode=AlwaysAllow`
+⇒ **隔离完全依赖改写层,零兜底**。之所以值得做:租户身份**确实到得了上游** ——
+`pkg/dynamic` 每个请求都打 impersonation 头,上游按 `<tid>-admin` 判权,只是被设成了全放行。
 
-- [ ] 租户创建 namespace 时,同步在该 namespace 内生成 RoleBinding,把权限限死在自己的 namespace
-- [ ] 顺带**限制租户对自己 namespace 的 update 权限**(防摘除策略标签,见 3.1)
-- [ ] 验收:两租户跨访问 namespaced 资源时**上游 RBAC 拒绝**(而非只靠改写层挡),每条带负向对照
+- [x] namespaced 半边改为**每个租户 namespace 一个 RoleBinding**(引用共享 ClusterRole,
+      由 binding 所在 namespace 完成约束;role 保持宽泛,以覆盖租户 CRD 的自定义资源)
+- [x] cluster-scoped 半边**逐条枚举**(= apigroups.go 提供的集群级资源 + CRD),
+      非资源 URL 不再授权(discovery 靠 k8s 自带的 `system:discovery` 绑定)
+- [x] 验收:上游 RBAC 真拒绝,**每条带负向对照** —— 给临时用户绑上旧的 `*` on `*`,
+      同样六个问题全部答 yes,证明那些 no 是 RBAC 拒绝而非别的原因失败
+      · 自己 ns 建 pod ✓ / 自建 ns 建 cm ✓ / 跨租户建 pod ✗ / 跨租户读 secret ✗ /
+      读 kube-system secret ✗ / 全集群 list pods ✗
+- [ ] 顺带**限制租户对自己 namespace 的 update 权限**(防摘除策略标签,见 3.1)—— **未做**
+
+⚠️ **四个差点让功能"看着做完实则没做"的点**:
+
+1. **reconciliation 默认只增不减** ⇒ 光收窄规则,已有集群上的 `*` on `*` 原封不动,
+   降权只对新租户生效却显得已全量生效。必须显式 `RemoveExtraPermissions`。
+   同理 ClusterRole **保留了名不副实的旧名字** —— 改名会把旧 role/binding 留在集群里继续授予 cluster-admin
+2. **租户 namespace 不是固定集合** —— 已预判但第一版仍踩:**现场观察到**租户建完 namespace
+   后在自己的新 ns 里被拒。改为按 `kubezoo.io/tenant` 标签 watch namespace,约 **2 秒**可用
+3. **那个 watch 一开始是哑的** —— `onTenantUpdate` 根本不调 `syncResources`。
+   顺带暴露既有缺陷:**resync 产生 Update,所以租户的上游 ns/RBAC 自创建后就再没被收敛过**,
+   删掉一个要等 kubezoo 重启才回来。已修;但**删除期间必须跳过**(否则把 finalizer 刚拆的建回去)
+   —— 这条是**仓库自带控制器测试**抓到的
+4. ⚠️ **我误判并删错过一次**:`<tid>-admin` 聚合 ClusterRole 无任何 binding 引用,判为死代码删掉;
+   测试红后查明 **租户 RoleBinding 引用内置 `admin` 会被改写成 `<tid>-admin`**,必须存在。已恢复。
+   顺带发现 `edit`/`view` 无对应镜像 ⇒ 租户引用会悬空(**该缺陷早于本次改动**)
+
+**守卫测试**:集群级授权清单与 `apigroups.go` 漂移即报错,两个方向都管
+(少授权 ⇒ 租户运行时 Forbidden;多授权 ⇒ `*` on `*` 借重构复活)。
 
 > ⚠️ **硬边界**:RBAC 的 `resourceNames` 是**精确匹配**,无通配无前缀
 > (`k8s/pkg/apis/rbac/v1/evaluation_helpers.go:86`)。
 > Namespaced 资源(40+ 种)✅ 可兜底;**cluster-scoped(PV/StorageClass/Namespace/CRD… 20+ 种)
 > ❌ 永远只能靠改写层**。
 >
-> **本项做完,#82 的性质从"必须零遗漏否则即越权"降为"找漏,漏了还有网"**,所以排在审计前。
+> **本项已完成,#82 的性质因此从"必须零遗漏否则即越权"降为"找漏,漏了还有网"** ——
+> 但**只对 namespaced 资源成立**,约 15 个集群级资源仍是零兜底。
 
 ### 1.2 已知缺陷修复
 
