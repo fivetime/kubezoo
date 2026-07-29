@@ -107,6 +107,17 @@ func (tc *tenantProxy) ShortNames() []string {
 	return tc.shortNames
 }
 
+// GetSingularName returns the singular name of the resource. The API installer
+// has required this of every non-subresource storage since 1.26, and it shows up
+// in discovery as SINGULARNAME.
+//
+// Lowercasing the kind is what Kubernetes itself arrives at: checked against a
+// 1.36 apiserver, all 68 resources that carry a singular name have exactly
+// strings.ToLower(kind), with no exceptions.
+func (tc *tenantProxy) GetSingularName() string {
+	return strings.ToLower(tc.kind.Kind)
+}
+
 // NewTenantProxy returns the tenant proxy which implements the storage intefaces.
 func NewTenantProxy(config common.StorageConfig) (rest.Storage, error) {
 	if config.IsConnecter {

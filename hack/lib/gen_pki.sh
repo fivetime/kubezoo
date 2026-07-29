@@ -255,7 +255,6 @@ kubezoo_parametes="
 --etcd-prefix=/zoo \
 --etcd-servers=http://localhost:2379 \
 --event-ttl=1h0m0s \
---logtostderr=true \
 --max-requests-inflight=1002 \
 --service-cluster-ip-range=192.168.0.1/16 \
 --service-node-port-range=20000-32767 \

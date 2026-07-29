@@ -71,6 +71,7 @@ import (
 	"k8s.io/klog"
 	aggregatorapiserver "k8s.io/kube-aggregator/pkg/apiserver"
 	aggregatorscheme "k8s.io/kube-aggregator/pkg/apiserver/scheme"
+	openapicommon "k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/capabilities"
 	master "k8s.io/kubernetes/pkg/controlplane"
@@ -83,7 +84,8 @@ import (
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	"github.com/kubewharf/kubezoo/cmd/kubezoo/app/options"
-	generatedopenapi "github.com/kubewharf/kubezoo/pkg/apis/openapi"
+	ownedopenapi "github.com/kubewharf/kubezoo/pkg/apis/generated/openapi"
+	proxiedopenapi "github.com/kubewharf/kubezoo/pkg/apis/openapi"
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
 	_ "github.com/kubewharf/kubezoo/pkg/apis/tenant/install"
 	"github.com/kubewharf/kubezoo/pkg/common"
@@ -159,6 +161,22 @@ cluster's shared state through which all other components interact.`,
 	})
 
 	return cmd
+}
+
+// openAPIDefinitions is the union of the two generated definition sets: the
+// Kubernetes types kubezoo proxies, and the types this repository owns such as
+// Tenant. Both are served, so both have to be here.
+//
+// Only the proxied set used to be wired up. That was survivable while the config
+// only fed the /openapi endpoint, but 1.36 builds a field-management type
+// converter over every installed resource, and refuses to start when a model is
+// missing -- which for tenants it was.
+func openAPIDefinitions(ref openapicommon.ReferenceCallback) map[string]openapicommon.OpenAPIDefinition {
+	defs := proxiedopenapi.GetOpenAPIDefinitions(ref)
+	for name, def := range ownedopenapi.GetOpenAPIDefinitions(ref) {
+		defs[name] = def
+	}
+	return defs
 }
 
 // Run runs the specified APIServer.  This should never exit.
@@ -665,8 +683,15 @@ func buildGenericConfig(
 		return
 	}
 
-	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(generatedopenapi.GetOpenAPIDefinitions, openapinamer.NewDefinitionNamer(legacyscheme.Scheme, extensionsapiserver.Scheme, aggregatorscheme.Scheme))
+	namer := openapinamer.NewDefinitionNamer(legacyscheme.Scheme, extensionsapiserver.Scheme, aggregatorscheme.Scheme)
+	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openAPIDefinitions, namer)
 	genericConfig.OpenAPIConfig.Info.Title = "Kubernetes"
+	// Required since server-side apply went GA: getOpenAPIModels builds the type
+	// converter from the V3 config and refuses to start without it. Nothing here
+	// dereferences it at compile time, so leaving it nil built and tested clean
+	// and only failed when the server actually came up.
+	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openAPIDefinitions, namer)
+	genericConfig.OpenAPIV3Config.Info.Title = "Kubernetes"
 	genericConfig.LongRunningFunc = filters.BasicLongRunningRequestCheck(
 		sets.NewString("watch", "proxy"),
 		sets.NewString("attach", "exec", "proxy", "log", "portforward"),

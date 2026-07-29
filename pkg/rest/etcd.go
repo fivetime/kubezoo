@@ -40,6 +40,9 @@ func NewREST(scheme *runtime.Scheme, optsGetter generic.RESTOptionsGetter) (*RES
 		NewListFunc:              func() runtime.Object { return &v1alpha1.TenantList{} },
 		PredicateFunc:            MatchTenant,
 		DefaultQualifiedResource: Resource("tenants"),
+		// Required since 1.26: CompleteWithOptions rejects a store without it,
+		// and it is what the API installer reports as SINGULARNAME.
+		SingularQualifiedResource: Resource("tenant"),
 
 		CreateStrategy: strategy,
 		UpdateStrategy: strategy,

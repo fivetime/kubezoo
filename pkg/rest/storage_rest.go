@@ -17,6 +17,8 @@ limitations under the License.
 package test_rest
 
 import (
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -40,19 +42,28 @@ func (p RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorag
 	// TODO refactor the plumbing to provide the information in the APIGroupInfo
 
 	if apiResourceConfigSource.ResourceEnabled(SchemeGroupVersion.WithResource("tenants")) {
-		apiGroupInfo.VersionedResourcesStorageMap[SchemeGroupVersion.Version] = p.v1alpha1Storage(apiResourceConfigSource, restOptionsGetter)
+		storage, err := p.v1alpha1Storage(restOptionsGetter)
+		if err != nil {
+			return genericapiserver.APIGroupInfo{}, err
+		}
+		apiGroupInfo.VersionedResourcesStorageMap[SchemeGroupVersion.Version] = storage
 	}
 
 	return apiGroupInfo, nil
 }
 
-func (p RESTStorageProvider) v1alpha1Storage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) map[string]rest.Storage {
-	storage := map[string]rest.Storage{}
-
-	tenantStorage, _ := NewREST(legacyscheme.Scheme, restOptionsGetter)
-	storage["tenants"] = tenantStorage
-	return storage
-
+// v1alpha1Storage returns the storage for tenants.
+//
+// The error from NewREST used to be discarded here. When NewREST started failing
+// -- 1.26 made SingularQualifiedResource mandatory and this store did not set it
+// -- that put a typed-nil *REST into the map, and the server segfaulted on the
+// first method call against it rather than reporting why it could not start.
+func (p RESTStorageProvider) v1alpha1Storage(restOptionsGetter generic.RESTOptionsGetter) (map[string]rest.Storage, error) {
+	tenantStorage, err := NewREST(legacyscheme.Scheme, restOptionsGetter)
+	if err != nil {
+		return nil, fmt.Errorf("building tenant storage: %w", err)
+	}
+	return map[string]rest.Storage{"tenants": tenantStorage}, nil
 }
 
 // GroupName returns the group name.
