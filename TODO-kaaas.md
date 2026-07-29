@@ -353,14 +353,37 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
 - [x] ⛔ **`kubectl auth can-i` 对租户全错** —— J 节。SAR 的 `resourceAttributes.namespace` 不转换。
       判据是四行对照:租户问=no / 租户做=成功 / 上游问转换后的 ns=yes / 上游问未转换的=no。
       ⚠️ **#87 之前看不见**(那时 `*` on `*` 问什么都回 yes)—— 这类缺陷会跟着每次权限收紧冒出来
-      - [ ] 补 SAR 转换器:`SubjectAccessReview` / `SelfSubjectAccessReview` / `LocalSubjectAccessReview`
+      - [x] **已修并复测**:`pkg/convert/accessreview.go`,四个 kind 全接线
+        (含 `SelfSubjectRulesReview`),转 namespace + 自定义资源组,主体搬进租户身份空间,
+        **裸 `system:` 主体直接拒绝**(那是平台身份,拿它提问=读平台 RBAC)。
+        `can-i create pods -n default` 现在与实际动作一致
+      - [ ] ⚠️ 残留(**已证明是 vanilla 行为**):集群级资源上 kubectl 仍带当前 namespace,
+        租户在自己 ns 里是 `*` on `*` ⇒ 回 yes 而真实请求 Forbidden。
+        **对照**:上游给普通 user 绑同样的 namespaced `*` on `*`,行为一模一样。
+        要比 vanilla 更准需按资源判作用域后清空 namespace(`resourceAttributes` 只有复数 resource 没 kind)
 - [x] ⛔ **两个子资源解不出请求体** —— K 节。`serviceaccounts/token`(`kubectl create token` 唯一取法)
       与 `pods/eviction`(PDB 生效路径)沿用了父资源 Kind。`scale` 没事是因为**只给 scale 想到了**
-      - [ ] 修:`StorageConfig` 支持子资源自带 body kind
+      - [x] **已修并复测**。⭐ 同源的**第三个**是 `pods/binding`;
+        且改完 body kind 后 `create token` **仍失败**(`name is required`)——
+        父对象名字 `pkg/dynamic` 是从 **body 的 metadata.name** 取的,
+        eviction/binding 按惯例带所以看不出,**TokenRequest 不带**。名字本就在**路径**里。
+        已加 `CreateSubresource(ctx, name, ...)` 显式传名。
+        复测:token 出 JWT / eviction 返回 Eviction / binding 变成正常的 Conflict
 - [x] ⛔ **`/openapi/v2` 原样透传** —— L 节。任一租户能枚举其它租户 id + CRD 组名/Kind/schema;
       自己的 CRD 也在错误组名下 ⇒ `kubectl explain widget` 失败而 `get widgets` 正常。
       对照:自己的也是上游名字 ⇒ **整条路径一次转换都没有**。`/openapi/v3` 与 `/apis` 干净
-      - [ ] 修:v2 走与 v3 / discovery 相同的按租户过滤+转换
+      - [x] **已修并复测**:先**按归属删**(只有顶层键能判归属),再**整篇剥本租户前缀**
+        (删干净后每次出现都是前缀,无论在键 / `$ref` / `x-kubernetes-group-version-kind` 里)。
+        两租户互为对照 × JSON/protobuf 两种编码:残留前缀 0、对方条目 0、悬空 ref 0、原生面完好
+      - ⚠️ **中途踩到一次**:先写的版本只改键不改体,protobuf 那路又"只剥自己不删别人"——
+        gnostic 把 paths 表示成**具名数组而非 JSON 对象**,基于 map 的删除**静默无事可做**,
+        文本剥离却照跑。**"函数跑了"≠"函数做了事"**,判据只能是输出
+- [x] ⚠️ **新发现 M:`/openapi/v3` 里根本没有租户的 CRD** —— kubezoo 服务的是自己聚合的静态文档,
+      两租户逐字节相同。**隔离上没问题**(不含任何租户内容),但 `kubectl explain` 默认走 v3
+      ⇒ 对租户自己刚建、`kubectl get` 完全正常的 CR 报找不到资源;
+      `--output=plaintext-openapiv2` 才能用(这也正是 L 修好的证据)
+      - [ ] 修:代理上游 `/openapi/v3` 及 `/openapi/v3/apis/<g>/<v>`,套用 L 的"删+剥",
+        再与自有静态 v3 合并
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次。
 

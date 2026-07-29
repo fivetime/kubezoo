@@ -18,9 +18,10 @@
 | **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
 | H | 配额:每 namespace 各一份额度 / `objectSelector` 标签可绕过 / 单点 | ⛔ 高 | **绕过已修,其余坐实** |
 | **I** | ⛔ **`runtimeClassName` / `ingressClassName` / `priorityClassName` 两头错**:自己的引用不到,平台的引用得到(含 `system-cluster-critical`) | ⛔ 最高 | **坐实,待定架构** |
-| J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **坐实,待修** |
-| K | `serviceaccounts/token`、`pods/eviction` 解不出请求体 | ⚠️ 中 | **坐实,待修** |
-| L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + `explain` 失效 | ⚠️ 中 | **坐实,待修** |
+| J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **已修并实测**(集群级残留=vanilla 行为) |
+| K | `serviceaccounts/token`、`pods/eviction`、`pods/binding` 解不出请求体 | ⚠️ 中 | **已修并实测** |
+| L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + 文档自相矛盾 | ⚠️ 中 | **已修并实测** |
+| M | `/openapi/v3` 不含租户 CRD ⇒ `kubectl explain` 默认路径失效 | ⚠️ 低(不泄露) | **坐实,待修** |
 | — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints、**watch 过滤**、**field selector**、**发现面** | ✅ 正确 | 实测通过 |
 
 ---
@@ -369,9 +370,24 @@ namespace 分别给出 yes/no —— 定位到未转换的那一个。
 问任何 namespace 都回 yes,恰好"看起来对"。收紧权限才让它显形。
 这类缺陷会跟着每一次权限收紧冒出来,不是 #87 引入的 bug 而是 #87 揭出的。
 
-`pkg/convert` 里没有 SAR 转换器(有 TokenReview 的,没有 SAR 的)。
-三个 kind 都要:`SubjectAccessReview` / `SelfSubjectAccessReview` /
-`LocalSubjectAccessReview`(后者本身 namespaced,路径与 body 两处都要一致)。
+### 修法与复测
+
+新增 `pkg/convert/accessreview.go`,四个 kind 全接线(`SelfSubjectAccessReview` /
+`LocalSubjectAccessReview` / `SubjectAccessReview` / `SelfSubjectRulesReview`),
+转换 `resourceAttributes` 的 namespace 与**自定义资源组**(原生组不动),
+并把主体搬进租户身份空间:SA 用户名的 namespace 加前缀,
+**裸 `system:` 主体直接拒绝** —— 那是平台的身份,拿它提问等于读平台 RBAC。
+
+复测:`can-i create pods -n default` 现在回 **yes**,与实际动作一致。
+
+⚠️ **一个诚实的残留,且已证明是 vanilla 行为**:对**集群级**资源,
+kubectl 仍会带上当前 namespace,而租户在自己 namespace 里是 `*` on `*`,
+于是 `can-i get nodes --subresource=proxy` 回 **yes**,真实请求却 Forbidden。
+**对照实验**:在上游直接给一个普通 user 绑上同样的 namespaced `*` on `*`,
+`can-i get nodes --subresource=proxy -n <该 ns> --as=plain-user` 同样回 yes
+⇒ **这是原生 k8s 行为**(kubectl 自己会打印 "resource is not namespace scoped" 警告),
+不是 kubezoo 引入的。要比 vanilla 更准,得在 `resourceAttributes` 里按资源判断作用域后清空 namespace,
+而 `resourceAttributes` 只有复数 resource 没有 kind —— 记为待办,不在本轮。
 
 ## K. 两个子资源解不出请求体 ⛔ 坐实
 
@@ -392,6 +408,25 @@ POST pods/<name>/eviction
 `eviction` 是 PDB 生效的路径,也就是说租户侧任何优雅驱逐都走不通。
 (Pod 内的 projected token 由上游 kubelet 签发,不走这条路,所以工作负载本身不受影响。)
 
+⭐ 顺手挖出**同源的第二层**:`pods/binding` 也是同一个错(body 是 Binding),
+一共三个。而且改完 body kind 之后 `create token` **仍然失败**,报 `name is required` ——
+子资源的父对象名字,`pkg/dynamic` 是从 **body 的 `metadata.name`** 里取的。
+eviction / binding 的 body 按惯例带名字所以看不出来,**TokenRequest 不带**。
+名字本来就在**请求路径**里。已加 `CreateSubresource(ctx, name, ...)` 显式传名,
+`Create` 保持原行为委托给它。
+
+### 复测(全部实跑)
+
+```
+kubectl create token robot   → JWT,sub=system:serviceaccount:111111-default:robot
+POST pods/<n>/eviction       → {"kind":"Eviction","apiVersion":"policy/v1"}
+POST pods/<n>/binding        → Conflict: pod already assigned(解码错误消失,是正常业务冲突)
+```
+
+⚠️ 附带观察:token 的 `sub` 是**上游 namespace**(`111111-default`)。
+token 由上游签发且签名覆盖 payload,改写会使其失效 ⇒ **不改**。
+这只让租户知道自己的 id(不跨租户),记录在案。
+
 ## L. `/openapi/v2` 原样透传 ⛔ 坐实
 
 `/openapi/v2` 是上游文档**未过滤、未转换**地发给每个租户:
@@ -408,11 +443,48 @@ POST pods/<name>/eviction
 两个后果:
 
 - **信息泄露**:任一租户能枚举出所有其它租户的 id、CRD 组名、Kind 与 schema
-- **功能坏掉**:租户自己的 CRD 也在错误的组名下,所以
-  `kubectl explain widget` → `couldn't find resource for "acme.io/v1, Resource=widgets"`,
-  尽管 `kubectl get widgets` 完全正常
+- **文档自相矛盾**:定义键被改了名,**路径、`$ref`、
+  `x-kubernetes-group-version-kind` 三处没改** ⇒ ref 指向不存在的定义
 
-`/openapi/v3` 与 `/apis` 都是干净的(见"通过的项"),只有 v2 这条没接转换。
+### 修法与复测
+
+先**按归属删**(只有顶层 paths / definitions 的键能判断归属),
+再**整篇文本剥掉本租户前缀**(删干净之后,剩下的每一次出现都是前缀,
+无论它在键里、`$ref` 里还是扩展字段里)。两个编码走同一段逻辑。
+
+⚠️ **中途踩到一次,值得记**:先写的版本只改键不改体,
+protobuf 那路又"只剥自己不删别人" —— 因为 gnostic 的 `Document`
+把 paths 表示成**具名条目数组而不是 JSON 对象**,基于 map 的删除**静默无事可做**,
+文本剥离却照跑 ⇒ 结果正好反过来:自己的前缀没了,别人的原封不动。
+**"函数跑了"不等于"函数做了事"**,判据只能是输出。
+
+复测(两租户互为对照,JSON 与 protobuf 两种编码各测):
+
+| | 租户 111111 | 租户 222222 |
+|---|---|---|
+| 自己的路径 | `/apis/acme.io/v1/widgets` ✅ 去前缀 | `/apis/beta.io/v1/gadgets` ✅ |
+| 对方的路径/定义 | 0 条 ✅ | 0 条 ✅ |
+| 残留 `111111-`/`222222-` | 0 / 0 ✅ | 0 / 0 ✅ |
+| 悬空 `$ref` | 0 ✅ | 0 ✅ |
+| 原生面 `/api/v1/pods` | 在 ✅ | 在 ✅ |
+
+`kubectl explain widget --output=plaintext-openapiv2` **现在能用了**
+(`KIND: Widget / VERSION: acme.io/v1`),证明 v2 文档确实自洽了。
+但默认的 `kubectl explain` **仍然失败** —— 那是另一条,见 M。
+
+## M. `/openapi/v3` 里根本没有租户的 CRD ⚠️ 坐实(未修)
+
+kubezoo 的 `/openapi/v3` 是它**自己聚合的静态文档**(34 个 path,全是原生组),
+**从不把上游的 CRD schema 并进来**。两个租户拉到的 v3 逐字节相同。
+
+- 隔离上**没问题**:里面没有任何租户的东西,自然不泄露
+- 功能上**有问题**:`kubectl explain` 默认走 v3 ⇒ 对租户**自己刚建、
+  且 `kubectl get` 完全正常**的 CR 报
+  `couldn't find resource for "acme.io/v1, Resource=widgets"`。
+  加 `--output=plaintext-openapiv2` 才能用
+
+修法需要代理上游 `/openapi/v3` 与 `/openapi/v3/apis/<group>/<version>`,
+套用 L 的同一套"删+剥",再与 kubezoo 自有的静态 v3 合并 —— 记为待办。
 
 ## 尚未覆盖
 

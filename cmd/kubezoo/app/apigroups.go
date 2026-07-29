@@ -98,6 +98,9 @@ var legacyGroup = common.APIGroupConfig{
 			"pods/exec": {
 				IsConnecter: true,
 			},
+			// The body of an eviction is a policy/v1 Eviction, not the Pod it
+			// names. Decoding it as a Pod fails outright, which took graceful
+			// eviction -- and so PodDisruptionBudgets -- away from tenants.
 			"pods/eviction": {
 				Kind: coreapiv1.
 					SchemeGroupVersion.WithKind("Pod"),
@@ -106,7 +109,10 @@ var legacyGroup = common.APIGroupConfig{
 				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
-					return &core.Pod{}
+					return &policy.Eviction{}
+				},
+				GroupVersionKindFunc: func(schema.GroupVersion) schema.GroupVersionKind {
+					return policyv1.SchemeGroupVersion.WithKind("Eviction")
 				},
 			},
 			"pods/portforward": {
@@ -131,6 +137,7 @@ var legacyGroup = common.APIGroupConfig{
 					return &core.Pod{}
 				},
 			},
+			// Likewise a binding's body is a Binding.
 			"pods/binding": {
 				Kind: coreapiv1.
 					SchemeGroupVersion.WithKind("Pod"),
@@ -139,7 +146,10 @@ var legacyGroup = common.APIGroupConfig{
 				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
-					return &core.Pod{}
+					return &core.Binding{}
+				},
+				GroupVersionKindFunc: func(schema.GroupVersion) schema.GroupVersionKind {
+					return coreapiv1.SchemeGroupVersion.WithKind("Binding")
 				},
 			},
 			"pods/ephemeralcontainers": {
@@ -481,6 +491,10 @@ var legacyGroup = common.APIGroupConfig{
 					return &core.ConfigMapList{}
 				},
 			},
+			// And a token request's body is an authentication.k8s.io TokenRequest.
+			// Since 1.24 this subresource is the only way to obtain a service
+			// account token, so decoding it as a ServiceAccount made
+			// `kubectl create token` impossible for tenants.
 			"serviceaccounts/token": {
 				Kind: coreapiv1.
 					SchemeGroupVersion.WithKind("ServiceAccount"),
@@ -489,7 +503,10 @@ var legacyGroup = common.APIGroupConfig{
 				ShortNames:      []string{"sa"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
-					return &core.ServiceAccount{}
+					return &authentication.TokenRequest{}
+				},
+				GroupVersionKindFunc: func(schema.GroupVersion) schema.GroupVersionKind {
+					return authenticationv1.SchemeGroupVersion.WithKind("TokenRequest")
 				},
 			},
 

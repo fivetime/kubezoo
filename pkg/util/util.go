@@ -309,6 +309,30 @@ func IsGroupKindNamespaced(kind metav1.GroupKind) (bool, error) {
 	return namespaced, nil
 }
 
+// IsNativeAPIGroup reports whether an API group is one of Kubernetes' own.
+//
+// A tenant's custom resource groups are stored upstream with the tenant prefix
+// while native groups are not, so anything that has only a group name to work
+// with -- an access review's resourceAttributes, say, where there is no kind to
+// look up -- needs to tell the two apart before deciding to prefix.
+//
+// The set is derived from the scope table rather than listed again, so a group
+// added there is native here too and cannot drift.
+func IsNativeAPIGroup(group string) bool {
+	return nativeAPIGroups[group]
+}
+
+var nativeAPIGroups = func() map[string]bool {
+	groups := make(map[string]bool, len(groupKindNamespaced))
+	for groupKind := range groupKindNamespaced {
+		groups[groupKind.Group] = true
+	}
+	// Served by the CRD handler rather than the generic proxy, so it has no
+	// entry in the scope table, and it is unmistakably native.
+	groups["apiextensions.k8s.io"] = true
+	return groups
+}()
+
 // TenantIDFrom returns tenantID from ctx.
 func TenantIDFrom(ctx context.Context) string {
 	tenantExtra := "tenant"

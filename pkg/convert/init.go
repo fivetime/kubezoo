@@ -94,6 +94,25 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Group: "authentication.k8s.io",
 			Kind:  "TokenReview",
 		}: NewCrossReferenceConverter(defaultConvertor, NewTokenReviewTransformer()),
+		// An access review names a namespace, an API group and a subject, all in
+		// the tenant's own namespace of names. Forwarded unconverted the question
+		// upstream is a different question, and its answer was confidently wrong.
+		{
+			Group: "authorization.k8s.io",
+			Kind:  "SelfSubjectAccessReview",
+		}: NewCrossReferenceConverter(defaultConvertor, NewAccessReviewTransformer()),
+		{
+			Group: "authorization.k8s.io",
+			Kind:  "LocalSubjectAccessReview",
+		}: NewCrossReferenceConverter(defaultConvertor, NewAccessReviewTransformer()),
+		{
+			Group: "authorization.k8s.io",
+			Kind:  "SubjectAccessReview",
+		}: NewCrossReferenceConverter(defaultConvertor, NewAccessReviewTransformer()),
+		{
+			Group: "authorization.k8s.io",
+			Kind:  "SelfSubjectRulesReview",
+		}: NewCrossReferenceConverter(defaultConvertor, NewAccessReviewTransformer()),
 		{
 			Group: "admissionregistration.k8s.io",
 			Kind:  "MutatingWebhookConfiguration",

@@ -147,3 +147,35 @@ func TestPVAndPVCAreWired(t *testing.T) {
 		}
 	}
 }
+
+// TestAccessReviewsAreWired -- the same wiring guard again, for the four kinds
+// in authorization.k8s.io. Unwired, `kubectl auth can-i` answers about the
+// platform's namespaces rather than the tenant's, and a SubjectAccessReview
+// reads the platform's RBAC.
+func TestAccessReviewsAreWired(t *testing.T) {
+	native, _ := InitConvertors(
+		func(group, kind, tenantID string, isTenantObject bool) (bool, bool, error) {
+			return true, false, nil
+		},
+		FakeListEmptyTenantCRDsFunc,
+	)
+	registered := native.(*nativeObjectConvertor).nativeKindToConvertors
+
+	for _, kind := range []string{
+		"SelfSubjectAccessReview",
+		"LocalSubjectAccessReview",
+		"SubjectAccessReview",
+		"SelfSubjectRulesReview",
+	} {
+		gk := schema.GroupKind{Group: "authorization.k8s.io", Kind: kind}
+		convertor, ok := registered[gk]
+		if !ok {
+			t.Errorf("%s has no convertor registered, so the question is asked upstream in the "+
+				"platform's terms and its answer does not describe the tenant", gk)
+			continue
+		}
+		if _, isCross := convertor.(*CrossReferenceConvertor); !isCross {
+			t.Errorf("%s is registered but not with a cross-reference transformer: %T", gk, convertor)
+		}
+	}
+}

@@ -33,6 +33,12 @@ type Interface interface {
 
 type ResourceInterface interface {
 	Create(ctx context.Context, obj *unstructured.Unstructured, options metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error)
+	// CreateSubresource creates through a subresource of the object named by
+	// name. The name is passed rather than read out of the body, because the
+	// body of a subresource is not always the parent object and need not carry
+	// its name -- a TokenRequest does not, which is why `kubectl create token`
+	// failed while eviction, whose body does carry it by convention, worked.
+	CreateSubresource(ctx context.Context, name string, obj *unstructured.Unstructured, options metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error)
 	Update(ctx context.Context, obj *unstructured.Unstructured, options metav1.UpdateOptions, subresources ...string) (*unstructured.Unstructured, bool, error)
 	UpdateStatus(ctx context.Context, obj *unstructured.Unstructured, options metav1.UpdateOptions) (*unstructured.Unstructured, error)
 	Delete(ctx context.Context, name string, options metav1.DeleteOptions, subresources ...string) (*unstructured.Unstructured, bool, error)

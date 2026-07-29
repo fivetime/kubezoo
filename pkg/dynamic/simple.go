@@ -103,10 +103,6 @@ func setImpersonateHeaders(req *rest.Request, ctx context.Context) {
 }
 
 func (c *dynamicResourceClient) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
-	outBytes, err := runtime.Encode(unstructured.UnstructuredJSONScheme, obj)
-	if err != nil {
-		return nil, err
-	}
 	name := ""
 	if len(subresources) > 0 {
 		accessor, err := meta.Accessor(obj)
@@ -114,9 +110,17 @@ func (c *dynamicResourceClient) Create(ctx context.Context, obj *unstructured.Un
 			return nil, err
 		}
 		name = accessor.GetName()
-		if len(name) == 0 {
-			return nil, fmt.Errorf("name is required")
-		}
+	}
+	return c.CreateSubresource(ctx, name, obj, opts, subresources...)
+}
+
+func (c *dynamicResourceClient) CreateSubresource(ctx context.Context, name string, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	outBytes, err := runtime.Encode(unstructured.UnstructuredJSONScheme, obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(subresources) > 0 && len(name) == 0 {
+		return nil, fmt.Errorf("name is required")
 	}
 
 	req := c.client.client.

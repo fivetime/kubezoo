@@ -90,13 +90,18 @@ func WithDiscoveryProxy(handler http.Handler, discoveryProxy proxy.DiscoveryProx
 					responseDiscoveryError(w, err)
 					return
 				}
+				dropOtherTenantsFromDocument(doc, tenantID)
 				docJson, err := json.Marshal(doc)
 				if err != nil {
 					responseDiscoveryError(w, err)
 					return
 				}
-				newJson := strings.ReplaceAll(string(docJson), tenantID+"-", "")
-				if err := json.Unmarshal([]byte(newJson), doc); err != nil {
+				filtered, err := filterOpenAPIV2(docJson, tenantID)
+				if err != nil {
+					responseDiscoveryError(w, err)
+					return
+				}
+				if err := json.Unmarshal(filtered, doc); err != nil {
 					responseDiscoveryError(w, err)
 					return
 				}
@@ -117,14 +122,19 @@ func WithDiscoveryProxy(handler http.Handler, discoveryProxy proxy.DiscoveryProx
 				responseDiscoveryError(w, err)
 				return
 			}
-			for key, schema := range swagger.SwaggerProps.Definitions {
-				if strings.Contains(key, tenantID+"-") {
-					delete(swagger.SwaggerProps.Definitions, key)
-					newKey := strings.ReplaceAll(key, tenantID+"-", "")
-					swagger.SwaggerProps.Definitions[newKey] = schema
-				}
+			swaggerJson, err := json.Marshal(swagger)
+			if err != nil {
+				responseDiscoveryError(w, err)
+				return
 			}
-			responseJson(w, swagger)
+			filtered, err := filterOpenAPIV2(swaggerJson, tenantID)
+			if err != nil {
+				responseDiscoveryError(w, err)
+				return
+			}
+			if _, err := w.Write(filtered); err != nil {
+				klog.Errorf("failed to write discovery response: %v", err)
+			}
 			return
 		}
 	})

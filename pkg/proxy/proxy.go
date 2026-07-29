@@ -437,7 +437,15 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if subresource := tp.subresource; subresource == "" {
 		got, err = client.Create(ctx, utd, *options)
 	} else {
-		got, err = client.Create(ctx, utd, *options, subresource)
+		// The parent object's name comes from the request path. Reading it out
+		// of the body only works for the subresources whose body happens to be
+		// the parent, or to carry its name by convention; a TokenRequest does
+		// neither.
+		requestInfo, ok := request.RequestInfoFrom(ctx)
+		if !ok {
+			return nil, fmt.Errorf("no request info in context, cannot address subresource %q", subresource)
+		}
+		got, err = client.CreateSubresource(ctx, requestInfo.Name, utd, *options, subresource)
 	}
 	if err != nil {
 		return nil, util.TrimTenantIDFromError(err, tenantID)
