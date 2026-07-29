@@ -199,6 +199,13 @@ func (tc *TenantController) enqueueNamespaceOwner(obj interface{}) {
 	if tenantID == "" {
 		return
 	}
+	// A terminating namespace needs no RoleBinding, and if it is stuck -- a
+	// tenant can leave a finalizer behind that nothing removes -- it keeps
+	// emitting updates for as long as it is stuck. Queueing those drove a
+	// permanent retry loop against a tenant that no longer exists.
+	if ns.DeletionTimestamp != nil {
+		return
+	}
 	tc.queue.Add(Event{tenantId: tenantID, eventType: Update})
 }
 
@@ -316,6 +323,12 @@ func (tc *TenantController) onTenantUpdate(tenantID string) error {
 func (tc *TenantController) onTenantAddOrUpdate(tenantId string) error {
 	tenant, err := tc.tenantClient.Tenants().Get(context.TODO(), tenantId, metav1.GetOptions{})
 	if err != nil {
+		// The tenant is gone. Anything still referring to it -- a namespace that
+		// has not finished terminating, say -- has nothing left to converge
+		// towards, and retrying only produces noise.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -359,6 +372,13 @@ func (tc *TenantController) deleteResources(tenantId string) error {
 	nonCRDResources := tc.filterCRDs(clusterScopedResources)
 	if err := tc.deleteNonCRDClusterScopedResources(tenantId, nonCRDResources); err != nil {
 		return err
+	}
+
+	// Last, and deliberately so. The namespaces are terminating by now, which
+	// admits no new objects, and the tenant's cluster-scoped bindings are gone --
+	// so a finalizer cleared here cannot be put back.
+	if err := tc.stripFinalizersInTenantNamespaces(tenantId); err != nil {
+		return errors.Errorf("fail to clear finalizers for tenant %s: %v", tenantId, err)
 	}
 
 	if err := tc.syncClusterResourceQuota(tenantId); err != nil {

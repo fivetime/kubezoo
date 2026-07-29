@@ -981,6 +981,13 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy) func(apiHandle
 		// non-long-running requests and a rate-limited one for watches.
 		handler = genericfilters.WithWaitGroup(handler, c.LongRunningFunc, c.NonLongRunningRequestWaitGroup)
 		handler = genericapifilters.WithRequestInfo(handler, c.RequestInfoResolver)
+		// Upstream's DefaultBuildHandlerChain always installs this, even with
+		// auditing switched off, because the audit helpers dereference the
+		// context's AuditContext without checking it. This chain is hand-built
+		// and omitted it, so any request that logs its body -- PATCH does, via
+		// audit.LogRequestPatch -- panicked on a nil pointer. kubectl annotate,
+		// label, patch, scale and set image all take that path.
+		handler = genericapifilters.WithAuditInit(handler)
 		if c.SecureServing != nil && !c.SecureServing.DisableHTTP2 && c.GoawayChance > 0 {
 			handler = genericfilters.WithProbabilisticGoaway(handler, c.GoawayChance)
 		}
