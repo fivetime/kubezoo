@@ -480,23 +480,13 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
       怎么存、留多久、谁能读。停机机制给不了这些保证,硬塞进来只会让它背上一个兑现不了的承诺。
       **停机只管控制面**;快照留给未来的快照语义路径统一做
       (⚠️ 那条路径本身尚未设计,不要当成已规划)
-- [ ] **节点级硬冻:`cgroup freezer`** —— 与"不动 Pod"**不冲突**:
-      cgroup v2 写 `cgroup.freeze=1`(v1 是 `freezer.state=FROZEN`)冻的是**内核调度**、不发信号,
-      进程不退出、内存上下文完整,解冻即恢复(CRIU/checkpoint 同一套地基)。
-      与 §9.5 的 `Frozen`(冻租户的操作能力)是不同层的两把闸,可叠加
-      - ⚠️ **坑(未实测)**:冻住后 kubelet liveness 探针会失败 → 到 `failureThreshold` **重启容器**,
-        恰好毁掉要保的现场。**必须先摘探针/改重启策略再冻**
-      - ⚠️ 节点级带外操作,kubezoo 碰不到 cgroup,需节点侧特权组件;并到 kata 节点池设计里
-
----
-
-## 阶段 3:平台层
-
-### 3.1 Kyverno(选型已定)
-
-选 Kyverno 而非 Gatekeeper 的理由:`generate` 规则直接抵掉自研的 namespace 配套控制器;
-mutation 更好写;YAML 而非 Rego。
-
+- ⛔ **节点级硬冻(`cgroup freezer`)—— 不是 kubezoo 的工作**(决定已下)。
+      kubezoo 只交付"控制面冻结"这个**可被编排层操作的原语**;要不要连数据面一起冻、
+      节点上跑什么 agent、取证流程怎么走,都是**上层编排的决策**。
+      手段本身记在架构文档里供编排层参考(cgroup v2 `cgroup.freeze=1` / v1 `freezer.state=FROZEN`,
+      冻内核调度不发信号,进程不退出、内存完整),
+      连带那个坑也记了:**冻住后 liveness 探针会失败 → 到阈值重启容器,反而毁现场**,
+      要先摘探针再冻(未实测)
 - [ ] ⭐⭐ **铁律:所有策略匹配一律反向写**(`exclude` 平台自身 namespace,匹配其余全部)。
       **禁止用正向 selector 选租户 namespace 的标签** —— 租户能编辑自己建的 namespace,
       摘掉标签即**绕过整套策略**,此时他仍有全权建 Pod ⇒ B1 隔离前提全部落空

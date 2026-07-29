@@ -514,16 +514,15 @@ func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.Ten
 // because the tenant's own automation can still change or delete the evidence --
 // so a freeze is not on its own a forensic hold.
 //
-// This is deliberately not closed. Freezing a tenant's control plane never
-// reached code already running inside its containers, and a tenant that intends
-// to destroy evidence can arrange for that from inside -- no amount of RBAC
-// withdrawal, and no stronger sandbox either, prevents it. What preserves the
-// object state is a snapshot, which is not this mechanism's job: a snapshot has
-// to say which point in time it is a view of, and suspension cannot promise
-// that. Suspension deals with the control plane and stops there.
+// This is deliberately not closed, and the reason is where the boundary of this
+// component lies. KubeZoo freezes the control plane; that is the primitive it
+// offers. Whatever an investigation additionally requires -- capturing the
+// object state, stopping the workloads themselves -- happens outside it, and
+// deciding on that is the job of whatever drives KubeZoo, not of KubeZoo.
 //
-// So this reports rather than fixes: an operator deciding how to handle a
-// particular tenant needs to know which bindings are still live.
+// So this reports rather than fixes, and reports only what it knows: which of
+// the tenant's own bindings a freeze does not reach. What to do about them is
+// the caller's call.
 func (tc *TenantController) reportBindingsFreezingDoesNotReach(tenantId string) {
 	namespaces, err := tc.upstreamCoreClient.Namespaces().List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantId}).String(),
@@ -552,9 +551,7 @@ func (tc *TenantController) reportBindingsFreezingDoesNotReach(tenantId string) 
 	}
 	klog.Warningf("tenant %s is frozen; %d role bindings it created are still in force and still "+
 		"grant its service accounts: %v. A freeze withdraws the tenant's own access, not the "+
-		"permissions its workloads hold, so anything it deployed keeps running with them. "+
-		"Snapshot the object state if it needs preserving; to stop the workloads themselves "+
-		"without killing them, freeze their cgroups on the node",
+		"permissions its workloads hold, so anything it deployed keeps running with them",
 		tenantId, len(remaining), remaining)
 }
 
