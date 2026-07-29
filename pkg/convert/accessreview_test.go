@@ -170,12 +170,17 @@ func TestSelfSubjectRulesReviewIsConvertedBothWays(t *testing.T) {
 	}
 
 	// Upstream answers with the rules it actually holds, in upstream terms.
+	//
+	// resourceNames carries both spellings, because the role transformer appends
+	// the prefixed name to the bare one -- a rule cannot say whether the resource
+	// it names is namespaced or cluster-scoped. This is what upstream really
+	// returns; it was taken from a live cluster.
 	forward.(*authzinternal.SelfSubjectRulesReview).Status = authzinternal.SubjectRulesReviewStatus{
 		ResourceRules: []authzinternal.ResourceRule{{
 			Verbs:         []string{"get"},
 			APIGroups:     []string{testTenant + "-acme.io"},
 			Resources:     []string{"widgets"},
-			ResourceNames: []string{testTenant + "-thing"},
+			ResourceNames: []string{"thing", testTenant + "-thing"},
 		}},
 	}
 	back, err := transformer.Backward(forward, testTenant)
@@ -186,5 +191,37 @@ func TestSelfSubjectRulesReviewIsConvertedBothWays(t *testing.T) {
 	if status.ResourceRules[0].APIGroups[0] != "acme.io" ||
 		status.ResourceRules[0].ResourceNames[0] != "thing" {
 		t.Errorf("rules came back in upstream terms: %+v", status.ResourceRules[0])
+	}
+	if got := status.ResourceRules[0].ResourceNames; len(got) != 1 {
+		t.Errorf("resourceNames = %v, want one entry; both upstream spellings trim to the same "+
+			"tenant-side name, so trimming without deduplicating reports it twice", got)
+	}
+}
+
+// TestRulesReviewKeepsAClusterScopedOnlyName is why the duplicate is removed by
+// deduplicating rather than by dropping the prefixed entries the way role.go
+// does. A rule naming only a cluster-scoped object carries only the prefixed
+// spelling; dropping it would leave resourceNames empty, and empty means every
+// name -- a wider permission than the tenant has.
+func TestRulesReviewKeepsAClusterScopedOnlyName(t *testing.T) {
+	review := &authzinternal.SelfSubjectRulesReview{
+		Status: authzinternal.SubjectRulesReviewStatus{
+			ResourceRules: []authzinternal.ResourceRule{{
+				Verbs:         []string{"get"},
+				APIGroups:     []string{""},
+				Resources:     []string{"persistentvolumes"},
+				ResourceNames: []string{testTenant + "-volume"},
+			}},
+		},
+	}
+
+	back, err := NewAccessReviewTransformer().Backward(review, testTenant)
+	if err != nil {
+		t.Fatalf("Backward: %v", err)
+	}
+	got := back.(*authzinternal.SelfSubjectRulesReview).Status.ResourceRules[0].ResourceNames
+	if len(got) != 1 || got[0] != "volume" {
+		t.Errorf("resourceNames = %v, want [volume]; an empty list would report permission on "+
+			"every persistent volume rather than on one", got)
 	}
 }

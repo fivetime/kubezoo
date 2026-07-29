@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	appsapiv1 "k8s.io/api/apps/v1"
+	coreapiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/pkg/apis/apps"
+	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
@@ -585,4 +587,76 @@ func TestTenantProxyWatch(t *testing.T) {
 	accessor, err := meta.Accessor(event.Object)
 	assert.NoError(t, err)
 	assert.Equal(t, tenantNamespace, accessor.GetNamespace())
+}
+
+// TestTenantProxyCreateSubresourceAddressesTheParent covers the two ways the
+// parent's name can be got wrong on a subresource create.
+//
+// It used to be read out of the request body, which works only for the
+// subresources whose body is the parent or carries its name by convention.
+// Eviction and Binding do; TokenRequest does not, and `kubectl create token`
+// failed with "name is required". Taking it from the request path fixes that but
+// loses something the body gave for free: the body had already been converted,
+// so a cluster-scoped parent arrived prefixed. The path has the tenant's
+// spelling, so the conversion has to be applied explicitly.
+func TestTenantProxyCreateSubresourceAddressesTheParent(t *testing.T) {
+	tenantID := "test01"
+
+	for _, tc := range []struct {
+		name            string
+		namespaceScoped bool
+		parentName      string
+		wantPath        string
+	}{
+		{
+			// The body of a token request carries no name at all.
+			name:            "namespaced parent keeps the tenant's name",
+			namespaceScoped: true,
+			parentName:      "robot",
+			wantPath:        "/api/v1/namespaces/test01-default/serviceaccounts/robot/token",
+		},
+		{
+			// Cluster-scoped names are prefixed, exactly as Get does it.
+			name:            "cluster-scoped parent is prefixed",
+			namespaceScoped: false,
+			parentName:      "volume",
+			wantPath:        "/api/v1/persistentvolumes/test01-volume/status",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Write([]byte(`{"apiVersion":"v1","kind":"ServiceAccount","metadata":{}}`))
+			}))
+			defer fakeUpstream.Close()
+
+			resource, subresource := "serviceaccounts", "token"
+			if !tc.namespaceScoped {
+				resource, subresource = "persistentvolumes", "status"
+			}
+			config := common.StorageConfig{
+				Kind:            coreapiv1.SchemeGroupVersion.WithKind("ServiceAccount"),
+				Resource:        resource,
+				Subresource:     subresource,
+				NamespaceScoped: tc.namespaceScoped,
+				NewFunc:         func() runtime.Object { return &core.ServiceAccount{} },
+				DynamicClient:   dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL}),
+				Convertor:       &fakeConvertor{},
+			}
+			proxy, err := NewTenantProxy(config)
+			assert.NoError(t, err)
+
+			requestInfo := &request.RequestInfo{Verb: "create", Name: tc.parentName}
+			if tc.namespaceScoped {
+				requestInfo.Namespace = "default"
+			}
+			ctx := tenantContext(tenantID, requestInfo)
+			_, err = proxy.(rest.Creater).Create(ctx, &core.ServiceAccount{},
+				func(context.Context, runtime.Object) error { return nil }, &metav1.CreateOptions{})
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantPath, gotPath,
+				"the subresource request went to the wrong object")
+		})
+	}
 }

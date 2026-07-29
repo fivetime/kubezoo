@@ -230,13 +230,42 @@ func serviceAccountsGroupNamespace(group string) (string, bool) {
 
 // backwardRules strips the prefix from what a rules review reports, so a tenant
 // reading its own permissions sees its own namespace of names.
+//
+// Trimming alone produces duplicates, because a rule that names an object
+// arrives upstream carrying both spellings: the role transformer appends the
+// prefixed name to the bare one, since a rule cannot say whether the resource it
+// names is namespaced (unprefixed upstream) or cluster-scoped (prefixed). Both
+// map to the same tenant-side name, so the list is deduplicated after trimming.
+//
+// role.go solves the same problem by dropping the prefixed entries instead,
+// which is right there: the tenant wrote the bare list, so the bare list is what
+// it should read back. It would be wrong here. A rules review reports what
+// upstream RBAC actually evaluated, which may name only cluster-scoped objects;
+// dropping those would leave resourceNames empty, and an empty resourceNames
+// means every name -- reporting a wider permission than the tenant has, which is
+// the same kind of confidently-wrong answer this transformer exists to stop.
 func backwardRules(rules []authzinternal.ResourceRule, tenantID string) {
 	for i := range rules {
-		for j, group := range rules[i].APIGroups {
-			rules[i].APIGroups[j] = util.TrimTenantIDPrefix(tenantID, group)
-		}
-		for j, name := range rules[i].ResourceNames {
-			rules[i].ResourceNames[j] = util.TrimTenantIDPrefix(tenantID, name)
-		}
+		rules[i].APIGroups = trimAndDedupe(rules[i].APIGroups, tenantID)
+		rules[i].ResourceNames = trimAndDedupe(rules[i].ResourceNames, tenantID)
 	}
+}
+
+// trimAndDedupe strips the tenant prefix from every entry and keeps the first
+// occurrence of each result, preserving order.
+func trimAndDedupe(values []string, tenantID string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	seen := make(map[string]bool, len(values))
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		value = util.TrimTenantIDPrefix(tenantID, value)
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		trimmed = append(trimmed, value)
+	}
+	return trimmed
 }

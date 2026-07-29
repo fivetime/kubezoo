@@ -444,7 +444,15 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		if !ok {
 			return nil, fmt.Errorf("no request info in context, cannot address subresource %q", subresource)
 		}
-		got, err = client.CreateSubresource(ctx, requestInfo.Name, utd, *options, subresource)
+		// The path carries the tenant's name for the parent, so a cluster-scoped
+		// parent still needs the prefix -- the same conversion Get does. Taking
+		// the name from the body used to supply this for free, because the body
+		// had already been converted.
+		name := requestInfo.Name
+		if !tp.namespaceScoped {
+			name = util.ConvertTenantObjectNameToUpstream(name, tenantID, tp.kind)
+		}
+		got, err = client.CreateSubresource(ctx, name, utd, *options, subresource)
 	}
 	if err != nil {
 		return nil, util.TrimTenantIDFromError(err, tenantID)
