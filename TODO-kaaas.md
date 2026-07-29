@@ -129,7 +129,22 @@
         `Eviction`/`TokenRequest`,不该进表);**只作为子资源 kind 出现的不算陈旧**(即 Scale,
         discovery 把它挂在父资源的 group 下,不是表里用的 autoscaling)
       - 需要真 apiserver ⇒ 归入 `make test-integration`(现在也覆盖 `pkg/util`),单元跑时 skip
-- [ ] `make codegen` 重新生成 + `make verify-codegen` 通过
+- [x] `make codegen` 重新生成 + `make verify-codegen` 通过 — `d7bb1fc`
+      - ⚠️ **改之前 `make verify-codegen` 是通过的,而且毫无意义** —— 配方(`4fadaa5`,我自己写的)
+        有两个洞:① `install_gen` 只按**二进制名**判断是否已装,不看版本 ⇒ 依赖抬升后一直在用
+        **1.24 时代的生成器**跑 1.36 类型;② 两个 openapi 目标结尾是
+        `| grep -v 'API rule violation' || true`,`|| true` 把**所有失败**都吞了。
+        旧生成器实际是**硬失败**的(`AzureDiskVolumeSource.CachingMode` 的 `+default=ref(...)`
+        它解析不了)⇒ 什么都没生成 ⇒ diff 无从比较 ⇒ **verify 对它唯一要守护的那个文件报了成功**。
+        换成 go.mod 钉的生成器后该错误消失(新版认识 `ref()`),纯属旧二进制的产物
+      - 换正确生成器后命令行要迁到 **gengo v2**:输入变位置参数、
+        `--output-base/--output-package/--output-file-base` → `--output-dir/--output-pkg/--output-file`;
+        **deepcopy/defaulter/register 已经没有输出目录了,直接写在输入包旁边** ⇒ staging 模型失效,
+        `--verify` 改为把模块复制到临时树、在那里生成、再整树 diff
+      - 全量重新生成:`pkg/apis/openapi/zz_generated.openapi.go` 54776 → 65753 行(1.24→1.36 类型集)
+      - **双向验证过**:刚生成完的树上 verify 通过;篡改生成文件里的一行 ⇒ verify 精确报错
+      - ⚠️ **教训同"编译过≠能跑"**:`make verify-codegen` 通过也不等于配方是对的。
+        新增/修改校验类脚本时,**必须做一次负向对照**(故意弄脏,确认它会红)
 - [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
       —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
 - [ ] 合并回 main
