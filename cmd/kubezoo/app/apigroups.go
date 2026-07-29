@@ -2,34 +2,25 @@ package app
 
 import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	appsapiv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	appsv1beta2 "k8s.io/api/apps/v1beta2"
 	authenticationv1 "k8s.io/api/authentication/v1"
-	authenticationv1beta1 "k8s.io/api/authentication/v1beta1"
 	authorizationv1 "k8s.io/api/authorization/v1"
-	authorizationv1beta1 "k8s.io/api/authorization/v1beta1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchapiv1 "k8s.io/api/batch/v1"
-	batchapiv1beta1 "k8s.io/api/batch/v1beta1"
-	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	coordinationv1 "k8s.io/api/coordination/v1"
-	coordinationv1beta1 "k8s.io/api/coordination/v1beta1"
 	coreapiv1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	eventsv1 "k8s.io/api/events/v1"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	networkingv1 "k8s.io/api/networking/v1"
-	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	nodev1 "k8s.io/api/node/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	rbacv1alpha1 "k8s.io/api/rbac/v1alpha1"
-	rbacv1beta1 "k8s.io/api/rbac/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -39,7 +30,6 @@ import (
 	"k8s.io/kubernetes/pkg/apis/authorization"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	"k8s.io/kubernetes/pkg/apis/certificates"
 	"k8s.io/kubernetes/pkg/apis/coordination"
 	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/discovery"
@@ -84,6 +74,18 @@ var legacyGroup = common.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "status",
+				ShortNames:      []string{"po"},
+				NamespaceScoped: true,
+				NewFunc: func() runtime.Object {
+					return &core.Pod{}
+				},
+			},
+			// In-place pod resize, added upstream after the fork point.
+			"pods/resize": {
+				Kind: coreapiv1.
+					SchemeGroupVersion.WithKind("Pod"),
+				Resource:        "pods",
+				Subresource:     "resize",
 				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
@@ -453,6 +455,19 @@ var legacyGroup = common.APIGroupConfig{
 					return &core.PersistentVolumeClaimList{}
 				},
 			},
+			// The status subresource was missing here while every other core
+			// resource kubezoo exposes has one.
+			"persistentvolumeclaims/status": {
+				Kind: coreapiv1.
+					SchemeGroupVersion.WithKind("PersistentVolumeClaim"),
+				Resource:        "persistentvolumeclaims",
+				Subresource:     "status",
+				ShortNames:      []string{"pvc"},
+				NamespaceScoped: true,
+				NewFunc: func() runtime.Object {
+					return &core.PersistentVolumeClaim{}
+				},
+			},
 			"configmaps": {
 				Kind: coreapiv1.
 					SchemeGroupVersion.WithKind("ConfigMap"),
@@ -618,14 +633,6 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewFunc:         func() runtime.Object { return &authentication.TokenReview{} },
 				},
 			},
-			"v1beta1": {
-				"tokenreviews": {
-					Kind:            authenticationv1beta1.SchemeGroupVersion.WithKind("TokenReview"),
-					Resource:        "tokenreviews",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &authentication.TokenReview{} },
-				},
-			},
 		},
 	},
 
@@ -662,23 +669,6 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewFunc:         func() runtime.Object { return &batch.CronJob{} },
 				},
 			},
-			"v1beta1": {
-				"cronjobs": {
-					Kind:            batchapiv1beta1.SchemeGroupVersion.WithKind("CronJob"),
-					Resource:        "cronjobs",
-					ShortNames:      []string{"cj"},
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &batch.CronJob{} },
-					NewListFunc:     func() runtime.Object { return &batch.CronJobList{} },
-				},
-				"cronjobs/status": {
-					Kind:            batchapiv1beta1.SchemeGroupVersion.WithKind("CronJob"),
-					Resource:        "cronjobs",
-					Subresource:     "status",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &batch.CronJob{} },
-				},
-			},
 		},
 	},
 
@@ -695,22 +685,6 @@ var nonLegacyGroups = []common.APIGroupConfig{
 				},
 				"mutatingwebhookconfigurations": {
 					Kind:            admissionregistrationv1.SchemeGroupVersion.WithKind("MutatingWebhookConfiguration"),
-					Resource:        "mutatingwebhookconfigurations",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &admissionregistration.MutatingWebhookConfiguration{} },
-					NewListFunc:     func() runtime.Object { return &admissionregistration.MutatingWebhookConfigurationList{} },
-				},
-			},
-			"v1beta1": {
-				"validatingwebhookconfigurations": {
-					Kind:            admissionregistrationv1beta1.SchemeGroupVersion.WithKind("ValidatingWebhookConfiguration"),
-					Resource:        "validatingwebhookconfigurations",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &admissionregistration.ValidatingWebhookConfiguration{} },
-					NewListFunc:     func() runtime.Object { return &admissionregistration.ValidatingWebhookConfigurationList{} },
-				},
-				"mutatingwebhookconfigurations": {
-					Kind:            admissionregistrationv1beta1.SchemeGroupVersion.WithKind("MutatingWebhookConfiguration"),
 					Resource:        "mutatingwebhookconfigurations",
 					NamespaceScoped: false,
 					NewFunc:         func() runtime.Object { return &admissionregistration.MutatingWebhookConfiguration{} },
@@ -770,87 +744,12 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewListFunc:     func() runtime.Object { return &rbac.ClusterRoleBindingList{} },
 				},
 			},
-			"v1alpha1": {
-				"roles": {
-					Kind:            rbacv1alpha1.SchemeGroupVersion.WithKind("Role"),
-					Resource:        "roles",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &rbac.Role{} },
-					NewListFunc:     func() runtime.Object { return &rbac.RoleList{} },
-					TableConvertor:  rest.NewDefaultTableConvertor(rbac.Resource("roles")),
-				},
-				"rolebindings": {
-					Kind:            rbacv1alpha1.SchemeGroupVersion.WithKind("RoleBinding"),
-					Resource:        "rolebindings",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &rbac.RoleBinding{} },
-					NewListFunc:     func() runtime.Object { return &rbac.RoleBindingList{} },
-				},
-				"clusterroles": {
-					Kind:            rbacv1alpha1.SchemeGroupVersion.WithKind("ClusterRole"),
-					Resource:        "clusterroles",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &rbac.ClusterRole{} },
-					NewListFunc:     func() runtime.Object { return &rbac.ClusterRoleList{} },
-					TableConvertor:  rest.NewDefaultTableConvertor(rbac.Resource("clusterroles")),
-				},
-				"clusterrolebindings": {
-					Kind:            rbacv1alpha1.SchemeGroupVersion.WithKind("ClusterRoleBinding"),
-					Resource:        "clusterrolebindings",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &rbac.ClusterRoleBinding{} },
-					NewListFunc:     func() runtime.Object { return &rbac.ClusterRoleBindingList{} },
-				},
-			},
-			"v1beta1": {
-				"roles": {
-					Kind:            rbacv1beta1.SchemeGroupVersion.WithKind("Role"),
-					Resource:        "roles",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &rbac.Role{} },
-					NewListFunc:     func() runtime.Object { return &rbac.RoleList{} },
-					TableConvertor:  rest.NewDefaultTableConvertor(rbac.Resource("roles")),
-				},
-				"rolebindings": {
-					Kind:            rbacv1beta1.SchemeGroupVersion.WithKind("RoleBinding"),
-					Resource:        "rolebindings",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &rbac.RoleBinding{} },
-					NewListFunc:     func() runtime.Object { return &rbac.RoleBindingList{} },
-				},
-				"clusterroles": {
-					Kind:            rbacv1beta1.SchemeGroupVersion.WithKind("ClusterRole"),
-					Resource:        "clusterroles",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &rbac.ClusterRole{} },
-					NewListFunc:     func() runtime.Object { return &rbac.ClusterRoleList{} },
-				},
-				"clusterrolebindings": {
-					Kind:            rbacv1beta1.SchemeGroupVersion.WithKind("ClusterRoleBinding"),
-					Resource:        "clusterrolebindings",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &rbac.ClusterRoleBinding{} },
-					NewListFunc:     func() runtime.Object { return &rbac.ClusterRoleBindingList{} },
-				},
-			},
 		},
 	},
 
 	{
 		policyv1beta1.GroupName,
 		map[string]map[string]*common.StorageConfig{
-			"v1beta1": {
-				"poddisruptionbudgets": {
-					Kind:            policyv1beta1.SchemeGroupVersion.WithKind("PodDisruptionBudget"),
-					Resource:        "poddisruptionbudgets",
-					NamespaceScoped: true,
-					ShortNames:      []string{"pdb"},
-					NewFunc:         func() runtime.Object { return &policy.PodDisruptionBudget{} },
-					NewListFunc:     func() runtime.Object { return &policy.PodDisruptionBudgetList{} },
-				},
-				// PodSecurityPolicy was removed from Kubernetes in 1.25; Pod Security
-				// admission replaced it and is not an API served from here.
-			},
 			"v1": {
 				"poddisruptionbudgets": {
 					Kind:            policyv1.SchemeGroupVersion.WithKind("PodDisruptionBudget"),
@@ -908,70 +807,12 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NewListFunc:     func() runtime.Object { return &networking.IngressClassList{} },
 				},
 			},
-			"v1beta1": {
-				"ingresses": {
-					Kind:            networkingv1beta1.SchemeGroupVersion.WithKind("Ingress"),
-					Resource:        "ingresses",
-					NamespaceScoped: true,
-					ShortNames:      []string{"ing"},
-					NewFunc:         func() runtime.Object { return &networking.Ingress{} },
-					NewListFunc:     func() runtime.Object { return &networking.IngressList{} },
-				},
-				"ingresses/status": {
-					Kind:            networkingv1beta1.SchemeGroupVersion.WithKind("Ingress"),
-					Resource:        "ingresses",
-					Subresource:     "status",
-					NamespaceScoped: true,
-					ShortNames:      []string{"ing"},
-					NewFunc:         func() runtime.Object { return &networking.Ingress{} },
-				},
-				"ingressclasses": {
-					Kind:            networkingv1beta1.SchemeGroupVersion.WithKind("IngressClass"),
-					Resource:        "ingressclasses",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &networking.IngressClass{} },
-					NewListFunc:     func() runtime.Object { return &networking.IngressClassList{} },
-				},
-			},
-		},
-	},
-
-	{
-		extensionsv1beta1.GroupName,
-		map[string]map[string]*common.StorageConfig{
-			"v1beta1": {
-				"ingresses": {
-					Kind:            extensionsv1beta1.SchemeGroupVersion.WithKind("Ingress"),
-					Resource:        "ingresses",
-					NamespaceScoped: true,
-					ShortNames:      []string{"ing"},
-					NewFunc:         func() runtime.Object { return &networking.Ingress{} },
-					NewListFunc:     func() runtime.Object { return &networking.IngressList{} },
-				},
-				"ingresses/status": {
-					Kind:            extensionsv1beta1.SchemeGroupVersion.WithKind("Ingress"),
-					Resource:        "ingresses",
-					Subresource:     "status",
-					NamespaceScoped: true,
-					ShortNames:      []string{"ing"},
-					NewFunc:         func() runtime.Object { return &networking.Ingress{} },
-				},
-			},
 		},
 	},
 
 	{
 		discoveryv1beta1.GroupName,
 		map[string]map[string]*common.StorageConfig{
-			"v1beta1": {
-				"endpointslices": {
-					Kind:            discoveryv1beta1.SchemeGroupVersion.WithKind("EndpointSlice"),
-					Resource:        "endpointslices",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &discovery.EndpointSlice{} },
-					NewListFunc:     func() runtime.Object { return &discovery.EndpointSliceList{} },
-				},
-			},
 			"v1": {
 				"endpointslices": {
 					Kind:            discoveryv1.SchemeGroupVersion.WithKind("EndpointSlice"),
@@ -994,44 +835,6 @@ var nonLegacyGroups = []common.APIGroupConfig{
 					NamespaceScoped: true,
 					NewFunc:         func() runtime.Object { return &coordination.Lease{} },
 					NewListFunc:     func() runtime.Object { return &coordination.LeaseList{} },
-				},
-			},
-			"v1beta1": {
-				"leases": {
-					Kind:            coordinationv1beta1.SchemeGroupVersion.WithKind("Lease"),
-					Resource:        "leases",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &coordination.Lease{} },
-					NewListFunc:     func() runtime.Object { return &coordination.LeaseList{} },
-				},
-			},
-		},
-	},
-
-	{
-		certificatesv1beta1.GroupName,
-		map[string]map[string]*common.StorageConfig{
-			"v1beta1": {
-				"certificatesigningrequests": {
-					Kind:            certificatesv1beta1.SchemeGroupVersion.WithKind("CertificateSigningRequest"),
-					Resource:        "certificatesigningrequests",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &certificates.CertificateSigningRequest{} },
-					NewListFunc:     func() runtime.Object { return &certificates.CertificateSigningRequestList{} },
-				},
-				"certificatesigningrequests/status": {
-					Kind:            certificatesv1beta1.SchemeGroupVersion.WithKind("CertificateSigningRequest"),
-					Resource:        "certificatesigningrequests",
-					Subresource:     "status",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &certificates.CertificateSigningRequest{} },
-				},
-				"certificatesigningrequests/approval": {
-					Kind:            certificatesv1beta1.SchemeGroupVersion.WithKind("CertificateSigningRequest"),
-					Resource:        "certificatesigningrequests",
-					Subresource:     "approval",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &certificates.CertificateSigningRequest{} },
 				},
 			},
 		},
@@ -1105,32 +908,6 @@ var nonLegacyGroups = []common.APIGroupConfig{
 				},
 				"selfsubjectrulesreviews": {
 					Kind:            authorizationv1.SchemeGroupVersion.WithKind("SelfSubjectRulesReview"),
-					Resource:        "selfsubjectrulesreviews",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &authorization.SelfSubjectRulesReview{} },
-				},
-			},
-			"v1beta1": {
-				"subjectaccessreviews": {
-					Kind:            authorizationv1beta1.SchemeGroupVersion.WithKind("SubjectAccessReview"),
-					Resource:        "subjectaccessreviews",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &authorization.SubjectAccessReview{} },
-				},
-				"selfsubjectaccessreviews": {
-					Kind:            authorizationv1beta1.SchemeGroupVersion.WithKind("SelfSubjectAccessReview"),
-					Resource:        "selfsubjectaccessreviews",
-					NamespaceScoped: false,
-					NewFunc:         func() runtime.Object { return &authorization.SelfSubjectAccessReview{} },
-				},
-				"localsubjectaccessreviews": {
-					Kind:            authorizationv1beta1.SchemeGroupVersion.WithKind("LocalSubjectAccessReview"),
-					Resource:        "localsubjectaccessreviews",
-					NamespaceScoped: true,
-					NewFunc:         func() runtime.Object { return &authorization.LocalSubjectAccessReview{} },
-				},
-				"selfsubjectrulesreviews": {
-					Kind:            authorizationv1beta1.SchemeGroupVersion.WithKind("SelfSubjectRulesReview"),
 					Resource:        "selfsubjectrulesreviews",
 					NamespaceScoped: false,
 					NewFunc:         func() runtime.Object { return &authorization.SelfSubjectRulesReview{} },
