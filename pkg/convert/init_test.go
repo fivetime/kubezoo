@@ -22,6 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -84,4 +85,33 @@ func TestNativeObjectConvertorConvertUpstreamObjectToTenantObject(t *testing.T) 
 
 func FakeListEmptyTenantCRDsFunc(tenantID string) ([]*apiextensionsv1.CustomResourceDefinition, error) {
 	return []*apiextensionsv1.CustomResourceDefinition{}, nil
+}
+
+// TestWebhookConfigurationsAreWired guards the wiring, not the transformer.
+//
+// This is the shape of defect the isolation audit found twice: PVTransformer and
+// PVCTransformer are both fully implemented with passing unit tests, and neither
+// is registered in InitConvertors, so neither ever runs. A transformer that is
+// not in the map is the same as no transformer at all, and nothing else notices.
+func TestWebhookConfigurationsAreWired(t *testing.T) {
+	native, _ := InitConvertors(
+		func(group, kind, tenantID string, isTenantObject bool) (bool, bool, error) {
+			return true, false, nil
+		},
+		FakeListEmptyTenantCRDsFunc,
+	)
+	registered := native.(*nativeObjectConvertor).nativeKindToConvertors
+
+	for _, kind := range []string{"MutatingWebhookConfiguration", "ValidatingWebhookConfiguration"} {
+		gk := schema.GroupKind{Group: "admissionregistration.k8s.io", Kind: kind}
+		convertor, ok := registered[gk]
+		if !ok {
+			t.Errorf("%s has no convertor registered, so a tenant's webhook reaches the whole "+
+				"cluster and its clientConfig names a platform namespace", gk)
+			continue
+		}
+		if _, isCross := convertor.(*CrossReferenceConvertor); !isCross {
+			t.Errorf("%s is registered but not with a cross-reference transformer: %T", gk, convertor)
+		}
+	}
 }

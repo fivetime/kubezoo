@@ -9,7 +9,7 @@
 
 | # | 问题 | 严重度 | 状态 |
 |---|---|---|---|
-| A | 租户可注册**全集群生效**的准入 webhook,打死其他租户与平台 | ⛔ 最高 | 实测坐实 |
+| A | 租户可注册**全集群生效**的准入 webhook,打死其他租户与平台 | ⛔ 最高 | **已修并实测** |
 | B | PersistentVolume 完全未改写:撞名 + 存在性泄露 + 对象永久滞留 | ⛔ 高 | 实测坐实 |
 | C | PVC 的 `spec.volumeName` 未改写 | ⚠️ 中 | 实测坐实 |
 | D | `PVTranformer` / `PVCTransformer` 写好了但**从未接线** | ⚠️ 中(A/B/C 的成因) | 实测坐实 |
@@ -18,7 +18,7 @@
 
 ---
 
-## A. 租户注册的准入 webhook 作用于整个集群 ⛔
+## A. 租户注册的准入 webhook 作用于整个集群 ⛔ —— 已修复
 
 `apigroups.go` 把 `mutatingwebhookconfigurations` 与 `validatingwebhookconfigurations`
 暴露给租户,而 `pkg/convert` 对它们**没有任何转换器**(落到 `defaultConvertor`,只改自身
@@ -46,9 +46,45 @@ name 和 ownerReference)。于是:
 ⚠️ 注意 **per-namespace RBAC(#87)挡不住这条**:webhook configuration 是集群级资源,
 而 RBAC 的 `resourceNames` 是精确匹配,表达不了"名字以 `<id>-` 开头"。
 
-**修法(需决策)**:① 直接不向租户暴露这两个资源(最简单,与 kubezoo 的 KAaaS 定位相符);
-② 或在转换层强制注入 `namespaceSelector`(限定到该租户的 namespace 标签)并改写
-`clientConfig.service`。②依赖租户不能改写该字段,需要同时挡住 update。
+### 已采用的修法:转换层强制改写(保留能力,收敛爆炸半径)
+
+⚠️ 顺带查出**第二条同类路径**:CRD 的 `spec.conversion.webhook.clientConfig` 也没改写。
+它在 CRD spec 里而不是 webhookconfiguration,**"不暴露 webhookconfigurations"堵不住它** ——
+而 CRD 是 kubezoo 的核心能力,不可能不暴露。
+
+⚠️ 还有一个事实决定了这个取舍的代价:**该能力此前对正当用途本来就不可用**。
+`clientConfig.service.namespace` 不加前缀 ⇒ 租户指向自己的服务会落到平台的同名命名空间。
+**能工作的只有滥用路径。** 所以"改写"删掉的是坏掉的行为,加回来的是第一次真正可用的能力。
+
+四处强制,缺一即有出口(`pkg/convert/webhookconfiguration.go` + CRD 转换器):
+
+1. `clientConfig.service.namespace` 加租户前缀 —— **同时让租户 webhook 第一次真正可用**
+2. `namespaceSelector` 强制替换为 `kubezoo.io/tenant: <id>`
+3. 每条 rule 的 `scope` 强制为 `Namespaced` —— ⚠️ **最容易漏的一条**:
+   `namespaceSelector` **对集群级资源不生效**,不锁 scope 则 rule 写 clusterroles 仍然全集群触发
+4. `clientConfig.url` **直接拒绝** —— URL 指向哪里由租户决定,没有任何办法把它收敛
+
+**实测(同一个攻击原样重放)**:
+
+| 检查 | 修前 | 修后 |
+|---|---|---|
+| 上游对象 service | `default/nonexistent` | `111111-default/nonexistent` |
+| 上游对象 namespaceSelector | `{}`(全集群) | `{"kubezoo.io/tenant":"111111"}` |
+| 上游对象 rules[0].scope | `*` | `Namespaced` |
+| 另一租户建 ConfigMap | **被打死** | 正常 |
+| 平台 default / kube-system | **被打死** | 正常 |
+| 平台建 ClusterRole | 会被匹配 | 不再匹配 |
+| **租户自己的 namespace** | 被拦 | **仍被拦**(证明 webhook 真生效,不是被架空) |
+
+**逃逸尝试(均失败)**:`clientConfig.url` 直接被拒;`kubectl patch` 把
+`namespaceSelector` 改回 `{}`、`scope` 改回 `*` —— 上游读回来仍是强制值(转换器在 update 也跑)。
+
+**CRD conversion webhook 同样收口**:上游 `111111-default/conv`,租户读回 `default/conv`(往返对称);
+`url` 形式同样被拒。
+
+⚠️ **仍然成立的自伤面**:租户的 `failurePolicy: Fail` webhook 可以拦住**自己 namespace 内**的操作,
+包括平台在该 namespace 里的协调(如 #87 的 RoleBinding)与清理。这是租户自伤,不是越权,
+但会影响该租户 namespace 的可回收性。
 
 ## B. PersistentVolume 完全未改写 ⛔
 

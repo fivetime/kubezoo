@@ -83,6 +83,14 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Group: "authentication.k8s.io",
 			Kind:  "TokenReview",
 		}: NewCrossReferenceConverter(defaultConvertor, NewTokenReviewTransformer()),
+		{
+			Group: "admissionregistration.k8s.io",
+			Kind:  "MutatingWebhookConfiguration",
+		}: NewCrossReferenceConverter(defaultConvertor, NewWebhookConfigurationTransformer()),
+		{
+			Group: "admissionregistration.k8s.io",
+			Kind:  "ValidatingWebhookConfiguration",
+		}: NewCrossReferenceConverter(defaultConvertor, NewWebhookConfigurationTransformer()),
 
 		// resources with nope convertor:
 		{

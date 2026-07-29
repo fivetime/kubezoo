@@ -57,6 +57,9 @@ func (t *CRDConvertor) ConvertTenantObjectToUpstreamObject(obj runtime.Object, t
 	}
 	crd.Spec.Group = util.AddTenantIDPrefix(tenantID, crd.Spec.Group)
 	crd.Name = crd.Spec.Names.Plural + "." + crd.Spec.Group
+	if err := forwardCRDConversionWebhook(crd, tenantID); err != nil {
+		return err
+	}
 	for i := range crd.OwnerReferences {
 		target, err := t.ownerRefTransformer.Forward(&crd.OwnerReferences[i], tenantID)
 		if err != nil {
@@ -80,6 +83,9 @@ func (t *CRDConvertor) ConvertUpstreamObjectToTenantObject(obj runtime.Object, t
 	}
 	crd.Spec.Group = util.TrimTenantIDPrefix(tenantID, crd.Spec.Group)
 	crd.Name = crd.Spec.Names.Plural + "." + crd.Spec.Group
+	if err := backwardCRDConversionWebhook(crd, tenantID); err != nil {
+		return err
+	}
 	for i := range crd.OwnerReferences {
 		target, err := t.ownerRefTransformer.Backward(&crd.OwnerReferences[i], tenantID)
 		if err != nil {
@@ -88,4 +94,50 @@ func (t *CRDConvertor) ConvertUpstreamObjectToTenantObject(obj runtime.Object, t
 		crd.OwnerReferences[i] = *target
 	}
 	return nil
+}
+
+// A CRD carries a second webhook that has nothing to do with
+// admissionregistration: spec.conversion.webhook converts between the CRD's own
+// versions, and its clientConfig has the same shape and the same problem. It was
+// not rewritten either, so a tenant naming a namespace reached the platform's
+// namespace of that name rather than its own.
+//
+// Only the client config needs confining here. A conversion webhook is invoked
+// solely for custom resources of this CRD, and the CRD's group already carries
+// the tenant prefix, so there is no cross-tenant reach to close.
+
+func forwardCRDConversionWebhook(crd *crdinternal.CustomResourceDefinition, tenantID string) error {
+	clientConfig := crdConversionClientConfig(crd)
+	if clientConfig == nil {
+		return nil
+	}
+	if clientConfig.URL != nil {
+		return errors.Errorf("crd %s: spec.conversion.webhook.clientConfig.url is not available "+
+			"to tenants, because a URL cannot be confined to the tenant; use service to name a "+
+			"service in one of your namespaces", crd.Name)
+	}
+	if clientConfig.Service != nil && len(clientConfig.Service.Namespace) > 0 {
+		clientConfig.Service.Namespace = util.AddTenantIDPrefix(tenantID, clientConfig.Service.Namespace)
+	}
+	return nil
+}
+
+func backwardCRDConversionWebhook(crd *crdinternal.CustomResourceDefinition, tenantID string) error {
+	clientConfig := crdConversionClientConfig(crd)
+	if clientConfig == nil || clientConfig.Service == nil || len(clientConfig.Service.Namespace) == 0 {
+		return nil
+	}
+	if !strings.HasPrefix(clientConfig.Service.Namespace, tenantID+"-") {
+		return errors.Errorf("crd %s: conversion webhook points at namespace %s, which does not "+
+			"belong to tenant %s", crd.Name, clientConfig.Service.Namespace, tenantID)
+	}
+	clientConfig.Service.Namespace = util.TrimTenantIDPrefix(tenantID, clientConfig.Service.Namespace)
+	return nil
+}
+
+func crdConversionClientConfig(crd *crdinternal.CustomResourceDefinition) *crdinternal.WebhookClientConfig {
+	if crd.Spec.Conversion == nil || crd.Spec.Conversion.WebhookClientConfig == nil {
+		return nil
+	}
+	return crd.Spec.Conversion.WebhookClientConfig
 }
