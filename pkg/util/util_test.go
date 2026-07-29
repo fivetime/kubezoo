@@ -248,6 +248,22 @@ func TestUpstreamObjectBelongsToTenant(t *testing.T) {
 			isNamespaceScoped: false,
 			expect:            false,
 		},
+		{
+			// Nodes were exempted from the prefix rule so that Conformance
+			// would pass, which handed every tenant the platform's machine
+			// inventory: names, labels, addresses, capacity, and the kernel,
+			// runtime and kubelet versions in status.nodeInfo. They are
+			// cluster-scoped objects and the prefix decides, like everything
+			// else.
+			name: "a platform node belongs to no tenant",
+			obj: &v1.Node{
+				TypeMeta:   metav1.TypeMeta{Kind: "Node", APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-0"},
+			},
+			tenantId:          tenantId,
+			isNamespaceScoped: false,
+			expect:            false,
+		},
 	}
 
 	for _, test := range tests {

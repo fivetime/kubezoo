@@ -262,8 +262,7 @@ func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.Get
 		return nil, err
 	}
 	var utd *unstructured.Unstructured
-	// todo: renjingsi, expose node to pass Conformance test
-	if !tp.namespaceScoped && tp.kind.Kind != "Node" {
+	if !tp.namespaceScoped {
 		name = util.ConvertTenantObjectNameToUpstream(name, tenantID, tp.kind)
 	}
 	if subResource := tp.subresource; subResource != "" {

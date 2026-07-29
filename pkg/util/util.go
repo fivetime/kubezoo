@@ -133,15 +133,17 @@ func UpstreamObjectBelongsToTenant(obj runtime.Object, tenantID string, isNamesp
 		return strings.HasPrefix(parts[1], tenantID+"-")
 	}
 
-	// Todo: renjs, temporarily expose nodes for tenants to pass Conformance test
-	t, err := meta.TypeAccessor(obj)
-	if err != nil {
-		klog.Errorf("failed to get type accessor for object: %+v", obj)
-		return false
-	}
-	if t.GetAPIVersion() == "v1" && t.GetKind() == "Node" {
-		return true
-	}
+	// Nodes used to be exempted here and returned to every tenant, so that the
+	// Conformance suite would pass. What a tenant saw was the platform's own
+	// machines: their names, labels, addresses, capacity, and the kernel,
+	// runtime and kubelet versions in status.nodeInfo -- a description of the
+	// infrastructure it shares with every other tenant, and a list of what to
+	// look up when something there has a CVE.
+	//
+	// They are now treated as the cluster-scoped objects they are, so the name
+	// prefix decides, and none of the platform's nodes carry one. Conformance
+	// loses whatever it was gaining; a tenant cannot inspect the machines the
+	// platform runs.
 
 	// non-crd object is namespace scoped
 	if isNamespaceScoped {

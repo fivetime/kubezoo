@@ -13,7 +13,7 @@
 | B | PersistentVolume 完全未改写:撞名 + 存在性泄露 + 对象永久滞留 | ⛔ 高 | **已修并实测** |
 | C | PVC 的 `spec.volumeName` 未改写 | ⚠️ 中 | **已修并实测** |
 | D | `PVTranformer` / `PVCTransformer` 写好了但**从未接线** | ⚠️ 中(B/C 的成因) | **已接线,并加接线守卫** |
-| E | Node 对所有租户可见 | ⚠️ 中 | 实测确认(已知,TODO 1.2) |
+| E | Node 对所有租户可见(**三处豁免,TODO 只点了一处**) | ⚠️ 中 | **已修并实测** |
 | **F** | ⛔⛔ **租户可自建 `*` on `*` 的 ClusterRole 并绑给自己,完全废掉 #87** | ⛔ 最高 | **已修并实测** |
 | **G** | ⛔⛔ **`nodes/proxy` 被授权 ⇒ 租户可达任意节点 kubelet API(完整逃逸)** | ⛔ 最高 | **已修并实测** |
 | H | 配额:每 namespace 各一份额度 / `objectSelector` 标签可绕过 / 单点 | ⛔ 高 | **绕过已修,其余坐实** |
@@ -154,10 +154,43 @@ NewPVCTransformer    被引用 0 次
 > 顺带:`init.go` 里还留着 `policy/PodSecurityPolicy` 的条目,该 kind 在 1.25 已被删除。
 > 无害但陈旧。
 
-## E. Node 对所有租户可见 ⚠️
+## E. Node 对所有租户可见 ⚠️ —— 已修复
 
-**实测**确认:租户 `kubectl get nodes` 能列出平台节点。
-成因是 `pkg/util/util.go` 里为通过 Conformance 加的 TODO 分支。已记在 TODO 1.2,取舍不是难题。
+**实测**确认:租户 `kubectl get nodes` 能列出平台节点 —— 名字、标签、地址、容量,
+以及 `status.nodeInfo` 里的内核版本 / 容器运行时 / kubelet 版本。
+对租户来说这是**它与所有其他租户共用的那批机器的清单**,也是一份"哪里有 CVE 就查哪里"的索引。
+
+### ⭐ TODO 只点了一处,实际有三处
+
+按 TODO 删掉 `pkg/util/util.go` 那个 Conformance 分支之后**再测,`get nodes` 是空的了,
+但 `get node <名字>` 照样返回完整对象** —— 因为 `pkg/proxy/proxy.go` 的 Get 路径里
+**还有一个独立的 Node 豁免**,让集群级资源的名字前缀转换跳过 Node:
+
+```go
+if !tp.namespaceScoped && tp.kind.Kind != "Node" {   // ← 第二处
+```
+
+第三处在 `pkg/convert/init.go`:Node 映射到 `nopeConvertor`(完全不转换)。
+**这与 B(PersistentVolume)是同一个形状**:`nopeConvertor` + 读路径按前缀过滤,
+两边不对称。三处各带一条 TODO 注释,只 grep 注释文案只能找到一处。
+
+### 修法与复测
+
+三处一起去掉,Node 回归成一个普通的集群级资源(名字前缀说了算,平台节点都没有前缀):
+
+| 路径 | 修前 | 修后 |
+|---|---|---|
+| `kubectl get nodes` | 列出平台节点 | `No resources found` |
+| `kubectl get node <名字>` | **返回完整对象** | `NotFound` |
+| `GET /api/v1/nodes/<名字>` | 完整对象 | 404 |
+| `watch /api/v1/nodes` | 有事件 | 静默 |
+| 平台自己看 | 正常 | 正常(未受影响) |
+
+顺带把 `init.go` 里另外两个 `nopeConvertor` 条目也删了:`scheduling.k8s.io/PriorityClass`
+(kubezoo 根本不服务)和 `policy/PodSecurityPolicy`(k8s 1.25 已删除的 kind)。
+两个都永远匹配不上;但**如果哪天按 I 的 A 方案把 PriorityClass 服务出去,
+那条 nope 会原样复现 PV 的 bug**。现在没有"什么都不做"的转换器条目了,
+落到默认(加前缀)才是安全的兜底。
 
 ## F. 租户可以把 #87 的兜底整个拆掉 ⛔⛔ —— 已修复
 
@@ -280,6 +313,13 @@ webhook 原本用 `objectSelector: app NotIn [kubezoo-cluster-resource-quota]` �
   看着像没加前缀 —— 那是 `TrimTenantIDFromError` 把 `111111-` 从**错误消息**里擦掉了。
   **错误文案不能当证据**,要看上游落地的对象名
 - **field selector 不构成通道**:`metadata.namespace=222222-default` 在自己 ns 内查,返回空
+- **租户摘不掉自己 namespace 上的 `kubezoo.io/tenant` 标签**(这条是 A 的 webhook 收口
+  与退租强制清理**共同的地基**,所以专门验了)。四种写法全试:
+  `kubectl label ns probe kubezoo.io/tenant-` / merge patch 置 null / json patch remove /
+  改成别的租户 id —— 上游标签**一字未变**,改成别人的 id 直接被拒。
+  转换器在 create 和 **patch**(走 `guaranteedUpdate` → `update`)上都跑,所以补不上洞。
+  ⚠️ 小瑕疵:前两种写法 kubectl 回显 "unlabeled" / "patched" **像是成功了**,实际没变;
+  再 `get` 一次能看到真相
 - **CRD 发现面隔离**:租户 1 建 `widgets.acme.io`(上游 `widgets.111111-acme.io`),
   租户 2 的 `api-resources --api-group=acme.io`、`get crd`、`/apis`、`/openapi/v3` 全为空
   —— 但 `/openapi/v2` 泄露,见 L 节

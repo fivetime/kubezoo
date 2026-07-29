@@ -28,7 +28,6 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 	ownerReferenceTransformer := NewOwnerReferenceTransformer(checkGroupKind)
 	objectReferenceTransformer := NewObjectReferenceTransformer(checkGroupKind)
 	defaultConvertor := NewDefaultConvertor(ownerReferenceTransformer)
-	nopeConvertor := NewNopeConvertor()
 
 	nativeKindToConvertors := map[schema.GroupKind]common.ObjectConvertor{
 		{
@@ -122,19 +121,20 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Kind:  "ValidatingWebhookConfiguration",
 		}: NewCrossReferenceConverter(defaultConvertor, NewWebhookConfigurationTransformer()),
 
-		// resources with nope convertor:
-		{
-			Group: "scheduling.k8s.io",
-			Kind:  "PriorityClass",
-		}: nopeConvertor,
-		{
-			Group: "policy",
-			Kind:  "PodSecurityPolicy",
-		}: nopeConvertor,
-		{
-			Group: "",
-			Kind:  "Node",
-		}: nopeConvertor,
+		// There is deliberately no entry mapping a kind to a convertor that does
+		// nothing. Three of the isolation audit's findings were that shape --
+		// PersistentVolume was mapped to one while the read path filtered on the
+		// prefix, so a tenant's volume landed upstream under a bare name that
+		// nobody could then see or delete, and Node was exempted in three
+		// separate places at once. An unconverted cluster-scoped kind is a name
+		// every tenant shares. The default convertor, which prefixes, is the
+		// safe thing to fall through to.
+		//
+		// The two entries removed from here were scheduling.k8s.io/PriorityClass,
+		// which kubezoo does not serve, and policy/PodSecurityPolicy, a kind
+		// Kubernetes deleted in 1.25. Neither could ever match; had PriorityClass
+		// later been served, the entry would have reproduced the volume bug
+		// silently.
 	}
 	nativeConvertor = NewNativeObjectConvertor(defaultConvertor, nativeKindToConvertors)
 	customConvertor = NewCrossReferenceConverter(defaultConvertor, NewCustomResourceTransformer())

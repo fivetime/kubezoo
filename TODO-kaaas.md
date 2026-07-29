@@ -205,7 +205,12 @@
       同样六个问题全部答 yes,证明那些 no 是 RBAC 拒绝而非别的原因失败
       · 自己 ns 建 pod ✓ / 自建 ns 建 cm ✓ / 跨租户建 pod ✗ / 跨租户读 secret ✗ /
       读 kube-system secret ✗ / 全集群 list pods ✗
-- [ ] 顺带**限制租户对自己 namespace 的 update 权限**(防摘除策略标签,见 3.1)—— **未做**
+- [x] **限制租户对自己 namespace 的 update(防摘除策略标签)—— 实测已经是安全的,不需要改**。
+      `NamespaceTransformer.Forward` 无条件重写 `kubezoo.io/tenant`,而 patch 走
+      `guaranteedUpdate → update` 也过转换器,所以四种摘标签写法(label `-` / merge null /
+      json remove / 改成别人的 id)上游标签一字未变,改成别人的直接被拒。
+      这条是 A 的 webhook 收口与退租强制清理**共同的地基**,所以专门验过。
+      ⚠️ 前两种写法 kubectl 回显像是成功了,实际没变
 
 ⚠️ **四个差点让功能"看着做完实则没做"的点**:
 
@@ -235,8 +240,17 @@
 
 ### 1.2 已知缺陷修复
 
-- [ ] **Node 对所有租户无条件可见** —— 删掉 `pkg/util/util.go:136-144` 那个为过 Conformance
-      加的 TODO 分支。代价:Conformance 测试会挂,是取舍不是难题
+- [x] **Node 对所有租户无条件可见** —— 已修并实测。
+      ⭐ **这条 TODO 只点了一处,实际有三处**:删掉 `pkg/util/util.go` 那个分支之后
+      `get nodes` 空了,但 **`get node <名字>` 照样返回完整对象** ——
+      `pkg/proxy/proxy.go` 的 Get 路径里还有一个独立豁免让 Node 跳过名字前缀转换;
+      第三处是 `pkg/convert/init.go` 把 Node 映射到 `nopeConvertor`。
+      **与 B(PV)同一个形状**:nope 转换器 + 读路径按前缀过滤。
+      三处各带一条 TODO 注释,**按注释文案 grep 只能找到一处**
+      - 复测:list 空 / get NotFound / raw GET 404 / watch 静默 / 平台自己不受影响
+      - 顺带删掉另外两个 `nopeConvertor` 条目(`PriorityClass` 不服务、`PodSecurityPolicy` 1.25 已删)。
+        现在**没有"什么都不做"的转换器条目了** —— 若按 I 的 A 方案把 PriorityClass 服务出去,
+        那条 nope 会原样复现 PV 的 bug
 - [ ] **`-A` 与 cluster-scoped 请求走"全量 + 过滤"** —— 改为:先取该租户的 namespace 列表,
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
