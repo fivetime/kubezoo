@@ -518,8 +518,9 @@ func (tc *TenantController) suspensionModeOf(tenantId string) tenantv1alpha1.Ten
 // reached code already running inside its containers, and a tenant that intends
 // to destroy evidence can arrange for that from inside -- no amount of RBAC
 // withdrawal, and no stronger sandbox either, prevents it. What preserves the
-// object state is a snapshot taken when the freeze is applied; after that, a
-// later deletion by the tenant's own automation is itself recorded.
+// object state is a snapshot, which is not this mechanism's job: a snapshot has
+// to say which point in time it is a view of, and suspension cannot promise
+// that. Suspension deals with the control plane and stops there.
 //
 // So this reports rather than fixes: an operator deciding how to handle a
 // particular tenant needs to know which bindings are still live.
