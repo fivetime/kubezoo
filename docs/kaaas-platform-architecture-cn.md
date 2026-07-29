@@ -217,24 +217,27 @@ kubezoo、kubetron、Kyverno **都会往租户的对象上写东西**,而只有 
 
 ## 6. 安全模型
 
-### 6.1 基本事实:改写层是当前唯一防线
+### 6.1 基本事实:集群级资源没有第二道防线
 
-每个租户在上游被授予的是全权(`pkg/controller/controller.go:556`,绑定 `:614`):
+⚠️ **本节原先写的是"改写层是当前唯一防线,没有任何兜底"。#87 之后只对一半成立** ——
+原文描述的是租户被授予 `*` on `*` 全权的旧状态,那已经改掉了。
 
-```go
-// a "root" role which can do absolutely anything
-Name:  tenantId + "-cluster-admin"
-Rules: NewRule("*").Groups("*").Resources("*")
-```
+| | 有没有兜底 |
+|---|---|
+| **namespace 级资源** | ✅ **有**。#87 把权限改成**按 namespace 下发**,跨租户访问被上游 RBAC 拒绝(带负向对照实测) |
+| **集群级资源** | ⛔ **没有,而且是结构性的** |
 
-加上示例部署中 kubezoo 自身 `--authorization-mode=AlwaysAllow`,结论是:
+集群级那半没兜底的原因是硬的:**RBAC 的 `resourceNames` 是精确匹配,表达不了
+"名字以 `<租户ID>-` 开头"**。所以对集群级资源,`pkg/convert/` 改写层的正确性
+**仍然是唯一防线** —— 隔离审计里 PersistentVolume、准入 webhook、Node 三条缺口
+都出在这条路上。
 
-> **租户隔离完全且唯一地依赖 `pkg/convert/` 改写层的正确性,没有任何兜底。**
+改写规则本身只有一条:namespace 级看 namespace 前缀,cluster 级看 name 前缀,
+CRD 看 group 前缀。
 
-改写规则本身只有一条(`pkg/util/util.go:146`):namespace 级看 namespace 前缀,
-cluster 级看 name 前缀,CRD 看 group 前缀。
+(kubezoo 自身 `--authorization-mode=AlwaysAllow` 是**把授权完全交给上游**,不是漏配。)
 
-### 6.2 ⭐ 第一优先改动:per-namespace RBAC(建立第二道防线)
+### 6.2 ✅ per-namespace RBAC(第二道防线)—— **已实现**(#87)
 
 **租户创建 namespace 时,同步在该 namespace 内生成 RoleBinding**,把权限限死在自己的
 namespace。这样即使 convert 层漏掉一个引用字段,上游 RBAC 也会拒绝。
@@ -264,7 +267,7 @@ Cluster-scoped 那部分**永远只能靠改写层**。但绝大多数流量是 
 |---|---|---|
 | ~~Node 无条件可见(§7.1)~~ **已修** | 删掉**三处**豁免(不是一处) | Conformance 测试会挂——它正是为此而加 |
 | 平台指纹泄露(§5) | convert 层出站擦除/还原 | 需三方契约 |
-| `-A` 全量 LIST(§7.2) | 先取租户 namespace 列表,再逐 namespace 发 scoped LIST 合并 | 请求放大(N 个 ns = N 次上游请求),但数据量从全集群降到租户自身。⚠️ 分页与 resourceVersion 语义要先定,见 §10.5 |
+| `-A` 全量 LIST(§7.2) | 先取租户 namespace 列表,再逐 namespace 发 scoped LIST 合并 | 请求放大(N 个 ns = N 次上游请求),但数据量从全集群降到租户自身。⚠️ 分页与 resourceVersion 语义要先定,见 §11.5 |
 
 **② 纵深防御** —— §6.2 的 per-namespace RBAC。
 
@@ -312,7 +315,7 @@ namespace;否则客户端不限范围,靠 `FilterUnstructuredList`(`pkg/util/uti
 
 ⚠️ **现状已变**:#87 的 per-namespace RBAC 落地后,`-A` 对租户**直接 Forbidden** ——
 下表描述的是被权限挡住之前的行为。问题本身没解决,而且 `-A` 这个常用能力也没了,
-详见 §10.5。
+详见 §11.5。
 
 | 租户操作 | 上游查询范围 | 隔离靠什么 |
 |---|---|---|
@@ -376,20 +379,6 @@ merge patch 置 null、json patch remove、改成别的租户 id)上游标签一
 以及任何策略引擎自己约定的匹配标签 —— 那些没有转换器守着,租户能改。
 这正是 §8.1 铁律要反向写(exclude 平台自身 namespace)的原因:
 **判据只能建立在租户改不动的东西上**。
-
-### 7.6 ~~版本停在 1.24~~ —— **已抬到 1.36,该前置条件已解除**
-
-原文:`go.mod` 锁 1.24 / Go 1.18,而 kubetron 用 `k8s v0.36`,两者无法共存,
-是 B1 的头号前置工作。
-
-**已完成**(#83 / #88):`k8s.io/*` 全族锁定 **1.36.3**(staging `v0.36.3`),Go 基线 1.26.0,
-生成代码重新生成并有 `verify-codegen` 守卫,CRD handler 已按 1.36 重新 fork。
-与 kubetron 的版本冲突不再存在。
-
-⚠️ 仍成立的部分:kubezoo **依旧引用 `k8s.io/kubernetes` 内部包**并 fork 了 CRD handler,
-所以下一次跨小版本仍是一次有意的移植,不是改版本号。
-
----
 
 ## 8. 准入策略层
 
@@ -647,7 +636,7 @@ objectSelector:
 
 ---
 
-## 9.5 租户停机:两种模式 —— **已实现并实测**(遗留一个显式缺口)
+## 10. 租户停机:两种模式 —— **已实现并实测**(遗留一个显式缺口)
 
 两个来自不同场景的需求,共用同一套机制但**收敛程度不同**:
 
@@ -788,7 +777,7 @@ Linux 的 cgroup freezer 冻的是**内核调度**、不发信号:
 | 入口 | 向 Pod 级 cgroup 的 `cgroup.freeze` 写 `1` | `freezer.state` 写 `FROZEN` |
 
 进程**不退出**、内存上下文**完整保留**,解冻即恢复 —— CRIU / 容器 checkpoint 同一套地基。
-和 §9.5 的 `Frozen`(冻**租户的操作能力**)是不同层的两把闸,可叠加。
+和 §10 的 `Frozen`(冻**租户的操作能力**)是不同层的两把闸,可叠加。
 
 ⚠️ **一个会毁掉现场的坑(读码与机制推断,未实测)**:容器一旦冻住,
 kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
@@ -799,7 +788,7 @@ kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
 
 > 关联任务见 `TODO-kaaas.md`。
 
-## 10. 已知的规模墙
+## 11. 已知的规模墙
 
 按预计撞上的先后排列。
 
@@ -815,7 +804,7 @@ kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
 
 ---
 
-## 10.5 `-A` 全量 LIST:现状、过渡方案、以及结合 KubeBrain 的目标解
+## 11.5 `-A` 全量 LIST:现状、过渡方案、以及结合 KubeBrain 的目标解
 
 ### 现状(实测)
 
@@ -883,7 +872,7 @@ k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 
    开了之后 kubezoo 必须持有同一套 DEK/KEK ⇒ **它就有能力解密那个 etcd 里的一切**,
    而不只是它该读的那段区间。区间限制是 kubezoo 自己的代码在守,不是密钥在守
 3. **审计断了**。直连读不进 apiserver 审计日志,"谁读了什么"会消失 ——
-   与 §9.5 的取证冻结需求直接冲突。要补就得 kubezoo 自建一套
+   与 §10 的取证冻结需求直接冲突。要补就得 kubezoo 自建一套
 4. **它是混合路径不是替代**。聚合 API(metrics 等)根本不在 etcd 里,仍须走 apiserver ⇒
    两条路并存,长期维护两份语义
 
@@ -897,7 +886,7 @@ k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 
 
 > 关联:#84(kubezoo × KubeBrain 键空间形态)、TODO 1.2。
 
-## 11. 前置工作与建议顺序
+## 12. 前置工作与建议顺序
 
 | 序 | 工作 | 理由 |
 |---|---|---|
@@ -911,7 +900,7 @@ k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 
 
 ---
 
-## 12. 粘合层细节
+## 13. 粘合层细节
 
 ### 12.1 DNS:zone 用租户视角的 namespace 名
 
@@ -945,7 +934,7 @@ kubezoo 有 `TrimTenantIDFromError`(`pkg/proxy/proxy.go` 内 9 处调用,如 `:5
 
 ---
 
-## 13. 暂不引入
+## 14. 暂不引入
 
 **OpenKruise。** 两个原因:
 
@@ -963,7 +952,7 @@ kubezoo 有 `TrimTenantIDFromError`(`pkg/proxy/proxy.go` 内 9 处调用,如 `:5
 
 ---
 
-## 14. 诚实边界
+## 15. 诚实边界
 
 本文的架构判断基于**源码阅读 + 各项目自身的测试报告**,不是端到端实测:
 
