@@ -145,8 +145,33 @@
       - **双向验证过**:刚生成完的树上 verify 通过;篡改生成文件里的一行 ⇒ verify 精确报错
       - ⚠️ **教训同"编译过≠能跑"**:`make verify-codegen` 通过也不等于配方是对的。
         新增/修改校验类脚本时,**必须做一次负向对照**(故意弄脏,确认它会红)
-- [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
-      —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
+- [x] **带证书把 kubezoo 跑起来,发一个租户对象** — `32be3a0`(#89)
+      - ⭐ **存储用 etcd 不用 KubeBrain**(用户定):本项验的是"1.36 上能否正确服务请求",
+        与存储后端语义无关;上 KubeBrain 还要拖 PD/TiKV。kubezoo × KubeBrain 归 #84
+      - 上游用 kind v1.35(1.36 尚无 kind 节点镜像),隔离 kubeconfig,未碰 `kubebrain-dbaas`
+      - ⭐⭐ **"编译过 + 测试绿 + verify-codegen 绿 + 二进制能启动"之后,仍然一个请求都服务不了。
+        三个编译器完全看不见的缺陷:**
+        ① `OpenAPIV3Config` 没设 —— fork 时可选,SSA 转正后 `getOpenAPIModels` 靠它建字段管理
+           类型转换器,为 nil 直接拒绝启动
+        ② 喂给它的定义只有 `pkg/apis/openapi`(被代理的 k8s 类型),**自有类型 Tenant 在
+           `pkg/apis/generated/openapi`** —— 以前只喂 /openapi 端点无所谓,现在要为**每个已装
+           资源**建转换器,缺一个就致命。已合并两份
+        ③ tenant store 缺 1.26 起必填的 `SingularQualifiedResource`。本该是一句清晰报错,
+           但 `v1alpha1Storage` **把 `NewREST` 的 error 丢了**(`tenantStorage, _ :=`),
+           于是 typed-nil 进了 storage map,**首次方法调用直接 segfault**
+      - 另:代理 storage 缺 1.26 起必需的 `GetSingularName`。规则用"Kind 小写"——
+        对着真 1.36 apiserver 核过,68 个带单数名的资源**全部**等于 `ToLower(Kind)`,零例外
+      - ⚠️ **两个随仓库发布的文件都传了已被 klog 移除的 `--logtostderr`**:
+        `hack/lib/gen_pki.sh`(文档让你照抄它打印的参数)和 `config/setup/all_in_one.yaml`
+        (**部署到集群里同样起不来**)。是脚本 30 个、清单 33 个参数里唯一失效的
+      - **端到端验收结果**:租户看到 `default/test` 而上游是 `111111-default/test`,
+        且看不到平台自身 pod;两租户同名 ConfigMap 各读各的、互相看不到对方 pod/CRD;
+        租户 CRD 是 `foos.stable.example.com` 而上游 `foos.111111-stable.example.com`,
+        CR 实例经**重新 fork 的 CRD handler** 得到 `stable.example.com/v1 default/myfoo`
+        vs 上游 `111111-stable.example.com/v1 111111-default/myfoo`;
+        `/apis` 重新带上 `kind`/`apiVersion`(本轮修的回归现场坐实)
+      - ⚠️ 差点误报一次:`get pod -A | wc -l` 把 "No resources found" 数成了 1,
+        看着像跨租户泄露。**看原始输出才确认零串扰** —— 计数类断言必须回看原文
 - [x] 合并回 main — `ec374da`(`--no-ff`,本地已合,**未推送**)
       - 三个 `WIP:` commit 压成一个诚实的 `Move the build onto Kubernetes 1.36.3`
         (它单独仍编不过,提交信息里写明了)
