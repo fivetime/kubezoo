@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 
 	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	v1 "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
@@ -45,6 +46,14 @@ type DiscoveryProxy interface {
 	OpenAPISchema() (*openapi_v2.Document, error)
 	// GetSwagger fetches swagger API specification
 	GetSwagger() (*spec.Swagger, error)
+	// OpenAPIV3 fetches an OpenAPI v3 document from upstream by its path below
+	// /openapi/v3 -- the empty string for the group-version index itself, or
+	// something like "apis/111111-acme.io/v1" for one group version.
+	//
+	// It returns raw bytes rather than a parsed document because the caller
+	// rewrites names textually and hands the result straight on; parsing and
+	// re-serialising it would only risk dropping fields kubezoo does not model.
+	OpenAPIV3(path string, query url.Values) ([]byte, error)
 }
 
 // discoveryProxy implements the DiscoveryProxy interface
@@ -165,6 +174,16 @@ func (dp *discoveryProxy) ServerVersion() (*version.Info, error) {
 
 func (dp *discoveryProxy) OpenAPISchema() (*openapi_v2.Document, error) {
 	return dp.discoveryClient.OpenAPISchema()
+}
+
+func (dp *discoveryProxy) OpenAPIV3(path string, query url.Values) ([]byte, error) {
+	request := dp.discoveryClient.RESTClient().Get().AbsPath("/openapi/v3", path)
+	for name, values := range query {
+		for _, value := range values {
+			request = request.Param(name, value)
+		}
+	}
+	return request.Do(context.TODO()).Raw()
 }
 
 func (dp *discoveryProxy) GetSwagger() (*spec.Swagger, error) {

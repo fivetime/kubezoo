@@ -382,8 +382,15 @@ Service/Endpoints 转换 · 跨租户 ownerReference(悬空后被 GC 收走,k8s 
       两租户逐字节相同。**隔离上没问题**(不含任何租户内容),但 `kubectl explain` 默认走 v3
       ⇒ 对租户自己刚建、`kubectl get` 完全正常的 CR 报找不到资源;
       `--output=plaintext-openapiv2` 才能用(这也正是 L 修好的证据)
-      - [ ] 修:代理上游 `/openapi/v3` 及 `/openapi/v3/apis/<g>/<v>`,套用 L 的"删+剥",
-        再与自有静态 v3 合并
+      - [x] **已修并实测**:两半**分别取**——原生那半继续用 kubezoo 自己的
+        (上游那份描述的是上游 apiserver,含 kubezoo 不服务的资源如 `resource.k8s.io`,
+        照抄等于广告给租户);自定义那半只能来自上游,按归属过滤+剥前缀。
+        索引用 `responseRecorder` 接住下游输出再合并;上游取不到时**降级为只回原生面**
+      - 验收:`kubectl explain widget` / `widget.spec.size` 都正常,
+        租户 222222 explain widget = "doesn't have a resource type",原生 explain 不受影响;
+        取对方的 GV 文档 404;服务给租户的 schema 与上游逐字段相同(含 description)
+      - ⚠️ **差点误判**:改完第一次测仍报一样的错 —— **kubectl 把 openapi 缓存在 `~/.kube/cache`**。
+        **客户端缓存会让服务端的修复看起来没生效**,清缓存后才是真结果
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次。
 

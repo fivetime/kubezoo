@@ -47,6 +47,9 @@ func WithDiscoveryProxy(handler http.Handler, discoveryProxy proxy.DiscoveryProx
 
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
+		if handleOpenAPIV3(w, r, handler, discoveryProxy, tenantID, path) {
+			return
+		}
 		if len(parts) == 1 && parts[0] == "apis" {
 			// path: /apis
 			groups, err := discoveryProxy.ServerGroups(tenantID)
@@ -177,6 +180,12 @@ func isDiscoveryRequest(requestInfo *request.RequestInfo) bool {
 	}
 	// todo(renjingsi): handle /api
 	if strings.HasPrefix(requestInfo.Path, "/apis") {
+		return true
+	}
+	// The v3 index and the per-group-version documents below it both need
+	// tenant handling: the index has to gain the tenant's custom resources and
+	// the documents have to lose the prefix.
+	if requestInfo.Path == "/openapi/v3" || strings.HasPrefix(requestInfo.Path, "/openapi/v3/") {
 		return true
 	}
 	switch requestInfo.Path {

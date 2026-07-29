@@ -21,7 +21,7 @@
 | J | `kubectl auth can-i` 对租户全错(SAR 属性不转换) | ⚠️ 中 | **已修并实测**(集群级残留=vanilla 行为) |
 | K | `serviceaccounts/token`、`pods/eviction`、`pods/binding` 解不出请求体 | ⚠️ 中 | **已修并实测** |
 | L | `/openapi/v2` 原样透传 ⇒ 跨租户信息泄露 + 文档自相矛盾 | ⚠️ 中 | **已修并实测** |
-| M | `/openapi/v3` 不含租户 CRD ⇒ `kubectl explain` 默认路径失效 | ⚠️ 低(不泄露) | **坐实,待修** |
+| M | `/openapi/v3` 不含租户 CRD ⇒ `kubectl explain` 默认路径失效 | ⚠️ 低(不泄露) | **已修并实测** |
 | — | CRD 同名、namespace/name 前缀、ownerReference、Service/Endpoints、**watch 过滤**、**field selector**、**发现面** | ✅ 正确 | 实测通过 |
 
 ---
@@ -472,7 +472,7 @@ protobuf 那路又"只剥自己不删别人" —— 因为 gnostic 的 `Document
 (`KIND: Widget / VERSION: acme.io/v1`),证明 v2 文档确实自洽了。
 但默认的 `kubectl explain` **仍然失败** —— 那是另一条,见 M。
 
-## M. `/openapi/v3` 里根本没有租户的 CRD ⚠️ 坐实(未修)
+## M. `/openapi/v3` 里根本没有租户的 CRD ⚠️ —— 已修复
 
 kubezoo 的 `/openapi/v3` 是它**自己聚合的静态文档**(34 个 path,全是原生组),
 **从不把上游的 CRD schema 并进来**。两个租户拉到的 v3 逐字节相同。
@@ -480,11 +480,50 @@ kubezoo 的 `/openapi/v3` 是它**自己聚合的静态文档**(34 个 path,全�
 - 隔离上**没问题**:里面没有任何租户的东西,自然不泄露
 - 功能上**有问题**:`kubectl explain` 默认走 v3 ⇒ 对租户**自己刚建、
   且 `kubectl get` 完全正常**的 CR 报
-  `couldn't find resource for "acme.io/v1, Resource=widgets"`。
-  加 `--output=plaintext-openapiv2` 才能用
+  `couldn't find resource for "acme.io/v1, Resource=widgets"`
 
-修法需要代理上游 `/openapi/v3` 与 `/openapi/v3/apis/<group>/<version>`,
-套用 L 的同一套"删+剥",再与 kubezoo 自有的静态 v3 合并 —— 记为待办。
+### 修法:两半分别取,而且必须分别取
+
+v3 是一个索引(`/openapi/v3`)加每个 group-version 一份文档。
+
+- **原生那一半继续用 kubezoo 自己的** —— 上游的索引描述的是**上游 apiserver**,
+  里面有 kubezoo 根本不服务的资源(如 `resource.k8s.io`),
+  照抄等于把它们广告给租户
+- **自定义那一半只能来自上游** —— schema 只存在于那里。按归属过滤 + 剥前缀,
+  与 L 同样的两道,原因也一样
+
+实现上索引这一半用 `responseRecorder` 把下游 handler 的输出接住再合并,
+这样这个 filter 不需要知道 kubezoo 那份是怎么建出来的。
+上游取不到时**降级为只回原生面**并打日志 —— 那一半仍然正确,
+而且正是本次修复之前的行为,整个请求失败反而更糟。
+
+### 复测(两租户互为对照)
+
+| 检查 | 租户 111111 | 租户 222222 |
+|---|---|---|
+| 索引 path 数 | 34 → **35** | 34 → **35** |
+| 新增的那条 | `apis/acme.io/v1` ✅ | `apis/beta.io/v1` ✅ |
+| `serverRelativeURL` | 去了前缀、保留上游 hash ✅ | 同 ✅ |
+| 索引里残留前缀 | 0 ✅ | 0 ✅ |
+| 原生 `api/v1` / `apis/apps/v1` | 在,且是 kubezoo 自己那份 ✅ | 同 ✅ |
+| 取自己的 GV 文档 | 72KB,残留前缀 0,`gvk.group=acme.io` ✅ | ✅ |
+| 取**对方**的 GV 文档 | —— | **404** ✅ |
+| 原生 GV 文档 | 仍由 kubezoo 自己服务 ✅ | ✅ |
+
+**验收(就是 M 的定义)**:
+
+```
+kubectl explain widget            → GROUP: acme.io / KIND: Widget / VERSION: v1
+kubectl explain widget.spec.size  → FIELD: size <string>
+租户 222222 explain widget        → the server doesn't have a resource type "widget"
+kubectl explain deployment.spec.replicas → 原生仍正常
+```
+
+服务给租户的 schema 与上游那份**逐字段相同**(含 `description`),只差前缀。
+
+⚠️ **差点误判**:改完第一次测,`explain` 仍然报一样的错 ——
+**kubectl 把 openapi 文档缓存在 `~/.kube/cache`**,拿的是旧的。
+`rm -rf ~/.kube/cache` 之后才是真结果。**客户端缓存会让服务端的修复看起来没生效。**
 
 ## 尚未覆盖
 

@@ -43,6 +43,11 @@ type fakeDiscoveryProxy struct {
 	apiGroupList    *metav1.APIGroupList
 	apiGroup        *metav1.APIGroup
 	apiResourceList *metav1.APIResourceList
+
+	// openAPIV3 is keyed by the path below /openapi/v3, the empty string being
+	// the group-version index.
+	openAPIV3    map[string][]byte
+	openAPIV3Err error
 }
 
 func (dp *fakeDiscoveryProxy) ServerGroups(tenantID string) (*metav1.APIGroupList, error) {
@@ -76,6 +81,10 @@ func (dp *fakeDiscoveryProxy) OpenAPISchema() (*openapi_v2.Document, error) {
 
 func (dp *fakeDiscoveryProxy) GetSwagger() (*spec.Swagger, error) {
 	return nil, nil
+}
+
+func (dp *fakeDiscoveryProxy) OpenAPIV3(path string, query url.Values) ([]byte, error) {
+	return dp.openAPIV3[path], dp.openAPIV3Err
 }
 
 // TestWithDiscoveryProxy checks some methods about discovery.
