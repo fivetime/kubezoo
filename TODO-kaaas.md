@@ -39,45 +39,70 @@
 - [x] controller-runtime `v0.24.1`、apiserver-runtime `v1.1.1`、structured-merge-diff `v4→v6` — `58959f1` `22e6133`
 - [x] `go mod tidy` 通过 — `58959f1`
 
-### 0.3 编译修复
+### 0.3 编译修复 ✅
 
 - [x] `pkg/` 全部 + `cmd/clusterresourcequota` 编译通过 — `58959f1` `22e6133` `6ce59fc`
-- [ ] **`cmd/kubezoo/app/customresource_handler.go`(5 个错误)** — **#88**,方法见下
-- [ ] `cmd/kubezoo/app/server.go`(6 个错误):`Features.ApplyTo` 参数、`genericConfig.Version` 已移除、
-      `storageFactoryConfig.Complete` 返回值数量
-- [ ] `go build ./...` 全绿
+- [x] `cmd/kubezoo/app/customresource_handler.go` — `ec1827f`(见 0.4)
+- [x] `cmd/kubezoo/app/server.go` — `60e130b`。实际改动比预估的三条多:
+      `Features.ApplyTo` 参数 / `genericConfig.Version` 移除 / `storageFactoryConfig.Complete` 返回值,
+      外加 `ToAuthorizationConfig` 加 error、authenticator `New` 收 ctx 返 5 值、
+      `HandlerChainWaitGroup` 拆分、`WithAuthentication` 加 RequestHeaderConfig、
+      `IsValidServiceAccountKeyFile` 移除
+- [x] `go build ./...` 全绿 — `60e130b`
 
-### 0.4 CRD handler 重新 fork(#88)
+### 0.4 CRD handler 重新 fork(#88)✅ — `ec1827f`
 
-它是上游同名文件的 fork,已与 1.36 **结构性脱节**。逐编译错误改会漏掉上游 900 多行演进
-(编译过但行为停在 1.24),而这个文件是 **CRD 的租户隔离路径**。
+按三方合并做完(base=上游 v1.24.0 / ours=kubezoo fork / theirs=上游 v1.36.3),
+14 个冲突块全解,约 900 行上游演进自动合入,文件 1450 → 1624 行。
 
-- [ ] 按**三方合并**解 14 个冲突块(base=上游 v1.24.0 / ours=kubezoo fork / theirs=上游 v1.36.3)
-      - 产物已在 `_output/refork/`(gitignore),复现命令在 #88
-      - ⚠️ 先看两个大块:**#11 行 1273-1348(76 行)、#12 行 1413-1468(56 行)**
-- [ ] 解冲突时保住 kubezoo 语义:CRD 名字/group 的租户前缀转换(`util.ConvertCRDNameToUpstream`)、
-      `getTenantCRD`、文件末尾新增的 ~55 行
-- [ ] 合并后确认这些**已解的改动没被回退**:fieldmanager→`apimachinery/util/managedfields`、
-      `StaticOpenAPISpec` 换 `map[string]*spec.Schema`、openapi V3、
-      `fieldpath.NewExcludeFilterSetMap`、ServerSideApply 门移除
-- [ ] 对齐仍未解的 1.36 API:`customresource.NewStorage` 返回 2 值、`NewStrategy` 参数表
-      (structural 由 map 变单个 + 末尾新增 `[]apiextensionsv1.SelectableField`)、
-      `NewSchemaValidator` 收 `*JSONSchemaProps`、`GetRESTOptions` 加参数
+- [x] 解 14 个冲突块
+- [x] kubezoo 语义全部保住:`getTenantCRD` / `util.ConvertCRDNameToUpstream` /
+      每个 verb 的 `proxyStorage` / nil admission 链 / `upstreamConfig`
+- [x] 确认已解的 1.36 改动没被回退(managedfields、`map[string]*spec.Schema`、
+      openapi V3、`NewExcludeFilterSetMap`、ServerSideApply 门移除)
+- [x] 对齐剩余 1.36 API(`GetRESTOptions` 加参数等)
+
+⭐ **解冲突时发现的两件事,值得记住**:
+
+1. **kubezoo 的 fork 基线其实比 1.24 更老** —— 它缺 `StrictSerializer`、缺
+   `StorageObjectCountTracker`、`unstructuredSchemaCoercer.apply` 还是单返回值。
+   所以多数"冲突"是基线错位造成的**假冲突**,upstream 侧直接就是对的。
+   顺带补回了整条 **unknown-field-paths / strict-decoding 管道**(此前完全没有)。
+2. **一处有意与上游分道**:上游 1.26 把"CRD terminating 时拒绝 create"从直接报错
+   改成用 `forbidCreateAdmission` 包住 admission 链。那个 wrapper 会解引用 delegate,
+   而 kubezoo 传的是 **nil admission 链**(admission 在上游 apiserver 跑),所以这里
+   保留直接拒绝。文件里有注释说明。
+3. `CRDRESTOptionsGetter` 本地副本已删 —— 上游挪了位置,`apiextensions.go` 早就在用
+   `apiextensionsoptions.NewCRDRESTOptionsGetter`。
 
 ### 0.5 收尾
 
+- [x] ⚠️⚠️ **`go test ./...`** —— 已跑,`make test` 全绿 — `60e130b`
+      - 单元测试全过;`pkg/controller` 集成测试在**真 etcd + kube-apiserver 1.36**
+        下通过(envtest 从 1.24 抬到 1.36,`ENVTEST_K8S_VERSION` / `SETUP_ENVTEST_VERSION`)
+      - `NewQuotaConfigurationForAdmission(nil, nil)` 传 nil:测试通过,但**没有构造
+        DRA 场景**去打那条唯一会解引用 informer factory 的分支
+      - 修掉的:client-go 聚合发现改写导致 `/apis` 响应丢 `kind`/`apiVersion`
+        (**真回归**,已确认兄弟端点 `/apis/{group}` 与 `/apis/{group}/{version}` 不受影响);
+        两处测试夹具的类型更名(gnostic→gnostic-models、PVC 的
+        `ResourceRequirements`→`VolumeResourceRequirements`)
+- [x] 二进制能启动 — `fe885dd`。⚠️ **"编译过 + 测试绿"没能挡住启动即 panic**:
+      `AddCustomGlobalFlags` 去全局 flagset 找 `default-not-ready-toleration-seconds`,
+      1.36 已把它挪进 `AdmissionOptions.AddFlags`,`globalflag.Register` 找不到就 panic。
+      整个函数已过时,连同 `globalflags.go` 一起删掉
 - [ ] `apigroups.go`(1225 行)按 1.36 **全面核对**资源/版本清单
       (目前只删了编译报错的 autoscaling v2beta1/v2beta2 与 PodSecurityPolicy)
 - [ ] `pkg/util/util.go` 的 `groupKindNamespaced` 表(60+ 条)按 1.36 更新
 - [ ] `make codegen` 重新生成 + `make verify-codegen` 通过
-- [ ] ⚠️⚠️ **`go test ./...`** —— 整个移植至今**唯一证据只有"能编译"**。重点验:
-      - `NewQuotaConfigurationForAdmission(nil, nil)` 两个新参传 nil 是否安全
-      - controller-runtime 事件处理器的泛型迁移
-      - CRD handler 的 openapi V2→V3 改动
+- [ ] **带证书 + 真实存储(KubeBrain)把 kubezoo 跑起来,发一个租户对象**
+      —— 目前最强证据止于"能启动、参数校验正常报错",**没有服务过一个真实请求**
 - [ ] 合并回 main
 
-> ⚠️ **方法学**:"还剩 N 个错误"**不是可靠进度指标** —— 每修好一处就暴露下一处
-> (server.go 曾 6→3→又 6)。已据此低估过一次工作量,排期时别按错误数估。
+> ⚠️ **方法学**,两条都在这次移植里应验了:
+> 1. **"还剩 N 个错误"不是可靠进度指标** —— 每修好一处就暴露下一处(server.go 曾
+>    6→3→又 6,最后实际改了 8 类 API 而不是预估的 3 类)。排期别按错误数估。
+> 2. **"能编译"和"测试绿"都不等于"能跑"** —— 全树编译通过、`make test` 全绿之后,
+>    二进制仍然启动即 panic。**每个移植里程碑都要真正执行一次产物**,而不是只看构建结果。
 
 ---
 
