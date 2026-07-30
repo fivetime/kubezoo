@@ -24,9 +24,20 @@ kubectl apply -f config/policy/
 装完确认**两类都在**:
 
 ```bash
-kubectl get clusterpolicy                    # Kyverno 的,应有 5 条,READY=True
-kubectl get validatingadmissionpolicy        # 原生的,应有 2 条
+kubectl get clusterpolicy                    # Kyverno 的,READY 必须全是 True
+kubectl get validatingadmissionpolicy        # 原生的,get clusterpolicy 看不到它们
 ```
+
+⚠️ **两个占位符,部署前必须替换**,否则策略要么拒掉一切、要么什么都不管:
+
+| 文件 | 占位符 | 换成 |
+|---|---|---|
+| `tenant-ingress-hostnames.yaml` | `TENANT_DOMAIN_SUFFIX` | 平台给租户分配子域的后缀 —— **不换的话租户的 Ingress 全被拒** |
+| `tenant-api-endpoint.yaml` | `KUBEZOO_ADDRESS_PLACEHOLDER` | kubezoo 在集群内的可达地址 |
+
+⚠️ 还有一个**不在策略里、在 kubezoo 启动参数上**的:
+`--public-ingress-classes=<平台的 IngressClass>`。**不设的话租户完全无法接入公网**
+(所有 class 都会被前缀化成租户私有的);设错则等于把公网入口的名字告诉错人。
 
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,
@@ -55,6 +66,8 @@ hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的�
 | `tenant-placement.yaml` | Kyverno | 租户可自选落点、跑到别人的节点池 |
 | `tenant-deny-binding.yaml` | **原生 VAP** | 租户可把 Pod 直接绑到别的租户节点 |
 | `tenant-frozen-deny-writes.yaml` | **原生 VAP** | **冻结只冻住租户的 kubectl**,它的 Pod 照常读写 |
+| `tenant-ingress-hostnames.yaml` | **原生 VAP** | 任何租户可抢任何主机名,**先到先得、落败方零报错** |
+| `tenant-api-endpoint.yaml` | Kyverno | 租户负载直连上游 ⇒ 冻结绕过、binding 绕过、operator 看不见自己的 CRD 组 |
 
 ### 1.1 ⚠️ 装完必须做一次存量修正
 
