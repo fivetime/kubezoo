@@ -2319,6 +2319,87 @@ user "admin" (groups=["kubezoo:proxied:111111" "system:authenticated"]) is attem
 租户拿不到这个组(kubezoo 前门会剥、上游也不信它的证书),所以**不是漏洞**,
 但它把内部机制的名字直接告诉了对手。未处理。
 
+## AQ. ⭐ ClusterRoleBinding 投影 ✅ 已实现 —— cert-manager 的 RBAC 现在**全量装得上**
+
+§AP 只做了角色那一半,cert-manager 的 10 条 ClusterRoleBinding 里 9 条还是被拒。
+这一节把另一半做完了。
+
+### 原则:租户说"集群级",意思是"**我所有的 namespace**"
+
+租户的 cluster 就是 kubezoo 给它的那组 namespace。真的 ClusterRoleBinding 意思是
+**共享集群里的每一个 namespace**,放行就等于把租户的 SA 授到别的租户的 namespace 里去。
+所以**不放行,而是投影**:租户的每一条 ClusterRoleBinding
+= **它每个 namespace 里的一条 RoleBinding**。
+
+⭐ **这条路不需要任何新特权。** 在 namespace 里绑一个 ClusterRole,上游问的是
+"你在这个 namespace 里持有这些规则吗" —— 租户在自己每个 namespace 里都是 `*` on `*`。
+所有投影写入都照常冒充租户上去。
+
+### 存储:其中一份副本就是**正本**
+
+正本放在租户的 `kube-system`(控制器发现该 namespace 缺失会重建,所以删不掉),
+名字是 `kubezoo:clusterrolebinding:<名字>`,带标签 `kubezoo.io/clusterrolebinding=true`。
+⇒ **get / list / watch 都只是对一个 namespace 的操作**,不用扇出。
+
+### 实测
+
+| | |
+|---|---|
+| **cert-manager v1.16.2 全部 33 个 RBAC 对象** | ✅ **33/33**(13 ClusterRole + 10 **ClusterRoleBinding** + 5 Role + 5 RoleBinding) |
+| 上游属于该租户的真 ClusterRoleBinding | **1 条**(kubezoo 自己的 `111111-cluster-admin`),租户那 10 条**一条都不存在** |
+| 租户视角 | `get`/`list` 都是集群级对象,10 条 |
+| cert-manager 的 SA `list secrets` | 租户各 namespace ✅ / 别的租户 ⛔ / `kube-system` ⛔ / `cert-manager` ⛔ / 集群级 ⛔ |
+| **事后新建的 namespace** | ✅ 自动补投影(namespace informer 秒级,不等 10 分钟 resync) |
+| 删除 | ✅ 所有 namespace 的授权同时消失 |
+
+### ⭐ 顺带打通:operator 的**集群级 LIST/WATCH** 之前是不通的
+
+投影让 SA 在每个 namespace 都有权限了,但 `get secrets -A` 仍然报:
+
+```
+namespaces is forbidden: User "system:serviceaccount:...:cm-cert-manager"
+cannot list resource "namespaces" at the cluster scope
+```
+
+**因为扇出要先列 namespace,而它是冒充调用者去列的。** 可"租户有哪些 namespace"是
+**kubezoo 自己的实现细节** —— 它就是把无 namespace 的请求拆成有 namespace 的请求的办法。
+改成以租户身份列举,**对调用者没有任何放权**:每个对象的读取仍然以调用者身份上去,
+读不到的 namespace 会被拒,整条请求随之失败 —— 和上游对一个无权的集群级 LIST 的处理一致。
+实测:只有单 namespace 权限的 SA 做 `-A` 仍然 Forbidden,**不会拿到一份"少了几条"的结果**。
+
+### 隐藏:否则"集群级"这个错觉当场破功
+
+投影在每个 namespace 都有一份,不隐藏的话租户 `kubectl get rolebindings -A`
+会看到每条 ClusterRoleBinding 的 N 份副本。所以 **kubezoo 独占 RoleBinding 的
+`kubezoo:` 名字空间**:这类对象在 RoleBinding 的 get/list/watch 里一律隐藏,租户也写不了同名的。
+
+### ⭐⭐ 这一步顺手修掉一个更早的、更严重的 bug
+
+隐藏的名单里还有 kubezoo 自己那条 `kubezoo:tenant-admin`。它引用的 ClusterRole
+`kubezoo:tenant-namespace-admin` **不带租户前缀**,而 Backward 转换遇到这种 roleRef 直接**报错** ——
+一个对象就让**整个 list 失败**:
+
+```
+$ kubectl get rolebindings          （租户视角,任何 namespace）
+Error from server: invalid roleRef name kubezoo:tenant-namespace-admin ...
+```
+
+⇒ **租户此前根本列不出自己的 RoleBinding。** 两处都改了:这类对象隐藏,
+且 Backward 遇到无法归属的 roleRef **原样返回而不是报错** —— 一个对象不该让整批读取失败。
+
+### ⚠️ 写入不是原子的,所以控制器是真相
+
+跨 N 个 namespace 的写没有原子性。请求路径**立即**投影(chart 装完马上就要用),
+控制器每次 resync 再对账:**以正本为准**,补缺失的、**删掉没有正本的孤儿副本**
+(否则"删了 ClusterRoleBinding 但某个 namespace 当时不可达"会留下一条谁也解释不了的授权)。
+
+### ⚠️ 副作用:被隐藏的那条不再是"撤销租户权限"的开关
+
+verify.sh 最后一条用"删掉 `kubezoo:tenant-admin` 看是否 Forbidden"来验证拒绝消息。
+现在租户**自己的投影**也在授权,删那一条已经拿不走 configmap 了 —— 探针改成了
+租户任何角色都没授的资源。**这是正确行为,不是回归**,但停机/吊销的实现要注意
+(#90):**撤销必须连租户自己的投影一起处理**。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

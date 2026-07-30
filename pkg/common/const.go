@@ -31,6 +31,15 @@ const (
 	TenantFrozenLabelKey = "kubezoo.io/frozen"
 
 	TenantQuotaNamePrefix = "kubezoo-tenant-quota"
+
+	// ProjectedClusterRoleBindingLabelKey marks the RoleBindings that carry a
+	// tenant's ClusterRoleBinding.
+	//
+	// A tenant's cluster is its namespaces, so its cluster-wide binding is one
+	// RoleBinding in each of them. The label is how those are told apart from
+	// the tenant's own RoleBindings, which share the namespace and must not
+	// appear when it lists ClusterRoleBindings -- nor the other way round.
+	ProjectedClusterRoleBindingLabelKey = "kubezoo.io/clusterrolebinding"
 )
 
 // ReservedClusterRoleNames are the upstream names kubezoo keeps for itself, per

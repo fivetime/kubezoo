@@ -60,6 +60,10 @@ type tenantProxy struct {
 	subresource      string
 	shortNames       []string
 	isCustomResource bool
+	// hideProjected is set on the RoleBinding endpoint a tenant talks to, and
+	// cleared on the inner proxy the ClusterRoleBinding projection drives --
+	// which is the same resource and must be able to see and write the records.
+	hideProjected bool
 
 	// NewFunc returns a new instance of the type this registry returns for a
 	// GET of a single object
@@ -127,6 +131,11 @@ func NewTenantProxy(config common.StorageConfig) (rest.Storage, error) {
 	if (config.Resource == "pods" || config.Resource == "services" || config.Resource == "nodes") && config.Subresource == "proxy" {
 		return pod.NewProxyREST(config.ProxyTransport, config.UpstreamMaster)
 	}
+	// A tenant's ClusterRoleBinding is not one upstream. See crbprojection.go.
+	if config.Resource == "clusterrolebindings" && config.Subresource == "" &&
+		config.Kind.Group == "rbac.authorization.k8s.io" {
+		return newClusterRoleBindingProjection(config)
+	}
 
 	if config.NewFunc == nil && config.NewListFunc == nil {
 		return nil, fmt.Errorf("both NewFunc and NewListFunc is nil")
@@ -141,9 +150,11 @@ func NewTenantProxy(config common.StorageConfig) (rest.Storage, error) {
 	}
 
 	proxy := &tenantProxy{
-		kind:                 config.Kind,
-		namespaceScoped:      config.NamespaceScoped,
-		isCustomResource:     config.IsCustomResource,
+		kind:             config.Kind,
+		namespaceScoped:  config.NamespaceScoped,
+		isCustomResource: config.IsCustomResource,
+		hideProjected: config.Resource == "rolebindings" && config.Subresource == "" &&
+			config.Kind.Group == "rbac.authorization.k8s.io",
 		resource:             config.Resource,
 		subresource:          config.Subresource,
 		shortNames:           config.ShortNames,
@@ -291,6 +302,11 @@ func (tp *tenantProxy) convertUnstructuredListToOutput(utdList *unstructured.Uns
 // Although it can return an arbitrary error value, IsNotFound(err) is true for the
 // returned error value err when the specified resource is not found.
 func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
+	if tp.servesRoleBindings() && util.IsManagedBindingName(name) {
+		// Hidden here, so reading one by name has to agree with listing.
+		return nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: tp.kind.Group, Resource: tp.resource}, name)
+	}
 	if tp.newFunc == nil {
 		return nil, fmt.Errorf("newFunc is nil")
 	}
@@ -405,6 +421,9 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	if err := tp.refuseReservedName(tenantID, utd.GetName()); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
+		return nil, false, err
+	}
 	if subresource := tp.subresource; subresource == "" {
 		got, created, err = client.Update(ctx, utd, *options)
 	} else if subresource == "status" {
@@ -474,6 +493,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseReservedName(tenantID, utd.GetName()); err != nil {
 		return nil, err
 	}
+	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
+		return nil, err
+	}
 
 	// 3. call create api
 	var got *unstructured.Unstructured
@@ -533,6 +555,9 @@ func (tp *tenantProxy) Delete(ctx context.Context, name string, _ rest.ValidateO
 
 	if !tp.namespaceScoped {
 		name = util.ConvertTenantObjectNameToUpstream(name, tenantID, tp.kind)
+	}
+	if err := tp.refuseProjectedName(name); err != nil {
+		return nil, false, err
 	}
 	if err := tp.refuseReservedName(tenantID, name); err != nil {
 		return nil, false, err
@@ -612,6 +637,7 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 		}
 		utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
 	}
+	utdList = tp.hideProjections(utdList)
 
 	// convert internal/unstructured list item one by one
 	for i := range utdList.Items {
@@ -643,6 +669,59 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 	}
 
 	return oupList, nil
+}
+
+// servesRoleBindings reports whether this proxy is the RoleBinding endpoint a
+// tenant talks to, rather than the inner one the ClusterRoleBinding projection
+// drives. They are the same resource, so the difference cannot be read off the
+// config.
+func (tp *tenantProxy) servesRoleBindings() bool {
+	return tp.hideProjected
+}
+
+// hideProjections drops the RoleBindings kubezoo keeps in a tenant's namespaces.
+//
+// The projections carrying ClusterRoleBindings live one per namespace, so
+// leaving them visible would put a copy of every ClusterRoleBinding into every
+// namespace of `kubectl get rolebindings -A`, and a tenant told they are
+// cluster-scoped would find several of each. Their own endpoint is where they
+// belong.
+//
+// The per-namespace admin binding goes too, and that fixes something worse than
+// noise: it references a ClusterRole with no tenant prefix, which the backward
+// transform refuses, so a single one of them failed the entire list. Measured --
+// a tenant could not list RoleBindings in its own namespace at all.
+func (tp *tenantProxy) hideProjections(list *unstructured.UnstructuredList) *unstructured.UnstructuredList {
+	if list == nil || !tp.servesRoleBindings() {
+		return list
+	}
+	kept := make([]unstructured.Unstructured, 0, len(list.Items))
+	for i := range list.Items {
+		if util.IsManagedBindingName(list.Items[i].GetName()) {
+			continue
+		}
+		kept = append(kept, list.Items[i])
+	}
+	list.Items = kept
+	return list
+}
+
+// refuseProjectedName stops a tenant writing one of the RoleBindings kubezoo
+// keeps for it.
+//
+// Namespaced objects carry no tenant prefix in their name -- only their
+// namespace does -- so without this a tenant could write a RoleBinding named
+// like a projection and take over what its own ClusterRoleBinding grants, in
+// one namespace or all of them, or overwrite the binding that grants it its own
+// namespace.
+func (tp *tenantProxy) refuseProjectedName(name string) error {
+	if !tp.servesRoleBindings() || !util.IsManagedBindingName(name) {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: tp.kind.Group, Resource: tp.resource}, name,
+		fmt.Errorf("this name belongs to a binding kubezoo keeps for your tenant; "+
+			"write the ClusterRoleBinding itself, or choose another name"))
 }
 
 // refuseReservedName stops a tenant addressing the cluster-scoped RBAC objects

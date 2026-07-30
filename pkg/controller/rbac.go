@@ -617,6 +617,90 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 			return fmt.Errorf("reconciling rolebinding in namespace %s: %w", ns.Name, err)
 		}
 	}
+
+	return syncProjectedClusterRoleBindings(coreClient, rbacClient, tenantId, namespaces.Items)
+}
+
+// syncProjectedClusterRoleBindings keeps a tenant's ClusterRoleBindings present
+// in every namespace it owns.
+//
+// A tenant's cluster is its namespaces, so its cluster-wide binding is one
+// RoleBinding in each of them; see pkg/proxy/crbprojection.go. The request path
+// writes the copies when the binding is created, because a chart expects its
+// workload to be able to act immediately, but that write is not atomic across
+// namespaces and cannot cover a namespace created later. This is what makes it
+// true rather than nearly true.
+//
+// The record in the tenant's kube-system is the source. A copy elsewhere with no
+// record is an orphan and is removed -- otherwise deleting a ClusterRoleBinding
+// while a namespace was unreachable would leave a grant behind with nothing in
+// the tenant's view to explain it.
+func syncProjectedClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface,
+	tenantId string, namespaces []corev1.Namespace) error {
+
+	recordNamespace := tenantId + "-" + metav1.NamespaceSystem
+	selector := labels.SelectorFromSet(labels.Set{common.ProjectedClusterRoleBindingLabelKey: "true"})
+	records, err := rbacClient.RoleBindings(recordNamespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// The namespace is on its way back; syncNamespaces recreates it.
+			return nil
+		}
+		return fmt.Errorf("listing tenant %s's projected clusterrolebindings: %w", tenantId, err)
+	}
+	wanted := make(map[string]*rbacv1.RoleBinding, len(records.Items))
+	for i := range records.Items {
+		wanted[records.Items[i].Name] = &records.Items[i]
+	}
+
+	for i := range namespaces {
+		ns := &namespaces[i]
+		if ns.Name == recordNamespace || ns.DeletionTimestamp != nil {
+			continue
+		}
+		existing, err := rbacClient.RoleBindings(ns.Name).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: selector.String(),
+		})
+		if err != nil {
+			return fmt.Errorf("listing projected clusterrolebindings in namespace %s: %w", ns.Name, err)
+		}
+		for j := range existing.Items {
+			name := existing.Items[j].Name
+			if _, keep := wanted[name]; !keep {
+				if err := rbacClient.RoleBindings(ns.Name).Delete(context.TODO(), name,
+					metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+					return fmt.Errorf("withdrawing orphaned projection %s from namespace %s: %w",
+						name, ns.Name, err)
+				}
+			}
+		}
+		for name, record := range wanted {
+			copied := record.DeepCopy()
+			copied.Namespace = ns.Name
+			copied.ResourceVersion = ""
+			copied.UID = ""
+			copied.CreationTimestamp = metav1.Time{}
+			copied.ManagedFields = nil
+			opts := reconciliation.ReconcileRoleBindingOptions{
+				RoleBinding: reconciliation.RoleBindingAdapter{RoleBinding: copied},
+				Client: reconciliation.RoleBindingClientAdapter{
+					Client: rbacClient, NamespaceClient: coreClient.Namespaces()},
+				Confirm: true,
+				// The record is the whole truth, so a subject removed from it
+				// has to disappear from the copies rather than linger.
+				RemoveExtraSubjects: true,
+			}
+			if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+				_, err := opts.Run()
+				return err
+			}); err != nil {
+				return fmt.Errorf("projecting clusterrolebinding %s into namespace %s: %w",
+					name, ns.Name, err)
+			}
+		}
+	}
 	return nil
 }
 

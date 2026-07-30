@@ -706,3 +706,42 @@ func IsReservedClusterName(tenantID, upstreamName string) bool {
 	}
 	return false
 }
+
+// projectedBindingPrefix begins the name of every RoleBinding that carries a
+// tenant's ClusterRoleBinding.
+//
+// The name has to differ from anything the tenant can write, because the
+// projections live in the same namespaces as the tenant's own RoleBindings and
+// a collision would let a tenant overwrite one, or forge one. Namespaced
+// objects do not get a tenant prefix -- only their namespace does -- so the
+// separation has to come from the name itself. Writes to it are refused; see
+// tenantProxy.refuseReservedName.
+const projectedBindingPrefix = "kubezoo:clusterrolebinding:"
+
+// ProjectedBindingName is the RoleBinding name carrying a ClusterRoleBinding.
+func ProjectedBindingName(clusterRoleBindingName string) string {
+	return projectedBindingPrefix + clusterRoleBindingName
+}
+
+// TrimProjectedBindingName recovers the ClusterRoleBinding name.
+func TrimProjectedBindingName(roleBindingName string) string {
+	return strings.TrimPrefix(roleBindingName, projectedBindingPrefix)
+}
+
+// IsProjectedBindingName reports whether a RoleBinding name is one of these.
+func IsProjectedBindingName(roleBindingName string) bool {
+	return strings.HasPrefix(roleBindingName, projectedBindingPrefix)
+}
+
+// IsManagedBindingName reports whether a RoleBinding is one kubezoo keeps in a
+// tenant's namespaces on its behalf, rather than one the tenant wrote.
+//
+// Two kinds: the per-namespace binding that grants the tenant its namespace, and
+// the projections carrying its ClusterRoleBindings. Both live in the tenant's
+// namespaces and neither is the tenant's to read or write, so kubezoo owns the
+// whole "kubezoo:" name space for RoleBindings -- which is also why a tenant's
+// own names, unprefixed because only namespaces carry the tenant prefix, cannot
+// collide with them.
+func IsManagedBindingName(roleBindingName string) bool {
+	return strings.HasPrefix(roleBindingName, kubezooGroupPrefix)
+}

@@ -461,19 +461,24 @@ rules:
     resources: ["things"]
     verbs: ["get"]
 EOF
-foreign_out=$($T apply -f - 2>&1 <<EOF
+$T apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: someone-elses}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: someone-elses}
 subjects: [{kind: ServiceAccount, name: default, namespace: default}]
 EOF
-)
-if grep -q "not currently held" <<<"$foreign_out"; then
-  ok "and it can only ever be bound inside the tenant's own namespaces, where that group has nothing"
+# Binding it is allowed and means nothing: a tenant's ClusterRoleBinding is
+# projected into its own namespaces, and the other tenant's custom resources are
+# not in them.
+if [ "$($K auth can-i list things.999999-elsewhere.example -n "$TID-default" \
+        --as="system:serviceaccount:$NS:default" 2>/dev/null)" = yes ] &&
+   [ "$($K auth can-i list things.999999-elsewhere.example -n 999999-default \
+        --as="system:serviceaccount:$NS:default" 2>/dev/null)" = no ]; then
+  ok "and binding it reaches only the tenant's own namespaces, where that group has nothing"
 else
-  bad "it can only ever be bound inside the tenant's own namespaces" \
-      "got: $(tr '\n' ' ' <<<"$foreign_out" | cut -c1-160)"
+  bad "binding it reaches only the tenant's own namespaces" \
+      "elsewhere=$($K auth can-i list things.999999-elsewhere.example -n 999999-default --as="system:serviceaccount:$NS:default" 2>/dev/null)"
 fi
 
 # The sharpest form of the containment: grant yourself bind and escalate on
@@ -495,19 +500,19 @@ metadata: {name: self-help}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: self-help}
 subjects: [{kind: User, name: admin, apiGroup: rbac.authorization.k8s.io}]
 EOF
-selfhelp_out=$($T apply -f - 2>&1 <<EOF
+$T apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata: {name: self-help}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: shared-secrets}
 subjects: [{kind: ServiceAccount, name: default, namespace: default}]
 EOF
-)
-if grep -qi "forbidden" <<<"$selfhelp_out"; then
-  ok "granting itself bind in its own namespace does not reach a cluster-scoped verb"
+# Whatever it grants itself, no object that spans the cluster comes out of it.
+if [ "$($K get clusterrolebinding --no-headers 2>/dev/null | grep -c "^$TID-")" = 1 ]; then
+  ok "and nothing it grants itself produces a binding that spans the cluster"
 else
-  bad "granting itself bind in its own namespace does not reach a cluster-scoped verb" \
-      "the ClusterRoleBinding went through: $(tr '\n' ' ' <<<"$selfhelp_out" | cut -c1-160)"
+  bad "nothing it grants itself produces a binding that spans the cluster" \
+      "upstream now has $($K get clusterrolebinding --no-headers 2>/dev/null | grep "^$TID-" | tr '\n' ' ')"
 fi
 
 echo
@@ -837,19 +842,14 @@ fi
 # The containment: a ClusterRole grants nothing until it is bound, and binding
 # this one cluster-wide would reach every tenant's namespaces. The exemption is
 # deliberately not asserted here, so upstream refuses it exactly as before.
-crb_out=$($T apply -f - 2>&1 <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: chart-binding}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
-subjects: [{kind: ServiceAccount, name: default, namespace: default}]
-EOF
-)
-if grep -q "not currently held" <<<"$crb_out"; then
-  ok "binding that same role cluster-wide is still refused, which is the whole containment"
+# Binding it across the tenant's cluster is a projection, never an upstream
+# ClusterRoleBinding -- that is what keeps a role the tenant wrote from reaching
+# anyone else's namespaces. The ClusterRoleBinding block below measures it.
+if [ "$($K get clusterrolebinding --no-headers 2>/dev/null | grep -c "^$TID-")" = 1 ]; then
+  ok "and writing it created no cluster-spanning object, only the role"
 else
-  bad "binding that same role cluster-wide is still refused" \
-      "got: $(tr '\n' ' ' <<<"$crb_out" | cut -c1-160)"
+  bad "writing it created no cluster-spanning object" \
+      "upstream has $($K get clusterrolebinding --no-headers 2>/dev/null | grep "^$TID-" | tr '\n' ' ')"
 fi
 
 # The escape §AC measured: the tenant's ClusterRole named cluster-admin is the
@@ -872,6 +872,131 @@ else
 fi
 
 echo
+echo "== a ClusterRoleBinding is cluster-scoped to the tenant and its namespaces only =="
+# What a tenant means by cluster-wide is "all of my namespaces". A real
+# ClusterRoleBinding means every namespace in the shared cluster, so the tenant's
+# is projected into one RoleBinding per namespace it owns instead. See
+# pkg/proxy/crbprojection.go.
+$T -n default create serviceaccount crb-op >/dev/null 2>&1
+expect_allowed "a tenant can create one at all, which upstream refuses outright" \
+  $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: crb-op}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
+subjects: [{kind: ServiceAccount, name: crb-op, namespace: default}]
+EOF
+
+if [ "$($T get clusterrolebinding crb-op -o jsonpath='{.metadata.name}' 2>/dev/null)" = crb-op ] &&
+   $T get clusterrolebinding --no-headers 2>/dev/null | grep -q '^crb-op'; then
+  ok "and reads it back as a cluster-scoped object, by name and in a listing"
+else
+  bad "and reads it back as a cluster-scoped object" \
+      "get='$($T get clusterrolebinding crb-op -o jsonpath='{.metadata.name}' 2>&1 | tr '\n' ' ' | cut -c1-100)'"
+fi
+
+# The point of the exercise: no such object exists upstream, because one would
+# span every tenant.
+if [ "$($K get clusterrolebinding "$TID-crb-op" --no-headers 2>&1 | grep -c NotFound)" = 1 ]; then
+  ok "while upstream has no ClusterRoleBinding of its own, which is the whole reason for this"
+else
+  bad "upstream has no ClusterRoleBinding of its own" \
+      "$TID-crb-op exists upstream and grants in every tenant's namespaces"
+fi
+
+crb_sa="system:serviceaccount:$NS:crb-op"
+# The authorizer answers from a cache that lags the write, so poll rather than
+# ask once -- measured at roughly 300ms, but a loaded apiserver takes longer.
+reachable=missing
+for _ in $(seq 20); do
+  reachable=yes
+  for ns in "$TID-default" "$TID-kube-system" "$TID-kube-public"; do
+    [ "$($K auth can-i get secrets -n "$ns" --as="$crb_sa" 2>/dev/null)" = yes ] || reachable="missing $ns"
+  done
+  [ "$reachable" = yes ] && break
+  sleep 2
+done
+if [ "$reachable" = yes ]; then
+  ok "the grant reaches every namespace the tenant owns"
+else
+  bad "the grant reaches every namespace the tenant owns" "$reachable"
+fi
+if [ "$($K auth can-i get secrets -n kube-system --as="$crb_sa" 2>/dev/null)" = no ] &&
+   [ "$($K auth can-i get secrets -n default --as="$crb_sa" 2>/dev/null)" = no ]; then
+  ok "and no further -- a real ClusterRoleBinding would have reached the platform's own namespaces"
+else
+  bad "the grant reaches no further than the tenant" "it reaches the platform's namespaces"
+fi
+
+# A namespace created after the binding has to get it too, or the tenant's
+# cluster-wide grant would quietly not be.
+$T create namespace crb-later >/dev/null 2>&1
+projected=no
+for _ in $(seq 30); do
+  if [ "$($K auth can-i get secrets -n "$TID-crb-later" --as="$crb_sa" 2>/dev/null)" = yes ]; then
+    projected=yes; break
+  fi
+  sleep 2
+done
+if [ "$projected" = yes ]; then
+  ok "a namespace created afterwards is covered too"
+else
+  bad "a namespace created afterwards is covered too" \
+      "namespace phase=$($K get ns "$TID-crb-later" -o jsonpath='{.status.phase}' 2>&1), projections there: $($K -n "$TID-crb-later" get rolebindings --no-headers 2>&1 | tr '\n' ' ' | cut -c1-120)"
+fi
+
+# The projections must not show up as RoleBindings, or the tenant would find a
+# copy of every ClusterRoleBinding in every namespace it looks at.
+if ! $T get rolebindings -A --no-headers 2>/dev/null | grep -q "kubezoo:"; then
+  ok "the projections do not appear among the tenant's own RoleBindings"
+else
+  bad "the projections do not appear among the tenant's own RoleBindings" \
+      "$($T get rolebindings -A --no-headers 2>/dev/null | grep kubezoo: | head -2 | tr '\n' ' ')"
+fi
+expect_denied "nor can the tenant write one by name" "kubezoo keeps for your tenant" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: "kubezoo:clusterrolebinding:crb-op"}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
+subjects: [{kind: ServiceAccount, name: crb-op, namespace: default}]
+EOF
+
+# The reason any of this matters: an operator reads across its whole cluster.
+$T -n default create secret generic crb-probe --from-literal=a=b >/dev/null 2>&1
+$T -n crb-later create secret generic crb-probe --from-literal=a=b >/dev/null 2>&1
+CRBTOK=$($K -n "$NS" create token crb-op --duration=10m 2>/dev/null)
+if [ -n "$CRBTOK" ]; then
+  CRBKC=$LAB/verify-crb-sa.kubeconfig; rm -f "$CRBKC"
+  kubectl --kubeconfig "$CRBKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
+    --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+  kubectl --kubeconfig "$CRBKC" config set-credentials sa --token="$CRBTOK" >/dev/null
+  kubectl --kubeconfig "$CRBKC" config set-context c --cluster=zoo --user=sa >/dev/null
+  kubectl --kubeconfig "$CRBKC" config use-context c >/dev/null
+  seen=$(kubectl --kubeconfig "$CRBKC" get secrets -A --no-headers 2>/dev/null | grep -c crb-probe)
+  if [ "$seen" -ge 2 ]; then
+    ok "an operator ServiceAccount reads across the tenant's namespaces with it ($seen)"
+  else
+    bad "an operator ServiceAccount reads across the tenant's namespaces with it" \
+        "saw $seen of 2: $(kubectl --kubeconfig "$CRBKC" get secrets -A 2>&1 | head -1 | cut -c1-140)"
+  fi
+  rm -f "$CRBKC"
+fi
+
+# Deleting it has to withdraw the grant everywhere, not just where the record is.
+$T delete clusterrolebinding crb-op >/dev/null 2>&1
+withdrawn=yes
+for ns in "$TID-default" "$TID-kube-system" "$TID-crb-later"; do
+  [ "$($K auth can-i get secrets -n "$ns" --as="$crb_sa" 2>/dev/null)" = no ] || withdrawn="still granted in $ns"
+done
+if [ "$withdrawn" = yes ]; then
+  ok "deleting it withdraws the grant from every namespace"
+else
+  bad "deleting it withdraws the grant from every namespace" \
+      "$withdrawn -- a copy left behind still grants, and nothing in the tenant's view explains it"
+fi
+
+echo
 echo "== a tenant cannot grant anything to an identity it does not own =="
 # Group subjects used to pass through unrewritten while User and ServiceAccount
 # subjects were prefixed. Measured before this: a tenant bound system:authenticated
@@ -890,7 +1015,8 @@ metadata: {name: give-away}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: give-away}
 subjects: [{kind: Group, name: "system:authenticated", apiGroup: rbac.authorization.k8s.io}]
 EOF
-landed=$($K get clusterrolebinding "$TID-give-away" -o jsonpath='{.subjects[0].name}' 2>/dev/null)
+landed=$($K -n "$TID-kube-system" get rolebinding "kubezoo:clusterrolebinding:give-away" \
+  -o jsonpath='{.subjects[0].name}' 2>/dev/null)
 if [ -n "$landed" ] && [ "$landed" != "system:authenticated" ]; then
   ok "a foreign group named as a subject is prefixed into one with no members"
 else
@@ -1128,7 +1254,10 @@ fi
 # on work that had nothing to do with it.
 $K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
 sleep 2
-denied_out=$($T get configmap kube-root-ca.crt 2>&1)
+# Not a configmap: the tenant's own ClusterRoleBinding grants those across its
+# namespaces now, so withdrawing the binding kubezoo issues no longer takes them
+# away -- which is correct, and would make this measure nothing.
+denied_out=$($T get serviceaccount default 2>&1)
 if grep -q -i forbidden <<<"$denied_out"; then
   ok "a genuine denial in an existing namespace is still Forbidden"
 else

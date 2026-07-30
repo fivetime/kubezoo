@@ -27,6 +27,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/endpoints/request"
 
 	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/util"
@@ -94,6 +96,37 @@ func decodeFanoutContinue(token string) (fanoutContinue, error) {
 
 var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 
+// asTenantAdmin returns a context that enumerates the tenant's namespaces as the
+// tenant rather than as whoever asked.
+//
+// Which namespaces a tenant has is kubezoo's own business: it is how a request
+// with no namespace gets turned into requests that have one. Doing it as the
+// caller made it the caller's business, and a ServiceAccount does not hold
+// namespaces at cluster scope -- measured, an operator's cluster-wide list of
+// secrets came back "cannot list resource namespaces at the cluster scope",
+// naming an object it never asked for.
+//
+// This grants the caller nothing. Every read of the objects themselves still
+// goes up as the caller, so a namespace it may not read is refused, and the
+// refusal fails the whole list exactly as a cluster-wide list it is not entitled
+// to would fail upstream. The tenant's namespace names are all it could learn,
+// and it is inside that tenant.
+func asTenantAdmin(ctx context.Context, tenantID string) context.Context {
+	caller, ok := request.UserFrom(ctx)
+	if !ok {
+		return ctx
+	}
+	extra := map[string][]string{}
+	for key, value := range caller.GetExtra() {
+		extra[key] = value
+	}
+	extra[util.TenantIDKey] = []string{tenantID}
+	return request.WithUser(ctx, &user.DefaultInfo{
+		Name:  util.TenantAdminUser(tenantID),
+		Extra: extra,
+	})
+}
+
 // tenantNamespaces returns the tenant's namespaces in a stable order, together
 // with the revision they were read at.
 //
@@ -103,6 +136,7 @@ var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespa
 // it did when it was written -- which is the way this actually goes wrong, not
 // the objects themselves.
 func (tp *tenantProxy) tenantNamespaces(ctx context.Context, tenantID, atRevision string) ([]string, string, error) {
+	ctx = asTenantAdmin(ctx, tenantID)
 	options := metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", common.TenantNamespaceLabelKey, tenantID),
 	}

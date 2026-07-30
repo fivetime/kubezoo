@@ -65,12 +65,13 @@ func (t *RoleBindingTransformer) Backward(obj runtime.Object, tenantID string) (
 	if err := transformSubjectList(roleBinding.Subjects, tenantID, transformSubjectToTenant); err != nil {
 		return nil, errors.WithMessagef(err, "failed to transform subjects to tenant for roleBinding %s/%s", roleBinding.Namespace, roleBinding.Name)
 	}
-	if roleBinding.RoleRef.Kind == "ClusterRole" {
-		if !strings.HasPrefix(roleBinding.RoleRef.Name, tenantID) {
-			return nil, errors.Errorf("invalid roleRef name %s in roleBinding %s, tenant id is %s", roleBinding.RoleRef.Name, roleBinding.Name, tenantID)
-		}
+	if roleBinding.RoleRef.Kind == "ClusterRole" && strings.HasPrefix(roleBinding.RoleRef.Name, tenantID) {
 		roleBinding.RoleRef.Name = util.TrimTenantIDPrefix(tenantID, roleBinding.RoleRef.Name)
 	}
+	// A roleRef without the tenant's prefix names a ClusterRole the tenant did
+	// not write, and it used to be an error -- which failed the whole list, not
+	// just the one object. Reading it back as it is says what is really there;
+	// refusing said nothing about any of the tenant's own bindings either.
 	return roleBinding, nil
 }
 

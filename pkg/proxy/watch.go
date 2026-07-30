@@ -91,6 +91,12 @@ func (w *proxyWatch) proxy() {
 				if !util.UpstreamObjectBelongsToTenant(obj, w.tenantID, w.tenantProxy.namespaceScoped) {
 					continue
 				}
+				if accessor, ok := obj.(interface{ GetName() string }); ok &&
+					w.tenantProxy.servesRoleBindings() && util.IsManagedBindingName(accessor.GetName()) {
+					// Hidden from list and get, so hidden here too; a watcher
+					// that saw them would build a cache that disagrees.
+					continue
+				}
 
 				utd := obj.(*unstructured.Unstructured)
 				output := w.tenantProxy.New()

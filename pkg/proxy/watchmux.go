@@ -162,7 +162,10 @@ func (m *watchMux) followNamespaces(ctx context.Context, tp *tenantProxy) error 
 	}
 	options.LabelSelector = tenantNamespaceSelector(m.tenantID)
 
-	w, err := tp.dynamicClient.Resource(namespaceGVR).Watch(ctx, options)
+	// As the tenant, for the same reason the list enumerates them that way: which
+	// namespaces exist is kubezoo's business, and the streams opened on them are
+	// still the caller's.
+	w, err := tp.dynamicClient.Resource(namespaceGVR).Watch(asTenantAdmin(ctx, m.tenantID), options)
 	if err != nil {
 		return err
 	}

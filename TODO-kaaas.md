@@ -153,11 +153,22 @@
       三条绑定路径全堵(自己 ns 的 RoleBinding 允许且只在该 ns 生效 / ClusterRoleBinding 照拒 /
       先自授 bind 再试仍拒 —— RoleBinding 授不了集群级资源)。
       `refuseReservedName` 覆盖 **apply + patch 两条**写入口。守卫红测恰好红 8 条
-- [ ] ⛔ **剩下的一半:ClusterRoleBinding**(cert-manager **仍装不上**,10 条里 9 条被拒)
-      租户说"集群级"= "我所有的 namespace" ⇒ 忠实翻译是**投影成每 namespace 一条 RoleBinding**。
-      ⚠️ **不能直接放行成真 ClusterRoleBinding**(那是跨所有租户 namespace,灾难)。
-      三个待解:读回 / 新 ns 补投影 / 更新删除传播。
-      投影后的集群级 LIST/WATCH 正好落在已做好的 `fanout.go` + `watchmux.go` 上
+- [x] ✅ **另一半也做完了:ClusterRoleBinding 投影**(审计 §AQ)
+      租户说"集群级"= "我所有的 namespace" ⇒ 每条 ClusterRoleBinding **投影成每 namespace 一条
+      RoleBinding**;正本放租户的 kube-system(控制器会重建该 ns,删不掉),
+      get/list/watch 都只读那一个 namespace。**不需要任何新特权**。
+      ⭐ **cert-manager v1.16.2 的 33 个 RBAC 对象现在 33/33 全部装得上**;
+      上游属于该租户的真 ClusterRoleBinding 仍然只有 kubezoo 自己那 1 条。
+      事后新建的 namespace 自动补投影(namespace informer,不等 10min resync);删除全量撤销
+- [x] ✅ **顺带打通 operator 的集群级 LIST/WATCH**:扇出要先列 namespace,原先冒充调用者去列 ⇒
+      SA 报 `cannot list namespaces at the cluster scope`。改为**以租户身份列举**
+      (对象读取仍以调用者身份 ⇒ 对调用者零放权;无权的 SA 做 `-A` 仍 Forbidden,不会拿到短结果)
+- [x] ✅ **修掉一个更早的严重 bug:租户此前列不出自己的 RoleBinding**
+      kubezoo 自己的 `kubezoo:tenant-admin` 引用的 ClusterRole 不带租户前缀,
+      Backward 转换直接报错 ⇒ **一个对象让整个 list 失败**。两处都改:
+      `kubezoo:` 名字空间的 RoleBinding 一律隐藏 + 无法归属的 roleRef 原样返回而不是报错
+- [ ] ⚠️ **#90 停机/吊销要连租户自己的投影一起撤**(§AQ 末):
+      删掉 kubezoo 发的 `kubezoo:tenant-admin` 已经不足以拿走权限了
 - [x] ✅ **P0:租户能给它不拥有的身份授权**(审计 §AO,做 §AP 时撞出来的)
       `transformSubjectToUpstream` 对 Group 主体**只改写 `system:serviceaccounts:<ns>`**,
       别的组名原样落上游 ⇒ 租户把 `system:authenticated` 绑上自己的角色,
