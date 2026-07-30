@@ -380,6 +380,13 @@ merge patch 置 null、json patch remove、改成别的租户 id)上游标签一
 这正是 §8.1 铁律要反向写(exclude 平台自身 namespace)的原因:
 **判据只能建立在租户改不动的东西上**。
 
+## 7.9 租户 `-A` 的扇出
+
+设计见 `design-list-fanout-cn.md`。要点:**没有语义让步** ——
+原生分页本来就把整轮 LIST 钉在一个 revision 上(`continue` token 里带 rv),
+扇出用 `resourceVersionMatch=Exact` 照抄即可;成本从 O(集群) 降到 O(租户)。
+⭐ 它同时是**租户自装 operator 的必需件**(cluster-wide informer 走这条路)。
+
 ## 8. 准入策略层
 
 ### 8.0 ⭐ 职责划分判据(kubezoo vs 策略层)
