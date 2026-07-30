@@ -1508,7 +1508,9 @@ RoleBinding 的多租户模型都撞同一堵墙。
   改成逐 namespace 扇出后,`-A` 从 `Forbidden ... at the cluster scope` 变成正常返回 ——
   逐 namespace 读租户有权限,全集群读没有。实现 `pkg/proxy/fanout.go`,
   设计 `design-list-fanout-cn.md`,实测前后对照见架构文档 §7.2。
-  ⚠️ **只改了 LIST**:`-A` 的 **watch** 与 **cluster 级资源**仍走全集群老路
+  `-A` 的 **watch** 也已改为多路复用(`pkg/proxy/watchmux.go`)。
+  ⚠️ 仍未改的只有 **cluster 级资源**(全量 + 前缀过滤)—— **有意保留**:
+  标签下推方案实测会让所有存量对象从租户视角消失,见 `design-list-fanout-cn.md` §6
 - 跨租户 Ingress host/path 抢占:一旦两租户都接到平台 ingress 控制器上(见 I②),
   归属由控制器裁决,kubezoo 不参与 —— 未测,属 3.1 策略层
 - 租户自建 webhook 的 `failurePolicy: Fail` 对平台组件的影响面(已限 Namespaced + 本租户 ns,
