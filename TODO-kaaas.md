@@ -107,14 +107,20 @@
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
-- [ ] ⛔ **P0 前置实现:kubezoo 认不了 in-cluster ServiceAccount token**(审计 §Y,实测 401)
-      根因:**从未设置 `ServiceAccountTokenGetter`**(全仓 grep 只在生成的 openapi 里出现),
-      而 1.21 之后 kubelet 投射的全是绑定型 token,没有 getter 就验不了。
-      `WithTenantInfo`(SA → 租户)那一半**已经有了**,是 1.24 fork 时代为这条路留的。
-      ⇒ **实现缺口,不是架构问题**:kubezoo 本就有到上游的客户端,接上
-      `serviceaccountcontroller.NewGetterFromClient(...)` 即可。
-      ⭐ 通了之后顺带解决:§X③ operator 组名错位、**每租户不同 operator 版本**、
-      §T 冻结绕过、§Q/§S binding 绕过 —— **四个已知缺口一次性从根上消失**
+- [x] ✅ **kubezoo 现在能认 in-cluster ServiceAccount token**(审计 §Y,已实测)
+      原因是从未设置 `ServiceAccountTokenGetter`(1.24 fork 时代的遗留:那时非绑定 token 还在)。
+      修法:`cmd/kubezoo/app/tokengetter.go` 用已有的上游客户端实现,在
+      `applyAuthenticationOptions` 接上。⚠️ 不能用上游的 `NewGetterFromClient`(无条件解引用 lister);
+      ⚠️ 必须走原生上游客户端,不能走转换层。
+      ⚠️ **配置前提:`--service-account-issuer`/`--api-audiences` 必须等于上游的**,
+      `up.sh` 已改成从上游读。守卫 `verify.sh` 第 22/23 条,已验证会红。
+      **实测**:Pod 内用 SA token 打 kubezoo → `/apis/example.com/v1` 200、建 Widget 201、
+      上游落地 `widgets.111111-example.com`
+
+- [ ] **接下来验证这条路真的能兜住四个缺口**(逐条重测):
+      §X③ operator 组名错位 / **每租户不同 operator 版本** / §T 冻结绕过 / §Q/§S binding 绕过。
+      ⚠️ 前提是**租户负载真的都走 kubezoo** —— 需要用 mutate 策略注入
+      `KUBERNETES_SERVICE_HOST`(podspec env 压过 kubelet 注入的),**未测**
 
 - [ ] ⛔⛔ **P0 产品问题:租户自己装 operator 走不通**(审计 §X,cert-manager 实测)
       三个坎:`helm --create-namespace` 不建 ns;**任何带 ClusterRole 的 chart 都装不上**

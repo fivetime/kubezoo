@@ -1278,7 +1278,7 @@ GET /apis/111111-example.com/v1   →  HTTP 200      ← 上游实际存的
 **租户的每一个 Pod 都卡在 Pending**。这是 fail-closed,是对的 ——
 但**症状是"Pod 不调度",没有任何东西指向策略**。运维手册已记。
 
-## Y. 最小验证:把租户负载指向 kubezoo —— 卡在**认证**,而且缺口很具体
+## Y. 把租户负载指向 kubezoo ✅ **已打通**(SA token 认证缺口已修)
 
 **要验的**:让 operator(以及所有租户 Pod)用自己的 ServiceAccount token 打 **kubezoo**
 而不是上游,这样它看到的就是**去前缀的视图**,§X 那三个坎里最要命的第 ③ 条就消失,
@@ -1295,28 +1295,56 @@ tenantID, err := util.GetTenantIDFromNamespace(namespace)
 
 `system:serviceaccount:111111-default:default` → 租户 `111111`。设计上就是为这条路准备的。
 
-### ⛔ 但认证这一半是断的
+### ⛔ 认证这一半原先是断的 —— 已修
 
-lab 里把 kubezoo 的 `--service-account-issuer` / `--api-audiences` 对齐上游
-(`https://kubernetes.default.svc.cluster.local`),从租户 Pod 内实测:
+lab 里把 kubezoo 的 `--service-account-issuer` / `--api-audiences` 对齐上游后,
+从租户 Pod 内实测仍然 **401**:
 
-| | 结果 |
-|---|---|
-| 网络可达性(Pod → `172.18.0.1:6443`) | ✅ 通,拿到的是 kubezoo 返回的正经 Status |
-| SA token 认证 | ⛔ **401** |
-| kubezoo 日志 | `invalid bearer token, Internal error occurred: **authentication failed unexpectedly**` |
+```
+invalid bearer token, Internal error occurred: authentication failed unexpectedly
+```
 
 **根因**:kubezoo **从未设置 `ServiceAccountTokenGetter`** ——
-全仓 grep 只在生成的 openapi 里出现过这个名字。
-而上游 kube-apiserver 是设置的(`pkg/kubeapiserver/options/authentication.go:712/719`,
-从 informer 或 client 构造)。
+全仓 grep 只在生成的 openapi 里出现过这个名字。上游 kube-apiserver 是设的
+(`pkg/kubeapiserver/options/authentication.go:712/719`,从 informer 或 client 构造)。
+没有它,**绑定型 token 无法验证**,而 1.21 之后 kubelet 投射的全是绑定型。
+`WithTenantInfo` 应该是 1.24 那个 fork 时代留下的 —— 那时非绑定 token 还在,这条路是通的。
 
-没有它,**绑定型 token 无法验证** —— 而 1.21 之后 kubelet 投射的就全是绑定型。
-`WithTenantInfo` 大概率是 1.24 那个 fork 时代留下的:那时还有非绑定 token,能走通。
+### ✅ 修法与实测
 
-⇒ **这是实现缺口,不是架构问题。** kubezoo 本来就有到上游的客户端(它代理一切),
-把 `serviceaccountcontroller.NewGetterFromClient(...)` 接上去即可;
-绑定对象(pod / node / secret)本来就在上游,查得到。
+`cmd/kubezoo/app/tokengetter.go`:用 kubezoo **已有的**上游客户端
+(`ProxyConfig.typedClientSet`)实现 `ServiceAccountTokenGetter` 的六个方法,
+在 `applyAuthenticationOptions` 里接上。
+
+⚠️ 不能直接用上游的 `serviceaccountcontroller.NewGetterFromClient` ——
+它无条件解引用 lister,而 kubezoo 不跑对上游的 informer。
+⚠️ getter 必须走**原生上游客户端**,不能走 kubezoo 自己的转换层:
+token 里的名字(`111111-default` / `default`)本来就是上游名字,再前缀一次就查不到了。
+
+**实测(从租户 Pod 内,只用它自己的 ServiceAccount token)**:
+
+| | 打上游 | 打 kubezoo |
+|---|---|---|
+| SA token 认证 | — | ✅ **200**(修前 401) |
+| `/apis/example.com/v1` | ⛔ 404 | ✅ **200**,返回 `widgets` |
+| `/apis/111111-example.com/v1` | 200 | 200 |
+| **建一个 Widget** | — | ✅ **HTTP 201** |
+| 上游实际落地 | — | ✅ `widgets.111111-example.com` in `111111-default` |
+
+⇒ **operator 用自己的 SA token 打 kubezoo,就能按代码里写死的组名发现并读写自己的 CR。**
+
+守卫在 `hack/lab/verify.sh`(第 22、23 条),**已验证摘掉接线会红,且只红这两条**。
+
+⚠️ **配置前提**:kubezoo 的 `--service-account-issuer` / `--api-audiences`
+**必须等于上游的**(它本来就用上游的 SA 密钥签名)。`up.sh` 现在从上游 apiserver 读出来,
+不再硬编码 `foo`。
+
+### ⭐ 方法学:第一次"红测"是无效的
+
+摘掉接线跑套件确实红了 —— 但我用的重启脚本是 scratchpad 里的旧版本,
+还带着 `--service-account-issuer=foo`。**那次的 401 可能来自 issuer 不匹配,而不是我摘掉的东西。**
+用正确的 flag 重做,才确认"只摘 getter ⇒ 恰好这两条红"。
+**判据:红测里除了被测的那一处,其它条件必须和绿测完全一致。**
 
 ### 这条路一旦通了,顺带解决的
 

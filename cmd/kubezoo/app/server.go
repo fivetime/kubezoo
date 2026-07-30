@@ -735,7 +735,11 @@ func buildGenericConfig(
 	genericConfig.BuildHandlerChainFunc = NewBuildHandlerChanFunc(discoveryProxy,
 		controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Lister())
 
-	if lastErr = applyAuthenticationOptions(utilwait.ContextForChannel(genericConfig.DrainedNotify()), s.Authentication, genericConfig); lastErr != nil {
+	// The upstream client goes in so that ServiceAccount tokens can be
+	// authenticated: validating a bound token means reading the pod and service
+	// account it names, and those live upstream under their real names.
+	if lastErr = applyAuthenticationOptions(utilwait.ContextForChannel(genericConfig.DrainedNotify()),
+		s.Authentication, genericConfig, proxyConfig.typedClientSet); lastErr != nil {
 		return
 	}
 
@@ -769,10 +773,26 @@ func buildGenericConfig(
 	return
 }
 
-func applyAuthenticationOptions(ctx context.Context, o *kubeoptions.BuiltInAuthenticationOptions, genericConfig *server.Config) error {
+func applyAuthenticationOptions(ctx context.Context, o *kubeoptions.BuiltInAuthenticationOptions,
+	genericConfig *server.Config, upstreamClient kubernetes.Interface) error {
 	authenticatorConfig, err := o.ToAuthenticationConfig()
 	if err != nil {
 		return err
+	}
+
+	// Without this, kubezoo cannot authenticate a ServiceAccount token at all.
+	// ToAuthenticationConfig leaves the getter nil, and upstream fills it in
+	// from its informers; every token the kubelet projects is bound to a pod,
+	// and validating a bound token needs to read that pod. Missing, the
+	// validator returns "authentication failed unexpectedly" and a tenant's own
+	// workload cannot reach kubezoo -- which is the only way a workload gets the
+	// tenant's view of the API rather than the upstream one.
+	//
+	// The tenant is then derived from the ServiceAccount's namespace by
+	// WithTenantInfo, which has been waiting for this.
+	if upstreamClient != nil {
+		authenticatorConfig.ServiceAccountTokenGetter = newUpstreamTokenGetter(upstreamClient)
+		authenticatorConfig.SecretsWriter = upstreamClient.CoreV1()
 	}
 
 	authInfo := &genericConfig.Authentication

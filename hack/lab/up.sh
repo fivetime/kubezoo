@@ -113,6 +113,16 @@ done
 echo "etcd health: $(curl -s http://127.0.0.1:2379/health)"
 
 echo "== kubezoo =="
+# kubezoo signs ServiceAccount tokens with the upstream key, so its issuer and
+# audiences have to be the upstream's or it cannot validate the tokens the
+# kubelet projects into tenant pods -- which is how a tenant's own workload
+# reaches kubezoo and sees the tenant's view of the API rather than the upstream
+# one. Read it off the upstream apiserver rather than hardcoding it.
+UPSTREAM_SA_ISSUER=$(kubectl --context "kind-$CLUSTER" -n kube-system get pod \
+  -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' \
+  | tr ',' '\n' | grep -o 'service-account-issuer=[^"]*' | cut -d= -f2-)
+UPSTREAM_SA_ISSUER=${UPSTREAM_SA_ISSUER:-https://kubernetes.default.svc.cluster.local}
+echo "upstream SA issuer: $UPSTREAM_SA_ISSUER"
 pkill -f _output/local/bin/linux/amd64/kubezoo || true
 sleep 1
 PKI=$ZOO/_output/pki
@@ -123,12 +133,12 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --storage-backend=etcd3 --authorization-mode=AlwaysAllow \
   --client-ca-file=$PKI/kubezoo/ca.pem --client-ca-key-file=$PKI/kubezoo/ca-key.pem \
   --tls-cert-file=$PKI/kubezoo/kubernetes.pem --tls-private-key-file=$PKI/kubezoo/kubernetes-key.pem \
-  --service-account-key-file=$PKI/upstream/sa.pub --service-account-issuer=foo \
+  --service-account-key-file=$PKI/upstream/sa.pub --service-account-issuer=$UPSTREAM_SA_ISSUER \
   --service-account-signing-key-file=$PKI/upstream/sa.key \
   --proxy-client-cert-file=$PKI/upstream/client.crt --proxy-client-key-file=$PKI/upstream/client-key.crt \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=false \
-  --proxy-bind-address=127.0.0.1 --proxy-secure-port=6443 --api-audiences=foo \
+  --proxy-bind-address=0.0.0.0 --proxy-secure-port=6443 --api-audiences=$UPSTREAM_SA_ISSUER \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do

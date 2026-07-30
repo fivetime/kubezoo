@@ -117,6 +117,14 @@ if [ "$($K get ns "$NS" -o jsonpath='{.status.phase}' 2>/dev/null)" != Active ];
 fi
 T="kubectl --kubeconfig $TKC -n default"
 
+# The placement policy pins every tenant pod to its own pool, so this tenant
+# needs one or nothing it creates will schedule -- which is correct behaviour and
+# exactly the trap the runbook warns about, but it would make the pod checks here
+# fail for the wrong reason. Borrow a node and give it back at the end.
+POOL_NODE=$($K get nodes -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
+POOL_WAS=$($K get node "$POOL_NODE" -o jsonpath='{.metadata.labels.kubezoo\.io/pool}' 2>/dev/null)
+$K label node "$POOL_NODE" "kubezoo.io/pool=$TID" --overwrite >/dev/null 2>&1
+
 echo
 echo "== the policies must be installed at all =="
 # Two of them are native policies, which `kubectl get clusterpolicy` does not
@@ -281,6 +289,89 @@ expect_allowed "the tenant can write again after lifting" \
   $T apply -f <(pod after-thaw '')
 
 echo
+echo "== a tenant workload can reach kubezoo with its own ServiceAccount =="
+# This is what lets an operator run inside a tenant: pointed at kubezoo rather
+# than upstream it sees API groups unprefixed, which is the view its code was
+# written against, and each tenant can then run its own version of the same
+# operator. It needs kubezoo to authenticate a bound ServiceAccount token, which
+# needs a ServiceAccountTokenGetter -- one line in the server wiring, and without
+# it every such request is 401 with "authentication failed unexpectedly".
+# Take the IPv4 gateway specifically. The template over all IPAM configs
+# concatenates the v6 and v4 gateways into one unusable string, and curl then
+# fails to connect with a code of 000, which reads like kubezoo refusing it.
+ZOO_HOST=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
+  | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+if [ -z "$ZOO_HOST" ]; then
+  echo "  SKIP cannot work out the address a pod would use to reach kubezoo"
+else
+  $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: verifywidgets.verify.example}
+spec:
+  group: verify.example
+  names: {plural: verifywidgets, singular: verifywidget, kind: VerifyWidget}
+  scope: Namespaced
+  versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object}}}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: verify-sa}
+rules: [{apiGroups: ["*"], resources: ["*"], verbs: ["*"]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: verify-sa}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: verify-sa}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: sa-probe}
+spec:
+  containers:
+    - name: c
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "600"]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+EOF
+  for _ in $(seq 40); do
+    [ "$($K -n "$NS" get pod sa-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+    sleep 3
+  done
+  if [ "$($K -n "$NS" get pod sa-probe -o jsonpath='{.status.phase}' 2>/dev/null)" != Running ]; then
+    bad "ServiceAccount probe pod" "never reached Running, so the checks below are skipped rather than reported green"
+  else
+    # Judge on the object landing upstream, not on a status code: discovery
+    # answers 200 for a group that resolves to nothing in particular.
+    #
+    # The script goes in on stdin rather than inside the exec arguments. Quoting
+    # it through two shells mangled the URL and curl exited 3, which reads as a
+    # failed check rather than a broken probe.
+    cat >"$LAB/verify-sa-probe.sh" <<PROBE
+T=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+curl -sk -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer \$T" \
+  -X POST -H 'Content-Type: application/json' \
+  "https://$ZOO_HOST:6443/apis/verify.example/v1/namespaces/default/verifywidgets" \
+  -d '{"apiVersion":"verify.example/v1","kind":"VerifyWidget","metadata":{"name":"from-pod"}}'
+PROBE
+    out=$($K -n "$NS" exec -i sa-probe -- sh -s <"$LAB/verify-sa-probe.sh" 2>/dev/null | tail -1)
+    if [ "$out" = 201 ]; then
+      ok "a pod's ServiceAccount token authenticates to kubezoo and writes through it"
+    else
+      bad "ServiceAccount token against kubezoo" "POST returned '$out', expected 201 -- 401 means the token getter is unwired again"
+    fi
+    if $K -n "$TID-default" get verifywidgets.$TID-verify.example from-pod >/dev/null 2>&1; then
+      ok "the object landed upstream under the tenant's prefixed group"
+    else
+      bad "prefixed landing" "the object is not upstream as ${TID}-verify.example, so the write did not go through the translation"
+    fi
+  fi
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores
@@ -306,6 +397,13 @@ fi
 
 echo
 echo "== cleanup =="
+if [ -n "${POOL_NODE:-}" ]; then
+  if [ -n "${POOL_WAS:-}" ]; then
+    $K label node "$POOL_NODE" "kubezoo.io/pool=$POOL_WAS" --overwrite >/dev/null 2>&1
+  else
+    $K label node "$POOL_NODE" kubezoo.io/pool- >/dev/null 2>&1
+  fi
+fi
 kubectl --kubeconfig "$ZOOKC" delete tenant "$TID" >/dev/null 2>&1
 rm -f "$LAB/verify-$TID"*.pem "$LAB/verify-csr.json" "$LAB/verify-binding.json" "$TKC" "$ZOOKC"
 
