@@ -117,15 +117,24 @@
       **实测**:Pod 内用 SA token 打 kubezoo → `/apis/example.com/v1` 200、建 Widget 201、
       上游落地 `widgets.111111-example.com`
 
-- [ ] **接下来验证这条路真的能兜住四个缺口**(逐条重测):
-      §X③ operator 组名错位 / **每租户不同 operator 版本** / §T 冻结绕过 / §Q/§S binding 绕过。
-      ⚠️ 前提是**租户负载真的都走 kubezoo** —— 需要用 mutate 策略注入
-      `KUBERNETES_SERVICE_HOST`(podspec env 压过 kubelet 注入的),**未测**
+- [x] ✅ **四个缺口逐条重测完毕**(审计 §Z)。手段:mutate 注入 `KUBERNETES_SERVICE_HOST`
+      指向 kubezoo(`config/policy/tenant-api-endpoint.yaml`,podspec env 压过 kubelet 注入的)。
+      §X③ operator 组名错位 → **解决**;**每租户不同 operator 版本** → **成立**(实测:同名组
+      `example.com`,111111 只见 v1、222222 只见 v2);§T 冻结绕过 → **关上**(SA 写 403);
+      §Q/§S binding 绕过 → **关上**(被 VAP 拒)。
+      ⚠️⚠️ **部署前提**:kubezoo 的服务证书**必须由 Pod 信任的那个 CA(上游集群 CA)签发**,
+      否则所有 in-cluster 客户端 TLS 失败;`--service-account-issuer`/`--api-audiences` 必须等于上游的
+- [ ] **代价:kubezoo 进入租户全部工作负载的 API 路径** ⇒ #84/#85 变成核心议题。
+      已定:用 kubegateway 挡在前面做精准管控
+- [ ] `config/policy/tenant-api-endpoint.yaml` 里的地址是**占位符**,部署时必须换成
+      kubezoo 在集群内的可达地址(Service ClusterIP / DNS 名)
 
-- [ ] ⛔⛔ **P0 产品问题:租户自己装 operator 走不通**(审计 §X,cert-manager 实测)
-      三个坎:`helm --create-namespace` 不建 ns;**任何带 ClusterRole 的 chart 都装不上**
-      (租户集群级零权限,RBAC 提权防护拒绝,连 `events`/`secrets` 都不行);
-      ⭐⭐ **operator 的 Pod 直连上游,看到的 CRD 组带租户前缀 → 查自己的组 404**。
+- [ ] ⛔ **P0 剩余:租户自装 operator 还差 ClusterRole 这一关**(审计 §X②,§Z 已解掉另外两条)
+      ~~`helm --create-namespace` 不建 ns~~(仍在,但有绕法:先手工建);
+      **任何带 ClusterRole 的 chart 仍装不上** —— 租户集群级零权限,RBAC 提权防护拒绝,
+      连 `events`/`secrets` 都不行,**走不走 kubezoo 都一样**(检查在上游做);
+      ~~operator 的 Pod 看不见自己的组~~ ✅ 已由 §Z 解决。
+      待定放开方式:给租户在**自己前缀的组**上授集群级权限 —— 需单独设计
       ⚠️ **这推翻了我上一轮的说法**("生态里其余的租户自己装")——
       能自装的是小子集,**平台托管形态因此更重要而不是更不重要**。
       待定路线:给 operator 挂租户 kubeconfig 指向 kubezoo(架构上成立,**未实测**,

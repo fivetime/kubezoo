@@ -1,0 +1,53 @@
+# 让租户负载的 in-cluster 客户端打到 kubezoo,而不是上游 apiserver。
+#
+# ⭐ 这条是"租户能不能用 K8s 生态"的枢纽。租户的 Pod 默认直连上游
+# (kubelet 注入 KUBERNETES_SERVICE_HOST),在那里它看到的 CRD 组带租户前缀
+# (`111111-example.com`),而 operator 代码里查的是 `example.com` → 404,
+# 装什么 operator 都跑不起来(审计 §X③)。
+#
+# podspec 里同名 env **压过 kubelet 注入的那个**,所以注入即可,workload 零改动。
+# client-go 的 InClusterConfig 就是读这两个变量(rest/config.go:551)。
+#
+# ⚠️⚠️ 两个部署前提,缺一条这条策略就是把租户负载打瘸:
+#
+#   1. **kubezoo 的服务证书必须由「Pod 信任的那个 CA」签发** ——
+#      Pod 用 /var/run/secrets/.../ca.crt 校验,那是**上游集群的 CA**。
+#      用 kubezoo 自签的证书,所有 in-cluster 客户端一律 TLS 失败。
+#      lab 里的做法:用上游集群 CA 给 kubezoo 签一张带对应 SAN 的服务证书。
+#   2. **kubezoo 的 --service-account-issuer / --api-audiences 必须等于上游的**,
+#      否则它验不了 kubelet 投射的绑定型 token(审计 §Y)。
+#
+# ⚠️ 下面的地址是**环境相关的**,部署时必须换成 kubezoo 在集群内的可达地址
+# (通常是一个 Service 的 ClusterIP 或 DNS 名)。lab 里是宿主机网关。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-api-endpoint
+  annotations:
+    policies.kyverno.io/title: 租户负载的 API 端点指向 kubezoo
+spec:
+  failurePolicy: Fail
+  background: false
+  rules:
+    - name: point-in-cluster-clients-at-kubezoo
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        foreach:
+          - list: "request.object.spec.containers"
+            patchStrategicMerge:
+              spec:
+                containers:
+                  - name: "{{ element.name }}"
+                    env:
+                      # ⚠️ 换成本环境里 kubezoo 的可达地址
+                      - {name: KUBERNETES_SERVICE_HOST, value: "KUBEZOO_ADDRESS_PLACEHOLDER"}
+                      - {name: KUBERNETES_SERVICE_PORT, value: "6443"}
+                      - {name: KUBERNETES_SERVICE_PORT_HTTPS, value: "6443"}

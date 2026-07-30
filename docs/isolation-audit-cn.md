@@ -1361,6 +1361,61 @@ token 里的名字(`111111-default` / `default`)本来就是上游名字,再前�
 3. **透明重定向**(用 mutate 策略注入 `KUBERNETES_SERVICE_HOST`,podspec env 压过 kubelet 注入的)
    —— 架构上成立(kubegateway 那边已验证过同一机制),**这里没测**
 
+## Z. ⭐ 注入 `KUBERNETES_SERVICE_HOST` 之后,四个缺口逐条重测
+
+§Y 打通了"租户负载能用自己的 SA token 打 kubezoo",这一节验的是**让它们真的都走 kubezoo**
+之后会发生什么。手段是一条 mutate 策略(`config/policy/tenant-api-endpoint.yaml`):
+给租户 Pod 的每个容器注入 `KUBERNETES_SERVICE_HOST/PORT` 指向 kubezoo ——
+**podspec 里同名 env 压过 kubelet 注入的那个**,workload 零改动。
+`client-go` 的 `InClusterConfig` 正是读这两个变量(`rest/config.go:551`)。
+
+### ⚠️ 先解掉一个 TLS 前提(否则整条不成立)
+
+Pod 用 `/var/run/secrets/.../ca.crt` 校验服务端,而那是**上游集群的 CA**。
+kubezoo 用自签证书的话,**所有 in-cluster 客户端一律 TLS 失败**。
+lab 里的做法:**用上游集群 CA 给 kubezoo 签一张服务证书**(SAN 覆盖 Pod 用的地址)。
+之后 Pod **不加 `-k`** 也能校验通过 —— 已实测。
+
+⇒ 这是部署前提,不是可选项:**kubezoo 的服务证书必须由 Pod 信任的那个 CA 签发。**
+
+### 逐条重测
+
+| 缺口 | 注入前 | 注入后 |
+|---|---|---|
+| **§X③ operator 看不见自己的 CRD 组** | `/apis/example.com/v1` → **404** | ✅ **200**,且能写(Widget 创建成功) |
+| **每租户不同 operator 版本** | 共享形态给不了 | ✅ **成立**(见下) |
+| **§T `Frozen` 被租户预置 SA 绕过** | `CREATE` → **201**(照常写) | ✅ **403**;binding 报 `tenant 111111 is suspended and is frozen` |
+| **§Q/§S `pods/binding` 绕过** | 直连上游 **HTTP 201**,绑到别的租户节点 | ✅ 被 `tenant-deny-binding` VAP 拒 |
+
+### ⭐ 每租户不同版本 —— 实测
+
+两个租户各自建**同名组** `example.com` 的 CRD,版本不同:
+
+```
+上游:  widgets.111111-example.com   group=111111-example.com   v1
+       widgets.222222-example.com   group=222222-example.com   v2
+
+租户 111111 的 Pod:  /apis/example.com/v1 → 200    /apis/example.com/v2 → 404
+租户 222222 的 Pod:  /apis/example.com/v1 → 404    /apis/example.com/v2 → 200
+```
+
+**同一个组名,各看各的版本。** 这正是"平台装一个共享 operator"结构上给不了的
+(一个 CRD 只有一个 storage version、一个 controller),
+而 kubezoo 的组名前缀在这里从"障碍"变成了"能力"。
+
+### ⛔ 没有被解决的
+
+**§X② 租户仍然建不了 ClusterRole。** 实测仍是
+`is forbidden: ... attempting to grant RBAC permissions not currently held`。
+提权检查在**上游**按租户真实权限做,走不走 kubezoo 都一样。
+⇒ **带 ClusterRole 的 chart 仍然装不上**;能自装的仍限于"能 namespace 级运行、只用 Role"的 operator。
+要放开需要单独设计(例如给租户在**自己前缀的组**上授集群级权限),没做。
+
+### ⚠️ 随之而来的代价
+
+**kubezoo 现在在租户全部工作负载的 API 路径上。** 这是流量模型的根本改变,
+直接变成 #84/#85 的核心议题。用户已确认接受,并计划用 kubegateway 挡在前面做精准管控。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
