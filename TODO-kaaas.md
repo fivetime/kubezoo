@@ -391,22 +391,18 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       域名归属校验(DNS TXT),且**白名单必须放在租户改不动的地方** ——
       租户能给自己 namespace 打任意标签/注解,放那里就是"判定条件建在租户可控输入上"。
       候选:Tenant CR 或 VAP 的 paramRef。**产品决策**
-- [ ] ⛔ **集群级对象在"直连上游"路径上全租户可见**(审计 §AK,已实测)
-      租户身份直连上游 LIST `ingressclasses` / `clusterroles` **返回别的租户的对象**;
-      而命名空间级的同样操作是 Forbidden。根因是**集群级资源没有 RBAC 兜底**
-      (`resourceNames` 精确匹配,表达不了前缀),kubezoo 的过滤只在**经过它**时有效。
-      面:clusterroles / clusterrolebindings / CRD / ingressclasses / namespaces /
-      nodes / PV / runtimeclasses / 两种 webhookconfiguration。
-      **不是流量劫持**(对象本体仍受 RBAC 保护),但**能枚举别的租户 ID 与装了什么**。
-      ⇒ **端点注入(§Z)从便利变成必需**:租户负载必须经 kubezoo,不能默认直连上游
-- [x] ✅ **`ingressClassName` 已由 kubezoo 双向前缀化,白名单放行平台公网 class**(审计 §AJ)
-      `pkg/convert/ingress.go` + 新 flag `--public-ingress-classes`(默认空 ⇒ 全内部);
-      废弃的 `kubernetes.io/ingress.class` 注解一起改写(它压过字段);
-      策略层那条擦除规则已删。
-      实测三条:自己的 class → `111111-internal`(自己的控制器可匹配)、
-      白名单 → 原样(平台控制器接管)、别人的 → `111111-222222-nginx`(谁都命不中);
-      读回与写入一致。守卫已验证会红。
-      ⇒ **"指向 Octavia 才接公网"从约定变成机制**
+- [x] ✅ **集群级授权已从"身份"挪到"路径"**(审计 §AN)
+      集群级资源没有 RBAC 兜底(`resourceNames` 表达不了前缀),所以租户的一条
+      `ingressclasses` 就是**所有租户的**,而且 `delete 222222-nginx` = yes(**是破坏不只是泄露**)。
+      改法:kubezoo 转发时断言 `kubezoo:proxied:<租户ID>` 组,ClusterRoleBinding 的 subject
+      由 User 改为该 Group ⇒ 经 kubezoo 一字未变,不经 kubezoo 全部 Forbidden。
+      ⚠️ 升级必须 `RemoveExtraSubjects`,否则存量集群 User+Group 并存、**看着像改上了**。
+      ⚠️ 部署要求:**发给租户的凭据一律不得带 `kubezoo:proxied:*` 组**。
+      守卫六条,已验证退回旧代码恰好红三条
+- [x] ✅ **更正 §AK 的定性**:原文按 `--as=` 测的是**授权**不是**可达路径**。
+      租户真实持有的三种东西直连上游全部不通(kubezoo 证书上游不信 / SA token 集群级全 Forbidden /
+      `Impersonate-*` 头被忽略)⇒ 是**潜伏**不是敞着。
+      ⚠️ 但**只要有人用上游信任的 CA 签租户证书,立刻变成全面跨租户破坏** —— §AN 已关掉
 - [ ] ⭐ **优先 MAP/VAP(进程内)而不是 webhook** —— 见架构文档 §8.0。
       代价:MAP **没有 autogen**,PodSpec 那 8~9 个 kind 要逐个手写路径(`CronJob` 多一层)
 - [ ] 必备策略(**都得策略引擎做**;原生 PSA 连它自己那一条都守不住,见下):

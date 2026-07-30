@@ -31,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/rest"
+
+	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 type dynamicClient struct {
@@ -99,7 +101,11 @@ func setImpersonateHeaders(req *rest.Request, ctx context.Context) {
 		return
 	}
 	req.SetHeader(authenv1.ImpersonateUserHeader, ui.GetName())
-	req.SetHeader(authenv1.ImpersonateGroupHeader, ui.GetGroups()...)
+	// The tenant's cluster-scoped permissions are held by a group rather than by
+	// the user, so that they exist only on a request kubezoo forwarded. See
+	// util.ProxiedGroup.
+	req.SetHeader(authenv1.ImpersonateGroupHeader,
+		util.ImpersonationGroups(util.TenantIDFrom(ctx), ui.GetName(), ui.GetGroups())...)
 }
 
 func (c *dynamicResourceClient) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {

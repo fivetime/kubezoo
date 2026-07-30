@@ -2008,6 +2008,21 @@ webhook 只能匹配命名空间级对象,**匹配不到定义它自己的那个
 `resourceNames` 是精确匹配,表达不了"名字以 `111111-` 开头"。
 kubezoo 在**读路径**按名字前缀过滤,但那只在**经过 kubezoo** 时有效。
 
+### ⚠️⚠️ 更正:这里说的"直连上游"**租户在参考部署里做不到**(§AN 实测)
+
+上面这段的测法是 `--as=111111-admin`,那测的是**授权本身**,不是**可达路径**。
+后来逐条测了租户真正能拿到的凭据:
+
+| 租户真实持有的东西 | 直连上游 |
+|---|---|
+| kubezoo 签发的客户端证书 | ⛔ **`Unauthorized`** —— kubezoo 用自己的 CA,上游根本不信 |
+| Pod 里的 SA token | ⛔ 集群级全部 `Forbidden`(SA 只有租户给它的 namespace 级授权) |
+| 往 kubezoo 发 `Impersonate-User` 头 | ⛔ **被忽略**,视图不变(逐条对照过跨租户对象) |
+
+⇒ 所以这是一个**潜伏**问题而不是**在敞着**的洞:授权确实过宽,
+但**只要有人用上游信任的 CA 去签租户证书,它立刻变成全面跨租户破坏**(不止枚举,是 delete)。
+§AN 把它关掉了。
+
 ### ⚠️ 这个面比 IngressClass 大得多
 
 租户在集群级被授予 list 的资源(**直连上游都能看到全部租户的**):
@@ -2142,6 +2157,65 @@ A 写 222222-nginx → 上游变成 111111-222222-nginx → 匹配不到任何 I
 
 §AJ 那几条 class 断言用的主机名是 `own.verify.example`,落在子域外 ⇒ 一加策略就红 6 条。
 不是代码问题,是固件跟新约束冲突。**这也说明策略确实在管所有租户 Ingress,没有漏网。**
+
+## AN. ⭐ 把集群级授权从"这个身份"挪到"这条路径" ✅ 已实现
+
+§AK 记的是**授权过宽**:集群级资源**没有 RBAC 兜底** —— `resourceNames` 是精确匹配,
+表达不了 `111111-` 前缀,所以给租户一条 `ingressclasses` 就是给了**所有租户的**。
+实测(`--as=111111-admin`,即只看授权):
+
+```
+list ingressclasses      → 111111-nginx  222222-nginx     ← 别人的
+clusterroles 可见         → 95 条
+delete ingressclasses/222222-nginx → can-i: yes           ← 这条是破坏,不只是泄露
+```
+
+### 修法:权限归**组**,不归**用户**
+
+kubezoo 转发时在 impersonate 头里额外断言一个组 `kubezoo:proxied:<租户ID>`,
+per-tenant ClusterRoleBinding 的 subject 从 **User** 改成这个 **Group**。
+
+| | 改前 | 改后 |
+|---|---|---|
+| 经 kubezoo | 允许 | **允许(一字未变)** |
+| 同一身份不经 kubezoo | 允许(且能删别人的) | ⛔ **Forbidden** |
+
+组之所以是承重件:**组由"谁批准了这次 impersonate"断言,租户自己拿不出来**。
+
+### 三个刻意的取舍
+
+**① 只给租户自己的凭据加这个组,不给 SA。** 租户的 SA 上游就是它自己,
+只持有租户按 namespace 授给它的权限;给 SA 也加,等于**把每个工作负载都变成集群级的**。
+守卫里有一条专门盯这个。
+
+**② 每租户一个组,不是共享一个组。** 各租户的 ClusterRole 内容不同
+(每个带自己的 CRD 组),共享一个组等于把每个租户的角色发给所有租户。
+实测:`kubezoo:proxied:222222` 对 `widgets.111111-example.com` 是 `no`。
+⚠️ 但要说准:**在通用资源上两个组是等效的**(两个角色都授了 `ingressclasses`),
+per-tenant 只在 CRD 组那部分真起作用。承重的是"租户拿不出任何一个组"。
+
+**③ namespace 级那一半没动。** 那不是跨租户面(RBAC 按 namespace 兜得住),
+而且直连上游写入仍受策略层约束(VAP/Kyverno 在上游,不看请求从哪来)。
+
+### ⚠️ 升级会碰到的:老 binding 的 User subject 必须被删掉
+
+reconcile **默认只加不减 subject**。不设 `RemoveExtraSubjects` 的话,
+存量集群会**同时**留着 User 和 Group ⇒ 权限照旧可以绕过 kubezoo 使用,
+而且**看起来像是改上了**(新租户确实是对的)。
+这和当初收窄 rules 时必须开 `RemoveExtraPermissions` 是同一个坑。
+
+### ⚠️ 部署要求(写进运维手册)
+
+**任何发给租户的凭据都不允许携带 `kubezoo:proxied:*` 组。**
+租户证书由 kubezoo 自己的 CA 按固定模板签发,所以只要租户不能自选 Organization 就成立。
+kubezoo 会把这个组从**进它前门**的身份上剥掉并告警(能抓住签错的凭据),
+但**上游信任的凭据它够不着**。
+
+### 守卫
+
+`verify.sh` 六条。**已验证:退回改前的代码恰好红三条** ——
+binding 的 subject、直连 list、直连 delete;
+而"经 kubezoo 仍可读"和"SA 没被塞组"两条对照保持绿。
 
 ## 尚未覆盖
 

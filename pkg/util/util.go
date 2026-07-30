@@ -549,3 +549,103 @@ func RemoveString(sli []string, s string) (ret []string) {
 	ret = sli
 	return
 }
+
+// proxiedGroupPrefix begins the name of the group kubezoo asserts, and only
+// kubezoo asserts, when it forwards a tenant's request upstream.
+const proxiedGroupPrefix = "kubezoo:proxied:"
+
+// TenantAdminUser is the upstream identity kubezoo impersonates for a tenant's
+// own credential. pkg/dynamic sets the impersonation headers on every forwarded
+// request, so upstream RBAC is evaluated against this user rather than against
+// kubezoo's, which is what makes upstream RBAC mean anything at all.
+func TenantAdminUser(tenantID string) string {
+	return tenantID + "-admin"
+}
+
+// ProxiedGroup names the group that carries a tenant's cluster-scoped
+// permissions upstream.
+//
+// Those permissions used to belong to TenantAdminUser directly, which made them
+// usable by anything holding that identity, whether or not it arrived through
+// kubezoo. It matters because a cluster-scoped grant cannot be bounded by name:
+// RBAC's resourceNames is an exact match with no prefix form, so a grant on
+// ingressclasses or customresourcedefinitions is a grant on every tenant's.
+// Measured as 111111-admin: list returns 222222's objects, and delete on
+// 222222-nginx is allowed.
+//
+// Holding them in a group makes them conditional on having been forwarded,
+// because a group is asserted by whoever authorized the impersonation and
+// cannot be presented by the tenant. What kubezoo permits is unchanged; what
+// the same identity permits outside kubezoo becomes nothing.
+//
+// Per tenant rather than one shared group: the roles differ -- each carries
+// that tenant's own CRD groups -- so a shared group would hand every tenant
+// every other tenant's role, which is the problem again.
+//
+// ⚠️ Deployment requirement: no credential issued to a tenant may carry this
+// group. Tenant certificates are signed by kubezoo's own CA from a CSR template
+// that fixes the subject, so this holds as long as tenants cannot choose their
+// own organization. Kubezoo drops the group from anything arriving at its front
+// door, which catches a mis-issued credential there, but a credential upstream
+// trusts is beyond its reach.
+func ProxiedGroup(tenantID string) string {
+	return proxiedGroupPrefix + tenantID
+}
+
+// ImpersonationGroups returns the groups kubezoo asserts upstream for a request
+// it is forwarding.
+//
+// A proxied group already on the incoming identity is dropped rather than
+// passed on. Kubezoo issues that name itself, so one arriving means a credential
+// was minted carrying it, and forwarding it would let one tenant's credential
+// ask for another tenant's role.
+//
+// The group is added only for the tenant's own credential, the identity that
+// held these permissions before. A tenant's ServiceAccounts reach upstream as
+// themselves and hold only what the tenant granted them per namespace; adding
+// the group for them would quietly turn every workload into a cluster-scoped
+// one.
+func ImpersonationGroups(tenantID, userName string, groups []string) []string {
+	forwarded := make([]string, 0, len(groups)+1)
+	for _, group := range groups {
+		if strings.HasPrefix(group, proxiedGroupPrefix) {
+			klog.Warningf("dropping group %q from incoming identity %q: kubezoo issues that name "+
+				"itself, so a credential carrying it was mis-issued", group, userName)
+			continue
+		}
+		forwarded = append(forwarded, group)
+	}
+	if tenantID != "" && userName == TenantAdminUser(tenantID) {
+		forwarded = append(forwarded, ProxiedGroup(tenantID))
+	}
+	return forwarded
+}
+
+// ReservedClusterRoleNames are the upstream names kubezoo keeps for itself, per
+// tenant, in the RBAC group.
+//
+// They collide with what a tenant produces: names of cluster-scoped objects get
+// the tenant prefix, so a tenant creating a ClusterRole called cluster-admin
+// addresses <tid>-cluster-admin -- which is the very role the controller creates
+// and binds cluster-wide to that tenant. Measured: with escalate granted, a
+// tenant overwrote it with star-on-star and reached kube-system's and another
+// tenant's secrets. Without escalate it can still delete it, which is self-harm
+// the controller repairs, but the collision is what turns any future privilege
+// on this path into an escape.
+func ReservedClusterRoleNames(tenantID string) []string {
+	return []string{
+		tenantID + "-cluster-admin",
+		tenantID + "-admin",
+	}
+}
+
+// IsReservedClusterName reports whether an upstream name is one kubezoo manages
+// for this tenant and the tenant must not write.
+func IsReservedClusterName(tenantID, upstreamName string) bool {
+	for _, reserved := range ReservedClusterRoleNames(tenantID) {
+		if upstreamName == reserved {
+			return true
+		}
+	}
+	return false
+}

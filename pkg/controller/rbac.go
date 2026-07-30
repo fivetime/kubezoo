@@ -41,6 +41,7 @@ import (
 
 	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // Names of the two shared RBAC objects. Unlike the per-tenant ClusterRole these
@@ -109,7 +110,7 @@ func narrowToReadOnly(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
 // upstream RBAC is evaluated against this user and not against kubezoo's own
 // credentials -- which is what makes any of this effective.
 func tenantUser(tenantID string) string {
-	return tenantID + "-admin"
+	return util.TenantAdminUser(tenantID)
 }
 
 // tenantClusterRole is the per-tenant ClusterRole holding the cluster-scoped
@@ -399,7 +400,8 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 	// outright. Nothing is deleted but the binding itself, so lifting the
 	// suspension puts it back on the next pass.
 	if isFreeze(mode) {
-		name := rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).Users(tenantUser(tenantId)).BindingOrDie().Name
+		name := rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).
+			Groups(util.ProxiedGroup(tenantId)).BindingOrDie().Name
 		err := rbacClient.ClusterRoleBindings().Delete(context.TODO(), name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("withdrawing clusterrolebinding %s to freeze the tenant: %w", name, err)
@@ -407,8 +409,15 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 		return nil
 	}
 
+	// The subject is a group kubezoo asserts when it forwards a request, not the
+	// tenant's user. Cluster-scoped grants cannot be bounded by name -- RBAC has
+	// no prefix form -- so held by the user they were a grant over every
+	// tenant's cluster-scoped objects, usable by anything holding that identity.
+	// Held by a group they exist only on a forwarded request. See
+	// util.ProxiedGroup.
 	clusterRoleBindings := []rbacv1.ClusterRoleBinding{
-		rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).Users(tenantUser(tenantId)).BindingOrDie(),
+		rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).
+			Groups(util.ProxiedGroup(tenantId)).BindingOrDie(),
 	}
 
 	for i := range clusterRoleBindings {
@@ -417,6 +426,13 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 			RoleBinding: reconciliation.ClusterRoleBindingAdapter{ClusterRoleBinding: &clusterRoleBinding},
 			Client:      reconciliation.ClusterRoleBindingClientAdapter{Client: rbacClient.ClusterRoleBindings()},
 			Confirm:     true,
+			// Reconciliation only adds subjects by default. Without this an
+			// existing cluster keeps the user subject alongside the new group,
+			// so the permissions stay reachable without kubezoo and the change
+			// applies to new tenants only while looking as though it applied to
+			// all of them -- the same trap RemoveExtraPermissions covers for the
+			// rules.
+			RemoveExtraSubjects: true,
 		}
 		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			result, err := opts.Run()

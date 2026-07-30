@@ -35,6 +35,13 @@ kubectl get validatingadmissionpolicy        # 原生的,get clusterpolicy 看�
 | `tenant-ingress-hostnames.yaml` | `TENANT_DOMAIN_SUFFIX` | 平台给租户分配子域的后缀 —— **不换的话租户的 Ingress 全被拒** |
 | `tenant-api-endpoint.yaml` | `KUBEZOO_ADDRESS_PLACEHOLDER` | kubezoo 在集群内的可达地址 |
 
+⚠️ **发给租户的凭据一律不得携带 `kubezoo:proxied:*` 组。**
+租户的集群级权限挂在这个组上,而不是挂在租户的用户名上 —— 这样它**只在 kubezoo 转发的
+请求上存在**。集群级资源没有 RBAC 兜底(`resourceNames` 表达不了 `<租户ID>-` 前缀),
+所以一旦某个租户凭据带上这个组,它就能列举并**删除**所有租户的 IngressClass / CRD /
+PV / ClusterRole。签发租户证书时必须由平台钉死 subject,不能照抄租户 CSR 里的 O。
+同理:**不要用上游集群信任的 CA 去签租户证书** —— kubezoo 用自己的 CA 是承重设计。
+
 ⚠️ 还有一个**不在策略里、在 kubezoo 启动参数上**的:
 `--public-ingress-classes=<平台的 IngressClass>`。**不设的话租户完全无法接入公网**
 (所有 class 都会被前缀化成租户私有的);设错则等于把公网入口的名字告诉错人。

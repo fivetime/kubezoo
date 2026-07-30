@@ -112,7 +112,8 @@ func (r *ProxyREST) Connect(ctx context.Context, id string, opts runtime.Object,
 			req.Header = make(map[string][]string)
 		}
 		req.Header[authenticationv1.ImpersonateUserHeader] = []string{userInfo.GetName()}
-		req.Header[authenticationv1.ImpersonateGroupHeader] = userInfo.GetGroups()
+		req.Header[authenticationv1.ImpersonateGroupHeader] = util.ImpersonationGroups(
+			util.TenantIDFrom(req.Context()), userInfo.GetName(), userInfo.GetGroups())
 
 		//proxyOpts, ok := opts.(*api.PodProxyOptions)
 		//if !ok {

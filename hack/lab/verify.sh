@@ -736,6 +736,70 @@ expect_allowed "writes work again once it is gone" \
 $K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
 
 echo
+echo "== the tenant's cluster-scoped permissions exist only on a request kubezoo forwarded =="
+# A cluster-scoped grant cannot be bounded by name -- RBAC's resourceNames is an
+# exact match with no prefix form -- so as long as these permissions belonged to
+# the tenant's user, that user could list and delete every other tenant's
+# cluster-scoped objects. Nothing in the reference deployment lets a tenant
+# present that identity upstream, since kubezoo signs tenant certificates with
+# its own CA, so this was latent rather than reachable. It stops being latent the
+# moment anyone issues tenant credentials from a CA upstream trusts.
+#
+# They now belong to a group kubezoo asserts when it forwards, so the identity is
+# worth nothing on its own.
+PROXIED="kubezoo:proxied:$TID"
+subjects=$($K get clusterrolebinding "$TID-cluster-admin" -o jsonpath='{.subjects[*].kind}/{.subjects[*].name}' 2>&1)
+if [ "$subjects" = "Group/$PROXIED" ]; then
+  ok "the cluster-scoped role is bound to the forwarded-request group and to nothing else"
+else
+  bad "the cluster-scoped role is bound to the forwarded-request group and to nothing else" \
+      "subjects are '$subjects' -- a leftover User subject means the permissions are still usable without kubezoo"
+fi
+
+expect_allowed "the tenant still reads cluster-scoped objects through kubezoo" \
+  $T get ingressclasses
+
+if [ "$($K auth can-i list ingressclasses --as="$TID-admin" 2>/dev/null)" = no ]; then
+  ok "the same identity cannot list cluster-scoped objects without kubezoo"
+else
+  bad "the same identity cannot list cluster-scoped objects without kubezoo" \
+      "it can, so the grant is still on the user and reaches every tenant's objects"
+fi
+if [ "$($K auth can-i delete ingressclasses --as="$TID-admin" 2>/dev/null)" = no ]; then
+  ok "nor delete another tenant's cluster-scoped objects"
+else
+  bad "nor delete another tenant's cluster-scoped objects" "it can -- this is destructive, not merely disclosure"
+fi
+
+# Without this the assertion above would also pass if the role were simply
+# broken, which would break the tenant rather than confine it.
+if [ "$($K auth can-i list ingressclasses --as="$TID-admin" --as-group="$PROXIED" 2>/dev/null)" = yes ]; then
+  ok "and the group is what makes the difference, so the two above are not just a broken role"
+else
+  bad "and the group is what makes the difference" "asserting the group changes nothing; the role itself is broken"
+fi
+
+# A tenant's ServiceAccounts hold what the tenant granted them per namespace.
+# Handing them the group would turn every workload into a cluster-scoped one.
+SATOK=$($K -n "$NS" create token default --duration=10m 2>/dev/null)
+if [ -n "$SATOK" ]; then
+  SAKC=$LAB/verify-sa-proxied.kubeconfig; rm -f "$SAKC"
+  kubectl --kubeconfig "$SAKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
+    --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+  kubectl --kubeconfig "$SAKC" config set-credentials sa --token="$SATOK" >/dev/null
+  kubectl --kubeconfig "$SAKC" config set-context c --cluster=zoo --user=sa >/dev/null
+  kubectl --kubeconfig "$SAKC" config use-context c >/dev/null
+  sa_out=$(kubectl --kubeconfig "$SAKC" get ingressclasses 2>&1)
+  if grep -qi forbidden <<<"$sa_out"; then
+    ok "a tenant ServiceAccount is not handed the group by going through kubezoo"
+  else
+    bad "a tenant ServiceAccount is not handed the group by going through kubezoo" \
+        "it got a listing, so every tenant workload now holds cluster-scoped permissions"
+  fi
+  rm -f "$SAKC"
+fi
+
+echo
 echo "== an IngressClass reference reaches the tenant's own, or the platform's on request =="
 # spec.ingressClassName references a cluster-scoped object, so it needs the same
 # prefixing as the object itself -- otherwise a tenant's own class is unreachable
