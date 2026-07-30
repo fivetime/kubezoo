@@ -1443,16 +1443,62 @@ helm **先**检查 chart 里的资源是否已存在,**再**建 namespace。而:
 
 ⇒ 差别在**错误码**,不在能力。
 
-### 可行的修法(未实现)
+### ✅ 已修:Forbidden → NotFound
 
-**当租户的请求指向一个「对该租户不存在」的 namespace 时,把 Forbidden 改写成 NotFound。**
+`pkg/proxy/proxy.go` 的 `shapeError`:租户 **Get** 一个对象时若拿到 Forbidden,
+且目标 namespace **对该租户确实不存在**,就改写成 NotFound。
 
-- 这与租户的视角一致:那个 namespace 在他的世界里就是不存在
-- 按 §8.0 判据属于**读路径 ⇒ kubezoo 的**,而且和已有的 `TrimTenantIDFromError` 是同一处机制
-- 只在错误路径上多一次"该 namespace 是否存在"的查询,热路径无开销
-- ⚠️ 必须**窄范围**:只在目标 namespace 确实不存在时改写,否则会把真正的权限错误也盖掉
+- 与租户视角一致:那个 namespace 在他的世界里就是不存在,里面的对象自然也不存在
+- 按 §8.0 判据属于**读路径 ⇒ kubezoo 的**,与 `TrimTenantIDFromError` 同一处机制
+- 只在错误路径多一次查询,热路径无开销
+- ⚠️ **窄范围**:只对 Get、且只在确认 namespace 不存在后改写。List 不动 ——
+  上游那里是返回空列表而不是 NotFound,对齐它需要**合成响应**而不是改写错误
+- 守卫:`verify.sh` 两条(缺失 namespace 读作 NotFound / **已存在 namespace 上的真拒绝仍是 Forbidden**)
 
-⇒ 修好之后 `helm --create-namespace` 应当可用,**"先手工建 ns"这个绕法就不需要了**。
+### ⛔ 但还有第二个坎:RBAC 授权器的缓存延迟
+
+修完之后 helm **确实会建 namespace 了**,但紧接着写自己的 release secret 时仍被拒:
+
+```
+第一次 helm install --create-namespace → 建出 ns,在 secret 上失败
+立刻重试(ns 已存在)                  → STATUS: deployed
+```
+
+量出来的窗口:
+
+| | |
+|---|---|
+| 建 ns 后 RoleBinding **出现** | **169 ms** |
+| 建 ns 后**真的能写** | **312 ms** |
+
+中间那 ~143ms 是**上游授权器自己的缓存延迟** —— RoleBinding 已经在 etcd 里了,
+授权器还没看到。
+
+### ⚠️ 试过让 kubezoo 在建 namespace 时同步下发 RoleBinding —— 不成立,已撤
+
+想法是在代理的 Create 成功后立刻建 RoleBinding。**实测直接失败**:
+
+```
+could not bind new namespace 111111-t1 for tenant 111111:
+rolebindings.rbac.authorization.k8s.io is forbidden:
+User "111111-admin" cannot create resource "rolebindings" ... in the namespace "111111-t1"
+```
+
+⭐ **是循环的**:`pkg/dynamic` 给每个请求都带上租户的 impersonation 头,
+所以这个创建请求也是**以租户身份**发出的 —— 而租户在这个刚建的 namespace 里
+恰恰还没有权限,正是要修的那件事。
+
+即便改用 kubezoo 自己的凭据绕过这一点,**上面那 143ms 授权器缓存延迟仍在**,
+helm 照样输。⇒ **这个竞态关不掉**,代码已撤回。
+
+### 结论
+
+`helm --create-namespace` 从"**永远失败,namespace 都建不出来**"变成
+"**失败一次,重试即可**"。对 helm 这是正常工作流;要一次成功仍需先手工建 namespace。
+
+⚠️ 这条限制影响**所有"建 namespace 后立刻写入"的工具**(helm / kustomize /
+`kubectl apply -f 目录`),而且**不是 kubezoo 独有** —— 任何依赖 per-namespace
+RoleBinding 的多租户模型都撞同一堵墙。
 
 ## 尚未覆盖
 

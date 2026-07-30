@@ -304,7 +304,9 @@ ZOO_HOST=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{
 if [ -z "$ZOO_HOST" ]; then
   echo "  SKIP cannot work out the address a pod would use to reach kubezoo"
 else
-  $T apply -f - >/dev/null 2>&1 <<EOF
+  # Capture it: a swallowed error here shows up much later as a pod that never
+  # started, with nothing saying why.
+  sa_setup_out=$($T apply -f - 2>&1 <<EOF
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata: {name: verifywidgets.verify.example}
@@ -336,12 +338,13 @@ spec:
       securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
         runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
 EOF
+)
   for _ in $(seq 40); do
     [ "$($K -n "$NS" get pod sa-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
     sleep 3
   done
   if [ "$($K -n "$NS" get pod sa-probe -o jsonpath='{.status.phase}' 2>/dev/null)" != Running ]; then
-    bad "ServiceAccount probe pod" "never reached Running, so the checks below are skipped rather than reported green"
+    bad "ServiceAccount probe pod" "never reached Running, so the checks below are skipped rather than reported green -- setup said: $(tr '\n' ' ' <<<"$sa_setup_out" | cut -c1-160) ; reason=$($K -n "$NS" get pod sa-probe -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}{.status.conditions[?(@.type==\"PodScheduled\")].message}' 2>&1 | cut -c1-90)"
   else
     # Judge on the object landing upstream, not on a status code: discovery
     # answers 200 for a group that resolves to nothing in particular.
@@ -393,6 +396,36 @@ elif [ -n "$overlap" ]; then
   ok "no pool value is claimed by two tenants"
 else
   ok "every pool value belongs to one tenant"
+fi
+
+echo
+echo "== a request into a namespace the tenant does not have reads as NotFound =="
+# Upstream refuses it with Forbidden, because a namespace that does not exist has
+# no RoleBinding, while a cluster-admin doing the same gets NotFound. Tools read
+# the difference as fatal versus routine: helm checks whether a chart's resources
+# already exist before creating the namespace, and on Forbidden it gives up
+# without ever attempting the create.
+missing_out=$($T get configmap nothing-here -n does-not-exist 2>&1)
+if grep -q NotFound <<<"$missing_out"; then
+  ok "a missing namespace reads as NotFound, not Forbidden"
+else
+  bad "missing-namespace error" "got: $(tr '\n' ' ' <<<"$missing_out" | cut -c1-140)"
+fi
+# And a real permission problem in a namespace that does exist must still say so,
+# or this reshaping is hiding failures instead of correcting one.
+#
+# This runs last, and deliberately. Producing a genuine denial means taking the
+# tenant's RoleBinding away, and the authorizer serves a stale yes for a moment
+# after the delete and a stale no for a moment after the controller puts it back.
+# Anything scheduled after this raced those two windows and failed intermittently
+# on work that had nothing to do with it.
+$K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
+sleep 2
+denied_out=$($T get configmap kube-root-ca.crt 2>&1)
+if grep -q -i forbidden <<<"$denied_out"; then
+  ok "a genuine denial in an existing namespace is still Forbidden"
+else
+  bad "denial reshaping is too wide" "got: $(tr '\n' ' ' <<<"$denied_out" | cut -c1-140)"
 fi
 
 echo

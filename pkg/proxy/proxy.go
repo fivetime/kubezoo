@@ -26,6 +26,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -194,6 +195,49 @@ func (tp *tenantProxy) getClient(ctx context.Context) (dynamic.ResourceInterface
 	return client, nil
 }
 
+// shapeError turns an upstream error into the one the tenant should see.
+//
+// Beyond trimming the tenant prefix it fixes a mismatch that stops ordinary
+// tooling working. Upstream refuses a tenant's request into a namespace that
+// does not exist with Forbidden, because a namespace that does not exist has no
+// RoleBinding either -- while the same request from a cluster-admin gets
+// NotFound, since for them it is only a missing object. Tools read the
+// difference as fatal versus routine.
+//
+// Measured: `helm install --create-namespace` never even attempts to create the
+// namespace. It checks whether the chart's resources already exist first, gets
+// Forbidden where a cluster-admin would get NotFound, and gives up -- so a
+// tenant had to create the namespace by hand before every chart.
+//
+// NotFound is also the truthful answer from where the tenant stands: no such
+// namespace, so no such object in it.
+//
+// Deliberately narrow. Only a Get, and only once the namespace has been
+// confirmed absent, so a genuine permission error on an existing namespace is
+// still reported as one. List is left alone: upstream answers an empty list
+// rather than NotFound there, and matching that means synthesising a response
+// rather than reshaping an error.
+func (tp *tenantProxy) shapeError(ctx context.Context, err error, tenantID string) error {
+	if !apierrors.IsForbidden(err) || !tp.namespaceScoped {
+		return util.TrimTenantIDFromError(err, tenantID)
+	}
+	requestInfo, ok := apirequest.RequestInfoFrom(ctx)
+	if !ok || requestInfo.Namespace == "" {
+		return util.TrimTenantIDFromError(err, tenantID)
+	}
+	upstreamNamespace := util.AddTenantIDPrefix(tenantID, requestInfo.Namespace)
+	_, nsErr := tp.dynamicClient.Resource(namespaceGVR).Get(ctx, upstreamNamespace, metav1.GetOptions{})
+	if !apierrors.IsNotFound(nsErr) {
+		return util.TrimTenantIDFromError(err, tenantID)
+	}
+	return apierrors.NewNotFound(schema.GroupResource{
+		Group:    tp.kind.Group,
+		Resource: tp.resource,
+	}, requestInfo.Name)
+}
+
+var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+
 // Destroy releases resources held by the storage. rest.Storage grew this method
 // in Kubernetes 1.26; the proxy holds no resources of its own.
 func (tp *tenantProxy) Destroy() {}
@@ -271,7 +315,7 @@ func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.Get
 		utd, err = client.Get(ctx, name, *options)
 	}
 	if err != nil {
-		return nil, util.TrimTenantIDFromError(err, tenantID)
+		return nil, tp.shapeError(ctx, err, tenantID)
 	}
 
 	// convert unstructured object to internal for non CRD resources

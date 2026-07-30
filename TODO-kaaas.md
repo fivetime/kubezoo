@@ -133,8 +133,11 @@
       `helm --create-namespace` 不工作 —— **根因已查明**(审计 §AA):helm 先检查资源
       再建 ns,而租户在不存在的 ns 里 `GET` 得到 **Forbidden**(上游 admin 得到 NotFound),
       helm 当致命错误中止;**根本没发出建 namespace 的请求**。
-      修法:租户请求指向「对该租户不存在」的 namespace 时,把 Forbidden 改写成 NotFound
-      (读路径 ⇒ kubezoo;与 `TrimTenantIDFromError` 同一处机制;须窄范围)。**未实现**;
+      ✅ **已修**(`proxy.shapeError`,守卫 `verify.sh` 两条)⇒ helm 现在会建 namespace 了。
+      ⛔ 但第二个坎关不掉:**上游授权器缓存延迟**(RoleBinding 出现 169ms / 真能写 312ms),
+      helm 紧接着写 release secret 仍失败 ⇒ **失败一次、重试即成功**。
+      试过在建 ns 时同步下发 RoleBinding —— **循环失败**(请求以租户身份发出,而租户
+      在新 ns 里正好还没权限),且即便绕过也仍有那 143ms,已撤回;
       **任何带 ClusterRole 的 chart 仍装不上** —— 租户集群级零权限,RBAC 提权防护拒绝,
       连 `events`/`secrets` 都不行,**走不走 kubezoo 都一样**(检查在上游做);
       ~~operator 的 Pod 看不见自己的组~~ ✅ 已由 §Z 解决。
