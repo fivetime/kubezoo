@@ -1278,6 +1278,61 @@ GET /apis/111111-example.com/v1   →  HTTP 200      ← 上游实际存的
 **租户的每一个 Pod 都卡在 Pending**。这是 fail-closed,是对的 ——
 但**症状是"Pod 不调度",没有任何东西指向策略**。运维手册已记。
 
+## Y. 最小验证:把租户负载指向 kubezoo —— 卡在**认证**,而且缺口很具体
+
+**要验的**:让 operator(以及所有租户 Pod)用自己的 ServiceAccount token 打 **kubezoo**
+而不是上游,这样它看到的就是**去前缀的视图**,§X 那三个坎里最要命的第 ③ 条就消失,
+而且**每租户不同 operator 版本天然成立**(组名前缀让同名 CRD 不撞车)。
+
+### 已经成立的那一半
+
+`pkg/filters/tenant.go` 的 `WithTenantInfo` **已经支持从 SA 推租户**:
+
+```go
+namespace, _, err := serviceaccount.SplitUsername(user.GetName())
+tenantID, err := util.GetTenantIDFromNamespace(namespace)
+```
+
+`system:serviceaccount:111111-default:default` → 租户 `111111`。设计上就是为这条路准备的。
+
+### ⛔ 但认证这一半是断的
+
+lab 里把 kubezoo 的 `--service-account-issuer` / `--api-audiences` 对齐上游
+(`https://kubernetes.default.svc.cluster.local`),从租户 Pod 内实测:
+
+| | 结果 |
+|---|---|
+| 网络可达性(Pod → `172.18.0.1:6443`) | ✅ 通,拿到的是 kubezoo 返回的正经 Status |
+| SA token 认证 | ⛔ **401** |
+| kubezoo 日志 | `invalid bearer token, Internal error occurred: **authentication failed unexpectedly**` |
+
+**根因**:kubezoo **从未设置 `ServiceAccountTokenGetter`** ——
+全仓 grep 只在生成的 openapi 里出现过这个名字。
+而上游 kube-apiserver 是设置的(`pkg/kubeapiserver/options/authentication.go:712/719`,
+从 informer 或 client 构造)。
+
+没有它,**绑定型 token 无法验证** —— 而 1.21 之后 kubelet 投射的就全是绑定型。
+`WithTenantInfo` 大概率是 1.24 那个 fork 时代留下的:那时还有非绑定 token,能走通。
+
+⇒ **这是实现缺口,不是架构问题。** kubezoo 本来就有到上游的客户端(它代理一切),
+把 `serviceaccountcontroller.NewGetterFromClient(...)` 接上去即可;
+绑定对象(pod / node / secret)本来就在上游,查得到。
+
+### 这条路一旦通了,顺带解决的
+
+- §X③ operator 看不见自己的 CRD 组 —— 消失
+- **每租户不同 operator 版本** —— 天然成立(这是共享托管形态给不了的)
+- §T `Frozen` 被租户预置 SA 绕过 —— 从根上消失
+- §Q/§S `pods/binding` 绕过 —— 从根上消失
+
+### ⚠️ 但还有三件没验、且不会自动消失
+
+1. **ClusterRole 那道坎照旧**(§X②)。提权检查在上游按租户真实权限做,走不走 kubezoo 一样。
+   除非改成"给租户在自己前缀的组上授集群级权限" —— 单独的设计问题
+2. **kubezoo 要吃下全部租户负载的 API 流量**,流量模型的根本改变,直接撞 #84/#85
+3. **透明重定向**(用 mutate 策略注入 `KUBERNETES_SERVICE_HOST`,podspec env 压过 kubelet 注入的)
+   —— 架构上成立(kubegateway 那边已验证过同一机制),**这里没测**
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

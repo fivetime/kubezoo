@@ -107,6 +107,15 @@
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
+- [ ] ⛔ **P0 前置实现:kubezoo 认不了 in-cluster ServiceAccount token**(审计 §Y,实测 401)
+      根因:**从未设置 `ServiceAccountTokenGetter`**(全仓 grep 只在生成的 openapi 里出现),
+      而 1.21 之后 kubelet 投射的全是绑定型 token,没有 getter 就验不了。
+      `WithTenantInfo`(SA → 租户)那一半**已经有了**,是 1.24 fork 时代为这条路留的。
+      ⇒ **实现缺口,不是架构问题**:kubezoo 本就有到上游的客户端,接上
+      `serviceaccountcontroller.NewGetterFromClient(...)` 即可。
+      ⭐ 通了之后顺带解决:§X③ operator 组名错位、**每租户不同 operator 版本**、
+      §T 冻结绕过、§Q/§S binding 绕过 —— **四个已知缺口一次性从根上消失**
+
 - [ ] ⛔⛔ **P0 产品问题:租户自己装 operator 走不通**(审计 §X,cert-manager 实测)
       三个坎:`helm --create-namespace` 不建 ns;**任何带 ClusterRole 的 chart 都装不上**
       (租户集群级零权限,RBAC 提权防护拒绝,连 `events`/`secrets` 都不行);
