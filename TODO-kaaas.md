@@ -335,14 +335,12 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             才是控制点(租户填回 `default-scheduler` 即绕过)。B1 的 kata 节点池方案未定,
             **现在不算未决项**
       - [x] ✅ 拒绝 DaemonSet —— `config/policy/tenant-deny-daemonset.yaml`,已实测
-- [ ] ⛔ **待测:`pods/binding` 可能绕开整套落点控制**(读码发现,未实测,审计 §Q)
-      租户在自己 namespace 是 `*` on `*`(`rbac.go:270`,有意为之)⇒ 含 `create pods/binding`,
-      而 k8s 只把它给 `system:kube-scheduler`;我们的 `deny-nodename` 匹配 `kinds: [Pod]`,
-      **匹配不到 Binding**。⭐ 更要紧的是 **kubelet 准入只检 `NoExecute` 污点**
-      (`pkg/kubelet/lifecycle/predicate.go:448`),`NoSchedule` 只有调度器检 ⇒
-      直接 binding 可能把**节点池的污点隔离整个打穿**。
-      需要**多节点 lab**(带 `NoSchedule` 污点的节点)才能坐实 —— 和 §P 那条 tolerations
-      是同一个 lab。三条修法归属不同,见审计 §Q
+- [x] ✅ **`pods/binding` 已坐实并已堵住**(审计 §Q/§R⑤/§S)
+      推论的每一步都对:租户 `*` on `*` 含 `create pods/binding`;`deny-nodename` 匹配
+      `kinds: [Pod]` 匹配不到 Binding;kubelet 只检 `NoExecute`,`NoSchedule` 被绕开。
+      ⛔ **Kyverno 3.8.2 的 `kinds: [Pod/binding]` 子资源匹配实测不生效**
+      (Ready + webhook 注册了 + 日志里连请求都没有)⇒ 改用原生 VAP
+      `config/policy/tenant-deny-binding.yaml`,两条路(kubectl / Pod 内直连上游)都已验证被拒
 
 - [x] ✅ **节点名从 `spec.nodeName` 漏给租户 —— 定案接受,不改**(用户 2026-07-29)
       知道节点名只在能拿它做事时才值钱,而落点字段全被平台替换 ⇒ 名字兑现不了;
