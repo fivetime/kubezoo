@@ -67,6 +67,7 @@ kubezoo 侧拦截只约束租户本人的 `kubectl`。
 | access review 的 namespace / 组 / 主体转换 | `pkg/convert/accessreview.go` |
 | 退租强制清理 finalizer | `pkg/controller/teardown.go` |
 | 停机两种模式(read-only / frozen),前门 + 上游 RBAC 两层 | `pkg/filters/suspension.go` + 控制器 |
+| **冻结时给租户 namespace 打 `kubezoo.io/frozen`,上游 VAP 据此拒绝租户身份的写** —— 这是唯一够得到租户预置 ServiceAccount 的一层 | `pkg/controller/rbac.go` + `config/policy/tenant-frozen-deny-writes.yaml` |
 
 ⚠️ **集群级资源没有第二道防线**:RBAC 的 `resourceNames` 是精确匹配,表达不了
 "名字以 `<租户ID>-` 开头"。这一层写错就是直接越权 —— 审计里 PersistentVolume、
@@ -135,7 +136,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 | 取证快照 | 快照要能说清"哪个时间点/哪个 revision 的视图",停机机制给不了这个保证 |
 | 节点级硬冻(`cgroup freezer`) | 节点级带外操作,kubezoo 碰不到 cgroup |
 | 节点名从 `spec.nodeName` 漏给租户 | ✅ **定案接受**:落点字段全被平台替换 ⇒ 名字兑现不了;藏掉则 `-o wide`/`describe` 失真,代价确定收益为零。⚠️ 前提是替换覆盖到 `pods/binding`,而兜住它的是**每租户专属**的注入 nodeSelector(架构 §8.2.3) |
-| `Frozen` 中和租户预置的 ServiceAccount | ⛔ **实测坐实,比原先说法更严重**(审计 §T):冻结撤销的是 kubezoo 下发的 RoleBinding,租户**自建**的原样保留 ⇒ 它的 Pod 拿着 SA token **直连上游照常读写**(`GET` 200 / `CREATE` 201)。**冻的是 kubectl,不是租户。**有修法(冻结打标签 + VAP),未实现 |
+
 | `Frozen` 中和租户自建的 RoleBinding | 控制面冻结管不到容器里已在跑的代码;租户可预埋 dead-man switch,换 VM/kata 也堵不住。⚠️ **所以 `Frozen` 不能单独当取证冻结用** |
 
 ## 7. 核对清单
@@ -155,6 +156,9 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 - [ ] 租户留 finalizer 后退租 → namespace 仍能终结,租户 ID 可复用
 - [ ] 租户新建一个 namespace 后,能在里面正常创建对象(RoleBinding 自动下发)
 - [ ] 停机 `ReadOnly` / `Frozen` 期间 **Pod 保持 Running、restarts 不变**;解除后租户恢复可写
+- [ ] `Frozen` 期间**租户预置的 ServiceAccount 从 Pod 内直连上游也写不动**(`CREATE`/`DELETE` 被拒)
+      ⚠️ 同时必须验**平台没被误伤**:冻结 ns 里建 Deployment,controller-manager 仍能收敛出 Pod
+      —— 拦过头的症状是"Deployment 永远不出 Pod",不会有任何报错指向策略
 - [ ] 配额:超额 Pod 加上任意租户可控的标签后**仍被拒**
 - [ ] 租户把自己 namespace 标成 `pod-security.kubernetes.io/enforce: privileged`(建时带 + 事后 patch 两条路),
       privileged / hostNetwork Pod **仍被拒**

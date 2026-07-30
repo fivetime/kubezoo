@@ -19,5 +19,16 @@ package common
 const (
 	TenantNamespaceLabelKey = "kubezoo.io/tenant"
 
+	// TenantFrozenLabelKey marks a frozen tenant's namespaces so that a policy
+	// in the upstream API server can refuse the tenant's remaining credentials.
+	//
+	// Withdrawing the RoleBindings kubezoo issued is not enough on its own: a
+	// tenant that bound its own ServiceAccount keeps that binding, and its pods
+	// reach upstream directly without passing through kubezoo at all. Measured
+	// -- a frozen tenant's pod still listed and created objects. The label is
+	// how the front door tells upstream which namespaces are frozen, since
+	// upstream has no view of the Tenant object.
+	TenantFrozenLabelKey = "kubezoo.io/frozen"
+
 	TenantQuotaNamePrefix = "kubezoo-tenant-quota"
 )

@@ -1003,7 +1003,7 @@ victim2: node=''
 
 ⇒ kubezoo 侧再加一道 binding 拦截,只是给 `kubectl` 用户的**减速带**,不是边界。**不做。**
 
-## T. `Frozen` 停机拦不住租户预置的 ServiceAccount ⛔ 实测坐实(#90)
+## T. `Frozen` 停机拦不住租户预置的 ServiceAccount ⛔ 坐实 → ✅ **已修并复测**(#90)
 
 #90 里我特意没标完成的那条,现在量出来了 —— 而且**比原先说的更严重**。
 
@@ -1023,13 +1023,44 @@ victim2: node=''
 ⇒ **`Frozen` 冻的是租户的 kubectl,不是租户。** 预置一个 Pod 不需要多聪明 ——
 它只要有个 token。⚠️ **所以 `Frozen` 更不能单独当取证冻结用**,这条比原先的表述硬得多。
 
-### 一条可行的修法(未实现、未测)
+### ✅ 修法与复测
 
-冻结时给租户的每个 namespace 打一个标签(如 `kubezoo.io/frozen=true`),
-再加一条 VAP:**该标签存在时,拒绝一切非平台身份的写**。
-VAP 在上游 apiserver 进程内,**两条路都盖得住** —— 正是 §S 得出的那条判据。
+两半:kubezoo 控制器在冻结时给租户每个 namespace 打 `kubezoo.io/frozen`
+(`pkg/controller/rbac.go` 的 `markFrozen`),上游一条 VAP
+(`config/policy/tenant-frozen-deny-writes.yaml`)见到这个标签就**拒绝本租户身份的写**。
+标签是必需的:**上游看不到 Tenant 对象**,这是前门告诉上游"哪些 namespace 冻着"的唯一途径。
 
-比起"删掉租户自建的 RoleBinding"更合适:冻结的设计前提是**什么都不删**。
+⭐ **表达式写成"放行不属于本租户的身份",不是"拒绝租户"** —— 冻结期间平台自己
+仍要能动这些对象。判据是"请求者是不是本租户 namespace 里的 ServiceAccount":
+
+```
+system:serviceaccount:111111-default:default → 前缀 111111 == 目标 ns 前缀 ⇒ 拒
+system:serviceaccount:kube-system:...        → kube != 111111              ⇒ 放行
+system:node:... / system:kube-controller-manager(非 SA)                    ⇒ 放行
+```
+
+**⚠️ 只拦写不拦读**:冻结的承诺是"什么都不删、负载照常跑";读不销毁证据,
+而拦掉读会让还在跑的负载直接崩。前门对租户 kubectl 连读也拒 —— 那是针对**操作人**的,
+和这里不是一回事。
+
+### 复测(9 条,含正向与负向对照)
+
+| | 结果 |
+|---|---|
+| ① **正向对照**:冻结前,租户 SA 直连上游 | `GET 200` / `CREATE 201` / `DELETE 200` |
+| ② 冻结后打标签 | **4 / 4** 个租户 namespace 全部打上 |
+| ③ 冻结后,同一个 SA 同一条路 | **`CREATE 422` / `DELETE 422`**;`GET 200`(设计如此) |
+| ④ 平台自己写冻结 ns | ✅ `configmap/platform-write created` |
+| ⑤ **控制器链路**:平台在冻结 ns 里建 Deployment | ✅ ReplicaSet 1 / Pod 1 —— controller-manager 照常收敛 |
+| ⑥ kubelet 仍在更新状态 | ✅ probe `Running`,restarts 0 |
+| ⑦ 租户本人经 kubezoo(前门) | ✅ Forbidden,`is frozen` |
+| ⑧ **解冻** | 标签 0 个;前门恢复;SA `CREATE 201` —— 两层一致 |
+| ⑨ 非租户 namespace | ✅ kyverno 4 个 Pod 全 Running |
+
+⑤ 是这条里最容易做错的:一条"拒绝一切写"的规则会把 controller-manager 一起拦掉,
+而症状是**租户的 Deployment 永远不出 Pod**,不会有任何报错指向策略。
+
+守卫测试 `pkg/controller/rbac_frozen_test.go`,**已验证摘掉 `markFrozen` 会变红**。
 
 ## 尚未覆盖
 

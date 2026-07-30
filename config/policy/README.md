@@ -31,6 +31,12 @@
 
 | `tenant-deny-binding.yaml` | 租户不得直接 bind Pod 到节点(**原生 VAP,不是 Kyverno**) | 租户可把 Pod 绑到别的租户节点(API 层成功,靠 kubelet 遏制) |
 
+| `tenant-frozen-deny-writes.yaml` | 冻结的租户,其 ServiceAccount 也写不动(**原生 VAP**) | 冻结只冻住租户的 kubectl;它预置的 Pod 拿 SA token 直连上游照常读写 |
+
+⚠️ **`tenant-frozen-deny-writes.yaml` 的表达式是"放行不属于本租户的身份",不是"拒绝租户"** ——
+写成无条件拒绝会把 controller-manager 一起拦掉,症状是**租户的 Deployment 永远不出 Pod**,
+且不会有任何报错指向策略。改它之前先读审计 §T 的复测表。
+
 ⚠️ **`tenant-deny-binding.yaml` 用原生 VAP 是实测逼出来的**:Kyverno 3.8.2 的
 `kinds: [Pod/binding]` 子资源匹配**不生效**(策略 Ready、webhook 注册了、日志里连请求都没有)。
 详见审计 §R⑤。

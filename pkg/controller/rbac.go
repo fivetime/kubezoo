@@ -19,11 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	rbacclient "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	"k8s.io/client-go/util/retry"
@@ -386,6 +389,40 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 	return nil
 }
 
+// markFrozen puts the frozen label on one of the tenant's namespaces, or takes
+// it off again.
+//
+// This is the half of a freeze that reaches the tenant's own workloads.
+// Withdrawing the RoleBindings kubezoo issued stops the tenant's kubectl, and
+// nothing else: a tenant may bind its own ServiceAccount inside its namespace --
+// RBAC permits it, since the tenant already holds those rights -- and the
+// resulting pod talks to the upstream API server directly, never reaching
+// kubezoo. A frozen tenant's pod was measured still listing and creating
+// objects. The label lets a policy in the upstream API server refuse those
+// credentials, which is the only place that sees both paths.
+//
+// Patched rather than updated so that a namespace changing underneath does not
+// turn into a conflict, and skipped when already in the wanted state so a freeze
+// does not rewrite every namespace on each resync.
+func markFrozen(coreClient v1.CoreV1Interface, ns *corev1.Namespace, frozen bool) error {
+	_, labelled := ns.Labels[common.TenantFrozenLabelKey]
+	if labelled == frozen {
+		return nil
+	}
+	value := "null"
+	if frozen {
+		value = strconv.Quote("true")
+	}
+	patch := fmt.Sprintf(`{"metadata":{"labels":{%s:%s}}}`,
+		strconv.Quote(common.TenantFrozenLabelKey), value)
+	_, err := coreClient.Namespaces().Patch(context.TODO(), ns.Name, types.MergePatchType,
+		[]byte(patch), metav1.PatchOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("marking namespace %s frozen=%v: %w", ns.Name, frozen, err)
+	}
+	return nil
+}
+
 // syncNamespaceRoleBindings puts a RoleBinding in each of the tenant's
 // namespaces, which is what actually bounds the tenant: upstream now refuses a
 // namespaced request outside them rather than relying on the rewriting layer to
@@ -409,6 +446,9 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 		ns := &namespaces.Items[i]
 		if ns.DeletionTimestamp != nil {
 			continue
+		}
+		if err := markFrozen(coreClient, ns, isFreeze(mode)); err != nil {
+			return err
 		}
 		if isFreeze(mode) {
 			err := rbacClient.RoleBindings(ns.Name).Delete(context.TODO(), tenantNamespaceAdminBinding, metav1.DeleteOptions{})
