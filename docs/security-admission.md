@@ -29,7 +29,7 @@
 | 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 —— 由策略层拦(`config/policy/`) |
 | 读发现面 / OpenAPI | 枚举出其它租户的 id、CRD 组名与 schema |
 | 摘掉自己 namespace 上的平台标签 | 策略匹配与退租清理同时失效 |
-| 从自己 Pod 的 `spec.nodeName` 枚举平台节点名 | ⚠️ **当前可行,未修**(见 §6)—— 配合 `kubernetes.io/hostname` 可做定向共驻 |
+| 从自己 Pod 的 `spec.nodeName` 枚举平台节点名 | ✅ 可行,但**已定案接受**:落点字段全被替换,名字兑现不了(见 §6) |
 | 退租时留下永不完成的 finalizer | namespace 永久 Terminating,租户 ID 不可复用 |
 
 上面每一条都在 `isolation-audit-cn.md` 里有实测记录(含负向对照),多数已修。
@@ -117,8 +117,10 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 > **租户看不到节点,没有任何调度权,他写的东西会被平台替换掉。**(用户定案)
 
 判断做完没有的标准是**租户还能不能通过任何一条写入路径影响落点** —— 不只是 PodSpec 字段。
-目前三处不满足:节点名从 `spec.nodeName` 漏出、替换尚未实现(现有规则是拒绝)、
-`pods/binding` 是 Pod 建好之后的另一次写入,替换够不到。详见架构 §8.2.2。
+⭐ 「看不到节点」**不是承重件** —— 节点名确实从 `spec.nodeName` 漏出,**已定案接受**
+(名字兑现不了)。承重的是「没有调度权 + 写的会被替换」。
+目前两处不满足:替换尚未实现(现有规则是拒绝);`pods/binding` 是 Pod 建好之后的
+另一次写入,替换够不到。详见架构 §8.2.2。
 
 ## 6. 明确的边界(不做,不是没做)
 
@@ -127,7 +129,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 | 数据面的一切(节点加固、沙箱、网络) | 不是控制面的事 |
 | 取证快照 | 快照要能说清"哪个时间点/哪个 revision 的视图",停机机制给不了这个保证 |
 | 节点级硬冻(`cgroup freezer`) | 节点级带外操作,kubezoo 碰不到 cgroup |
-| 节点名从 `spec.nodeName` 漏给租户 | ⚠️ **不是"不做",是待定**:泄漏面未摸全,且 `-o wide` 显示 NODE 是 kubectl 常规行为,藏掉会碎掉排障体验。等 B1 节点池方案定了一起处理(架构 §8.2.3) |
+| 节点名从 `spec.nodeName` 漏给租户 | ✅ **定案接受**:落点字段全被平台替换 ⇒ 名字兑现不了;藏掉则 `-o wide`/`describe` 失真,代价确定收益为零。⚠️ 前提是替换覆盖到 `pods/binding`,而兜住它的是**每租户专属**的注入 nodeSelector(架构 §8.2.3) |
 | `Frozen` 中和租户自建的 RoleBinding | 控制面冻结管不到容器里已在跑的代码;租户可预埋 dead-man switch,换 VM/kata 也堵不住。⚠️ **所以 `Frozen` 不能单独当取证冻结用** |
 
 ## 7. 核对清单

@@ -337,14 +337,13 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       需要**多节点 lab**(带 `NoSchedule` 污点的节点)才能坐实 —— 和 §P 那条 tolerations
       是同一个 lab。三条修法归属不同,见审计 §Q
 
-- [ ] ⚠️ **kubezoo 侧:节点名从 `spec.nodeName` 漏给租户**(读路径,策略层够不着)
-      Node 对象藏了 list/get/watch 三条路径,但**节点名从每一个 Pod 上漏出来** ——
-      以租户身份读自己的 Pod 拿到的是平台真实节点名(本轮实测顺带看到);
-      代码确认 `pkg/convert` / `pkg/proxy` / `pkg/util` **一处都没碰过 `nodeName`**。
-      租户建几个 Pod 即可枚举节点名,配合 `kubernetes.io/hostname` 做定向共驻。
-      ⚠️ **先别急着改**:泄漏面未摸全(`-o wide` / `status` / events / PV 的 `nodeAffinity`),
-      且 `-o wide` 显示 NODE 是 kubectl 常规行为,一刀切藏掉会碎掉租户排障体验。
-      **"改写成假名" vs "接受并写进文档"是待定决策**,建议等 B1 节点池方案定了一起处理
+- [x] ✅ **节点名从 `spec.nodeName` 漏给租户 —— 定案接受,不改**(用户 2026-07-29)
+      知道节点名只在能拿它做事时才值钱,而落点字段全被平台替换 ⇒ 名字兑现不了;
+      藏掉则 `-o wide`/`describe` 失真,代价确定收益为零。
+      ⚠️ **前提**:替换要覆盖到 `pods/binding`(它是直接写节点名的另一次写入),
+      而兜住它的是 kubelet 核对的那个注入 nodeSelector ⇒
+      **"注入标签每租户专属"是本定案的前提,不是优化项**。详见审计 §P
+
 - [ ] 用 `generate` + `synchronize: true` 承接 namespace 配套对象(租户删了自动重建):
       per-namespace RoleBinding(1.1)、`kubetron-network` ConfigMap(3.2)、PSA 标签、
       ResourceQuota/LimitRange

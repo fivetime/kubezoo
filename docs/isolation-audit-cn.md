@@ -680,7 +680,7 @@ node.kubernetes.io/unreachable   NoExecute
 不是我要测的 `tenant-scheduling`。**判据是拒绝消息里的策略名和规则名**,不是"被拒了"。
 把模板改成完全合规、只留下被测的那一处违规,才测到真东西。
 
-## P. 节点名从 `spec.nodeName` 漏给租户 ⚠️ 观察到,未修
+## P. 节点名从 `spec.nodeName` 漏给租户 ✅ **定案:接受,不改**
 
 ⚠️ **这条是测 §O 时顺带看到的,不是设计过的测试** —— 观测本身可靠(以租户
 kubeconfig、用租户视角的 namespace 名读取),但**泄漏面没有系统摸过**。
@@ -711,16 +711,30 @@ kubectl -n escape get pod c1 -o jsonpath='{.spec.nodeName}'
 ⚠️ 未实测的一条:"平台给节点打了污点时,租户的 `tolerations` 确实能让它上去" ——
 本轮 lab 是单节点 kind,没有可用的污点场景,**只测到策略把它拒了**。要坐实得有多节点 lab。
 
-### 归属与为什么先不改
+### ✅ 定案:接受这个泄漏,不改(用户 2026-07-29 决定)
 
-按 §8.0 判据,这是**读路径 ⇒ kubezoo 的**,策略层结构上够不着(准入看不到响应)。
-但**先别急着改**:
+> 「即使租户 `describe pod` 看到节点名也没用,他的设置会被替代掉。」
 
-- 泄漏面还没摸全:`-o wide`、`status` 里、events、PV 的 `nodeAffinity`
-- `-o wide` 显示 NODE 是 kubectl 的常规行为,一刀切藏掉会让租户排障体验碎掉
+**理由**:知道节点名**只在能拿它做事的时候才值钱**。按 §8.2.2 的原则,
+落点字段(`nodeSelector` / `tolerations` / `affinity` / `topologySpreadConstraints` /
+`schedulerName`)全部由平台替换 ⇒ 名字是一条**兑现不了的信息**。
+反过来,藏掉 `spec.nodeName` 会让 `kubectl -o wide` 和 `describe pod` 对租户失真,
+排障体验碎掉 —— 代价确定,收益为零。
 
-**"改写成假名" vs "接受这个泄漏并写进文档"是个待定决策**,
-建议等 B1 的节点池方案定了一起处理(架构 §8.2.3)。
+⚠️ **成立条件(必须盯住)**:替换要**覆盖到 `pods/binding`**。
+binding 不是"设置",它是**直接写节点名的一次写入**,替换够不到 ——
+那正是"知道名字"唯一能兑现的地方(§Q)。
+好在 kubelet **会**核对注入的 `nodeSelector`,所以只要
+**那个标签每租户专属**,跨租户 binding 会被 kubelet 拒,名字就彻底作废。
+⇒ **这条定案的有效性绑在"注入的 nodeSelector 标签每租户专属"上。**
+
+次要且被接受的残余:节点名会泄漏平台的命名规则、规模、可用区分布 ——
+属于信息披露,不是访问权;租户本来就有专属节点池,意义有限。
+
+### 归属(若将来要改)
+
+按 §8.0 判据这是**读路径 ⇒ kubezoo 的**,策略层结构上够不着(准入看不到响应)。
+真要改还得先摸全泄漏面:`-o wide`、`status` 里、events、PV 的 `nodeAffinity`。
 
 ## Q. `pods/binding` 可能绕开整套落点控制 ⚠️ 读码发现,**未实测**
 
