@@ -20,6 +20,10 @@ Key characteristics:
 - shared control-plane and data-plane resources;
 - tenant lifecycle and cluster resource quota controllers.
 
+Operators should start with the [operations runbook](docs/operations-cn.md): kubezoo on
+its own is only half of the isolation, and the runbook covers what else has to be
+installed, how to verify it took effect, and the checks that look green but prove nothing.
+
 See the [design](docs/design.md), [architecture](docs/kaaas-platform-architecture-cn.md),
 and [comparison](docs/deployment-and-comparison-cn.md) documents for details.
 

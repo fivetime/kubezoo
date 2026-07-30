@@ -170,6 +170,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 
 ## 相关文档
 
+- `operations-cn.md` —— **运营手册**:装什么、怎么停机、怎么验、哪些检查是自欺
 - `isolation-audit-cn.md` —— 逐条findings、实测记录与负向对照
 - `kaaas-platform-architecture-cn.md` §8 —— 职责划分判据、策略层选型、必备策略清单
 - `../TODO-kaaas.md` —— 分阶段待办与已下的决定
