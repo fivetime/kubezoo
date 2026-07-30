@@ -692,6 +692,50 @@ done
 [ "${discovery_narrow:-no}" = no ] && ok "the resources a tenant needs are all advertised"
 
 echo
+echo "== a tenant's own webhook cannot reach past it, and it can undo it =="
+# A tenant may create admission webhooks. Confined, the worst it can do is stop
+# itself; unconfined, one tenant with failurePolicy Fail and a dead endpoint
+# stops everybody. The recovery half matters as much: kubezoo forces the rules to
+# Namespaced scope, so the webhook cannot match the cluster-scoped object that
+# defines it, and the tenant can always delete its way out.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata: {name: selflock}
+webhooks:
+  - name: selflock.verify.example
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service: {name: nowhere, namespace: default, path: /validate, port: 443}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+EOF
+sleep 8
+selector=$($K get validatingwebhookconfiguration "$TID-selflock" \
+  -o jsonpath='{.webhooks[0].namespaceSelector.matchLabels.kubezoo\.io/tenant}' 2>/dev/null)
+scope=$($K get validatingwebhookconfiguration "$TID-selflock" -o jsonpath='{.webhooks[0].rules[0].scope}' 2>/dev/null)
+if [ "$selector" = "$TID" ] && [ "$scope" = Namespaced ]; then
+  ok "a tenant's webhook is pinned to its own namespaces and to namespaced objects"
+else
+  bad "tenant webhook not confined" "namespaceSelector=$selector scope=$scope -- unpinned, one tenant's dead webhook stops the cluster"
+fi
+expect_denied "the tenant's own writes, while its webhook is broken" "selflock" -- \
+  $T -n default create configmap webhook-locked --from-literal=a=b
+expect_allowed "the platform is unaffected by it" \
+  $K -n kube-public create configmap webhook-unaffected --from-literal=a=b
+expect_allowed "and the tenant can delete its way out" \
+  $T delete validatingwebhookconfiguration selflock
+sleep 5
+expect_allowed "writes work again once it is gone" \
+  $T -n default create configmap webhook-recovered --from-literal=a=b
+$K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

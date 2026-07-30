@@ -1826,6 +1826,85 @@ apiextensions-apiserver 的另一条路),被我一并过滤掉了 ⇒
 **租户需要的资源(含 `customresourcedefinitions`)都在公告里**。
 最后一条正是为了防我刚犯的那个回归。
 
+## AH. 跨租户 Ingress 主机名抢占 ⛔ 坐实(装了真控制器测的)
+
+**为什么要装真控制器**:裁决权在 ingress 控制器手里,不装只能推理。
+lab 里装了 ingress-nginx。
+
+### ⭐ 先撞到一件没预料到的:租户的 Ingress 现在是**惰性的**
+
+两个租户各建一个 Ingress,`host` 都写 `shop.example.com`,**两个都建成了**,
+但控制器两个都忽略:
+
+```
+"Ignoring ingress because of error while validating ingress class"
+```
+
+因为 `tenant-platform-classes` 策略把 `ingressClassName` **擦掉了**,而**没有任何东西注入它**。
+
+⚠️ 而且策略按 namespace 标签匹配、**不看谁提交** —— 我以平台身份 patch 回 class,
+也被擦掉了。要让租户的 Ingress 能用,必须由**策略注入**,不能靠事后 patch。
+⇒ 这与落点那条(§8.2.2)是同一个形状:**只做了"擦除"没做"替换"**。
+
+### ⛔ 注入 class 之后:先到先得,输的一方没有任何提示
+
+临时摘掉擦除策略、给两个 Ingress 都写上 `nginx` 之后,读控制器生成的配置:
+
+```
+## start server shop.example.com
+  set $namespace     "111111-default"     ← 111111 先建的,归它
+  set $ingress_name  "ing-a"
+```
+
+**反向对照**(换成 222222 先建 `bank.example.com`):
+
+```
+## start server bank.example.com
+  set $namespace     "222222-default"     ← 222222 先建的,归它
+```
+
+⇒ **创建顺序决定归属**,与租户无关。而且落败的那个 Ingress:
+对象在、class 在、status 也有地址 —— **只是永远不服务流量,零报错**。
+
+### 结论:kubezoo 结构上管不了这件事
+
+`spec.rules[].host` 是一个**自由的 DNS 名**,不是可前缀化的标识符 ——
+前缀化它就等于毁掉它的用途。所以:
+
+- **任何租户可以声明任何主机名,包括别的租户正在用的**
+- **先到先得,后到的静默失效**
+- 这不是 kubezoo 的 bug,是它**表达不了的维度**
+
+⇒ 必须由平台层裁决。可选形态(均未实现):
+按租户分配主机名前缀/子域并用策略校验;或给每租户独立的 ingress 控制器 + 独立入口;
+或在准入层维护一张"主机名 → 租户"的登记表。
+
+## AI. 同租户 webhook 自锁 ✅ 受控且可自救
+
+租户建一个 `failurePolicy: Fail`、端点不存在的 ValidatingWebhookConfiguration。
+
+kubezoo 的改写(实测)::
+
+```
+namespaceSelector = {kubezoo.io/tenant: 111111}
+rules[0].scope    = Namespaced
+clientConfig.service.namespace = 111111-default
+```
+
+| | |
+|---|---|
+| ① 租户自己写 ConfigMap | ⛔ 失败(自作自受) |
+| ② 另一个租户 | ✅ 不受影响 |
+| ③ 平台 | ✅ 不受影响 |
+| ④ **能否自救** | ✅ **删得掉自己的 webhook** |
+| ⑤ 删完 | ✅ 恢复正常 |
+
+⭐ **自救之所以成立,是因为 kubezoo 强制 `scope: Namespaced`** ——
+webhook 只能匹配命名空间级对象,**匹配不到定义它自己的那个集群级配置**,
+所以租户永远删得掉。若哪天放开 scope,自锁就会变成**不可恢复**。
+
+守卫 `verify.sh` 五条(改写被钉住 / 自己被锁 / 平台不受影响 / 能删掉 / 删完恢复)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
@@ -1837,7 +1916,7 @@ apiextensions-apiserver 的另一条路),被我一并过滤掉了 ⇒
   `-A` 的 **watch** 也已改为多路复用(`pkg/proxy/watchmux.go`)。
   ⚠️ 仍未改的只有 **cluster 级资源**(全量 + 前缀过滤)—— **有意保留**:
   标签下推方案实测会让所有存量对象从租户视角消失,见 `design-list-fanout-cn.md` §6
-- 跨租户 Ingress host/path 抢占:一旦两租户都接到平台 ingress 控制器上(见 I②),
-  归属由控制器裁决,kubezoo 不参与 —— 未测,属 3.1 策略层
-- 租户自建 webhook 的 `failurePolicy: Fail` 对平台组件的影响面(已限 Namespaced + 本租户 ns,
-  但同租户内仍可自锁)—— 未测
+- ~~跨租户 Ingress host/path 抢占~~ ⛔ **已实测坐实**(§AH):先到先得,输的一方零报错;
+  kubezoo 结构上管不了(host 是自由 DNS 名),**必须平台层裁决**,未实现
+- ~~租户自建 webhook 的 `failurePolicy: Fail` 影响面~~ ✅ **已实测**(§AI):
+  受控(只锁自己)且**可自救**(强制 `scope: Namespaced` ⇒ 匹配不到自己那个集群级配置)
