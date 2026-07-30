@@ -1623,6 +1623,42 @@ kubezoo 用**自己的身份**替租户写 ClusterRole(上游 RBAC 表达不了"
 
 **三个待解**:读回(helm 建完会 `get` 它)、新 namespace 的补投影、更新/删除传播。
 
+## AD. Lease 会不会漏出节点清单和平台指纹 ✅ 不会(五条探测)
+
+**为什么专门测 Lease**:`kube-node-lease` 里**每个节点一个 Lease,名字就是节点名** ——
+等于一份完整的节点清单(数量 + 名字 + 活性)。而 `kube-system` 和策略引擎 namespace 里的
+Lease,持有者写的是 `kyverno-admission-controller-f849f45fd-c549g` 这种 ——
+**正是我从拒绝消息里擦掉的那个"平台用什么策略引擎"指纹**(§V)。
+
+上游真实存在的:
+
+```
+kube-node-lease   kz-audit3-control-plane   ← 节点名
+kube-system       kube-controller-manager / kube-scheduler / apiserver-...
+kyverno           kyverno / kyverno-background-controller
+```
+
+### 租户侧五条探测,全部封死
+
+| 探测 | 结果 |
+|---|---|
+| `get leases -A` | `No resources found` |
+| `get leases -n kube-node-lease` / `-n kube-system` | 空(前缀化成租户自己的那两个) |
+| 裸路径 `/apis/coordination.k8s.io/v1/leases`(集群级) | `items: []` |
+| 裸路径 `/apis/.../namespaces/kube-node-lease/leases` | `items: []`(同样被前缀化) |
+| `describe lease <节点名> -n kube-node-lease` | **NotFound** |
+| `--field-selector metadata.name=<节点名>` | `No resources found` |
+| 直接写上游真名 `-n 111111-kube-node-lease` | **Forbidden**(被再前缀一次,够不着) |
+
+⭐ **靠的不是任何 Lease 专属逻辑,就是 namespace 前缀。**
+这也说明同一类"平台基础设施藏在命名空间级资源里"的东西(Endpoints、Events、
+ConfigMap 里的 leader election 记录)都由同一个机制兜着。
+
+⚠️ 注意 `-A` 这条**在扇出之前是 Forbidden**(集群级 LIST 无权限),现在是"正常返回且为空"——
+从"被权限挡住"变成"真的查了自己的全部 namespace,确实没有"。**后者才是可依赖的。**
+
+守卫 `verify.sh` 三条(跨 namespace 列举不触及平台 namespace / 按名字 NotFound / 裸路径落在租户自己的)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

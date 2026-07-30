@@ -510,6 +510,37 @@ else
 fi
 
 echo
+echo "== platform infrastructure does not leak through a namespaced resource =="
+# Leases are the sharpest probe available. kube-node-lease mirrors the node
+# inventory one object per node, and the leases in kube-system and the policy
+# engine's namespace name the control-plane components and their pods -- the same
+# "which policy engine does this platform run" fingerprint that had to be trimmed
+# out of denial messages. None of it should reach a tenant, and what keeps it out
+# is the namespace prefixing rather than anything lease-specific.
+leases_out=$($T get leases -A --no-headers 2>&1)
+if grep -qE "kube-node-lease|kube-system|kyverno" <<<"$leases_out"; then
+  bad "platform leases leak" "a cross-namespace lease listing reached platform namespaces: $(tr '\n' ' ' <<<"$leases_out" | cut -c1-140)"
+else
+  ok "a cross-namespace lease listing reaches no platform namespace"
+fi
+# By name, through the raw path, and by field selector -- the ways round a list.
+node_name=$($K get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -n "$node_name" ]; then
+  named=$($T get lease "$node_name" -n kube-node-lease 2>&1)
+  if grep -qi notfound <<<"$named"; then
+    ok "a platform node's lease is NotFound by name"
+  else
+    bad "node lease reachable by name" "got: $(tr '\n' ' ' <<<"$named" | cut -c1-140)"
+  fi
+  raw=$($T get --raw '/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases' 2>&1)
+  if grep -q "$node_name" <<<"$raw"; then
+    bad "node lease reachable by raw path" "the raw path reached the platform namespace: $(cut -c1-140 <<<"$raw")"
+  else
+    ok "the raw path to kube-node-lease lands in the tenant's own, not the platform's"
+  fi
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

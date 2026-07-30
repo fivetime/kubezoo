@@ -153,6 +153,10 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 - [ ] 租户建 `*` on `*` 的 ClusterRole 并绑给自己 → 上游判定仍无权
 - [ ] `kubectl get nodes` 为空,`kubectl get node <名字>` NotFound,watch 无事件
 - [ ] 租户 A 的 `/openapi/v2` 与 `/openapi/v3` 里没有租户 B 的任何痕迹
+- [ ] `kubectl get leases -A`、按名字 `describe`、裸 API 路径、字段选择器,
+      **都拿不到 `kube-node-lease`(节点清单)与 `kube-system`(平台组件指纹)**
+      ⚠️ 这条要在**扇出之后**测才有意义:扇出前 `-A` 是 Forbidden,那是"被权限挡住",
+      不是"查过了确实没有"
 - [ ] 策略拒绝消息里既无 `<租户ID>-` 前缀,也无 `admission webhook "..."` 字样
       ⚠️ 核对时先问"**这条信息租户本来知不知道**" —— 他自己敲进去的字符串被回显不算泄漏
 - [ ] 租户读回自己对象的 `ownerReferences`,`apiVersion` **没有**带 `<租户ID>-` 前缀
