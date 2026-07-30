@@ -1659,6 +1659,54 @@ ConfigMap 里的 leader election 记录)都由同一个机制兜着。
 
 守卫 `verify.sh` 三条(跨 namespace 列举不触及平台 namespace / 按名字 NotFound / 裸路径落在租户自己的)。
 
+## AE. `kubectl logs` 的隔离 ✅ 封死;⛔ 但 `-f` 是坏的,已修
+
+**为什么值得单独测**:logs 走**连接器**(`pods/log` 注册为 `IsConnecter`),
+它改写的是 **URL 路径**而不是对象 —— 而审计里 `nodes/proxy` 那个逃逸正是因为
+"它是 proxy,改写层看不到路径"。路径改写器该用穿越去打。
+
+### 隔离:七条探测全封(对照组返回真日志)
+
+| 探测 | 结果 |
+|---|---|
+| 读自己的 Pod / `-l app=` 按标签读 | ✅ 返回真日志 |
+| `-n kube-system logs <平台 Pod>` | NotFound |
+| 裸路径 `/api/v1/namespaces/kube-system/pods/<平台>/log` | NotFound |
+| **路径穿越** `/namespaces/default/../kube-system/...` | NotFound |
+| **编码穿越** `%2e%2e` | NotFound |
+| 双 `namespaces` 段 | could not find the requested resource |
+| 直接写上游真名 `-n 111111-default` | Forbidden(被再前缀一次) |
+
+⚠️ 对照组(读自己的)返回 `tenant-line-26` —— **这条不能省**,否则"哪条都不通"也会看着像封死了。
+
+### ⛔ 但 `logs -f` 完全没有输出
+
+| | |
+|---|---|
+| 不带 `-f`,经 kubezoo | ✅ 有日志 |
+| **带 `-f`,经 kubezoo** | ⛔ **8 秒 0 行** |
+| 带 `-f`,**直连上游**(对照) | ✅ 持续输出 |
+| `kubectl exec` 经 kubezoo | ✅ 正常(它走 upgrade,不是流式响应体) |
+
+**修法**:`connecterproxy.go` 原来按 CloseNotifier + Flusher + Hijacker 三者是否齐全
+在两个装饰器之间二选一,而**三者齐全时走的那个分支不流式**。
+改用上游自己的 `responsewriter.WrapForHTTP1Or2` —— 它对 HTTP/1 和 HTTP/2 都保留
+Flusher 与 CloseNotifier,只在内层真有 Hijacker 时才加上。
+
+### ⭐ 方法学:我第一次的红测是无效的,而且结论正好反了
+
+我先诊断为"HTTP/2 没有 Hijacker ⇒ 落到朴素装饰器 ⇒ 没有 Flush",
+然后把接线换成朴素装饰器做红测 —— **结果是绿的**,流式照常。
+
+用 **git 里的原始代码**重测才发现:原始代码 **0 行**。
+两者只在 `cn && fl && hj` 为真时不同 ⇒ **那个条件是真的,坏的正是"三者齐全"那个分支**,
+和我的诊断**方向相反**。
+
+> **判据:红测必须回到真正的原始代码,不是回到"我以为等价的那一版"。**
+
+守卫 `verify.sh` 三条(自己的日志 / **`-f` 8 秒内多于一行** / 平台 Pod 按路径与穿越都够不着),
+**已用原始代码验证会红**(恰好那一条)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

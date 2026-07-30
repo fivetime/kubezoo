@@ -17,9 +17,7 @@ limitations under the License.
 package proxy
 
 import (
-	"bufio"
 	"context"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/endpoints/responsewriter"
 	"k8s.io/apiserver/pkg/registry/rest"
 	api "k8s.io/kubernetes/pkg/apis/core"
 
@@ -123,17 +122,24 @@ func (cp *ConnecterProxy) connect(req *http.Request, w http.ResponseWriter) {
 	req.Header[authenticationv1.ImpersonateUserHeader] = []string{userInfo.GetName()}
 	req.Header[authenticationv1.ImpersonateGroupHeader] = userInfo.GetGroups()
 
-	// decorate response writer to enable metrics
-	delegate := &ResponseWriterDelegator{ResponseWriter: w}
-	_, cn := w.(http.CloseNotifier)
-	_, fl := w.(http.Flusher)
-	_, hj := w.(http.Hijacker)
-	var rw http.ResponseWriter
-	if cn && fl && hj {
-		rw = &FancyResponseWriterDelegator{delegate}
-	} else {
-		rw = delegate
-	}
+	// Decorate the response writer to record status and length, then hand it to
+	// the wrapper that puts back the interfaces the decoration hides.
+	//
+	// This used to pick between two decorators by testing the inner writer for
+	// CloseNotifier, Flusher and Hijacker together, and the branch that fired
+	// when all three were present did not stream: `kubectl logs -f` produced
+	// nothing at all while the same follow against upstream streamed normally,
+	// and a snapshot `logs` through the same path was fine. `kubectl exec` was
+	// unaffected, since it upgrades the connection rather than streaming a body.
+	//
+	// The most likely culprit is that decorator's CloseNotify, which forwards a
+	// deprecated interface the apiserver's writer chain no longer means the same
+	// way, and the proxy reads it as the client having gone away. Not chased
+	// further, because the fix is not to repair that branch: WrapForHTTP1Or2 is
+	// upstream's answer to exactly this problem, preserving Flusher and
+	// CloseNotifier for both HTTP/1 and HTTP/2 and adding Hijacker only when the
+	// inner writer really has it.
+	rw := responsewriter.WrapForHTTP1Or2(&ResponseWriterDelegator{ResponseWriter: w})
 	// proxy logic
 	proxyHandler := proxy.NewUpgradeAwareHandler(&u, cp.transport, false, false, &responder{w: w})
 	proxyHandler.ServeHTTP(rw, req)
@@ -166,6 +172,13 @@ func (r *ResponseWriterDelegator) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap returns the writer this one decorates, which is what
+// responsewriter.WrapForHTTP1Or2 needs in order to work out which of Flusher,
+// CloseNotifier and Hijacker the underlying connection actually supports.
+func (r *ResponseWriterDelegator) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // Status return the http response status.
 func (r *ResponseWriterDelegator) Status() int {
 	return r.status
@@ -174,27 +187,6 @@ func (r *ResponseWriterDelegator) Status() int {
 // ContentLength return the length of http response content.
 func (r *ResponseWriterDelegator) ContentLength() int {
 	return int(r.written)
-}
-
-type FancyResponseWriterDelegator struct {
-	*ResponseWriterDelegator
-}
-
-// CloseNotify returns a channel that receives at most a
-// single value (true) when the client connection has gone
-// away.
-func (f *FancyResponseWriterDelegator) CloseNotify() <-chan bool {
-	return f.ResponseWriter.(http.CloseNotifier).CloseNotify()
-}
-
-// Flush sends any buffered data to the client.
-func (f *FancyResponseWriterDelegator) Flush() {
-	f.ResponseWriter.(http.Flusher).Flush()
-}
-
-// Hijack lets the caller take over the connection.
-func (f *FancyResponseWriterDelegator) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return f.ResponseWriter.(http.Hijacker).Hijack()
 }
 
 // responder implements rest.Responder for assisting a connector in writing

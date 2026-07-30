@@ -541,6 +541,60 @@ if [ -n "$node_name" ]; then
 fi
 
 echo
+echo "== logs reach the tenant's own pods and stream, and nothing else's =="
+# Logs go through the connecter, which rewrites the path rather than the object,
+# and a path rewriter is where nodes/proxy escaped before. It is also the one
+# place streaming has to work: a wrapper that hides Flusher leaves `logs -f`
+# silent, which was the case until it was measured against upstream.
+$T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: log-probe}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh", "-c", "i=0; while true; do i=\$((i+1)); echo probe-line-\$i; sleep 1; done"]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+EOF
+for _ in $(seq 40); do
+  [ "$($K -n "$NS" get pod log-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+if [ "$($K -n "$NS" get pod log-probe -o jsonpath='{.status.phase}' 2>/dev/null)" != Running ]; then
+  bad "log probe pod" "never reached Running, so the log checks are skipped rather than reported green"
+else
+  if $T -n default logs log-probe --tail=1 2>/dev/null | grep -q probe-line; then
+    ok "a tenant reads its own pod's logs"
+  else
+    bad "own pod logs" "nothing came back from a pod that is printing a line a second"
+  fi
+  # Streaming, not just a snapshot: more than one line over several seconds is
+  # the only thing that distinguishes a flushed stream from a buffered one.
+  streamed=$(timeout 8 $T -n default logs log-probe -f --tail=1 2>/dev/null | grep -c probe-line)
+  if [ "${streamed:-0}" -gt 1 ]; then
+    ok "logs -f streams ($streamed lines in 8s)"
+  else
+    bad "logs -f does not stream" "got ${streamed:-0} lines in 8s; a snapshot works but the follow is buffered, which is what happens when the response writer wrapper hides Flusher"
+  fi
+  platform_pod=$($K -n kube-system get pods --no-headers 2>/dev/null | awk '{print $1}' | head -1)
+  if [ -n "$platform_pod" ]; then
+    for path in \
+      "/api/v1/namespaces/kube-system/pods/$platform_pod/log?tailLines=1" \
+      "/api/v1/namespaces/default/../kube-system/pods/$platform_pod/log?tailLines=1"; do
+      out=$($T get --raw "$path" 2>&1)
+      if grep -qiE "notfound|forbidden|could not find" <<<"$out"; then
+        continue
+      fi
+      bad "logs reach a platform pod" "$path returned: $(tr '\n' ' ' <<<"$out" | cut -c1-120)"
+      platform_reached=yes
+    done
+    [ "${platform_reached:-no}" = no ] && ok "a platform pod's logs are out of reach, by path and by traversal"
+  fi
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores
