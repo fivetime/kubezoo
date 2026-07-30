@@ -332,7 +332,9 @@ list 空 / get NotFound / raw GET 404 / watch 静默 / 平台自己不受影响�
 | cluster 级资源 | **全集群** | ⚠️ 拉回全部再内存过滤(**未改**) |
 | watch | 带 ns 的已 scoped;**`-A` 的 watch 已改为多路复用**(`pkg/proxy/watchmux.go`) | ✅ 查询范围够不着别人 |
 
-⚠️ **cluster 级资源仍走老路**(全集群 + 内存过滤)—— 它没有 namespace 可扇,是另一个问题。
+⚠️ **cluster 级资源仍走老路**(全集群 + 内存过滤),**这是有意保留的**:
+标签下推方案实测会让**所有存量对象从租户视角消失**(升级即失明),
+而收益是 O(租户数×几十) 而非 O(工作负载)。详见 `design-list-fanout-cn.md` §6。
 
 两个后果:
 

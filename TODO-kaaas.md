@@ -318,8 +318,15 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       ⚠️ **本条原先写的"要先定两个语义让步(分页 / resourceVersion)"是错的** ——
       原生分页本来就是快照,扇出用 `resourceVersionMatch=Exact` 钉住同一 revision 即可。
       实测:扇出前 `-A` 是 `Forbidden ... at the cluster scope`,扇出后正常返回。
-- [ ] **cluster-scoped 请求仍走"全量 + 过滤"** —— 未改。集群级资源没有 namespace 可扇,
-      得另想(名字前缀不是 API 能表达的维度)
+- [x] ⛔ **cluster-scoped 仍走"全量 + 过滤" —— 试过标签方案,实测危险已撤回**(设计文档 §6)
+      写入口盖 `kubezoo.io/tenant` + 列举时下推 label selector,保留前缀做权威。
+      **实测:所有存量对象从租户视角消失**(租户 222222 的 PV/CRD 全空),
+      放到生产等于升级即失明,`helm --prune` 会真删。
+      不靠 backfill 糊过去的理由:换二进制到跑完 backfill 之间全租户瞎;运维忘了就是静默丢失;
+      而且 label selector 返回空**分不清"确实没有"和"没打标签"**。
+      收益本来也小:集群级对象是 O(租户数×几十),不是 O(工作负载),
+      且标签无索引**不降低 apiserver 扫描成本**。
+      ⇒ **决定不做**;将来若要做,前提是**先有能自证完整的 backfill**
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次:
 > 脚本参数错位、前一步删过 Pod 导致用量归零、`nodeName` 造假让 Pod 被 GC、
