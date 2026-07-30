@@ -1504,10 +1504,11 @@ RoleBinding 的多租户模型都撞同一堵墙。
 
 诚实列出,不算做完:
 
-- **`-A` / 全集群 LIST 现在对租户直接 Forbidden**(#87 的副作用,实测)。
-  这顺带堵掉了 TODO 1.2 说的"全量 LIST + 过滤"规模墙与 DoS 面,
-  但也意味着 `kubectl get pods -A` 对租户**不可用** ⇒ 需按 TODO 1.2 改为
-  "先取租户 namespace 列表,再逐 namespace scoped LIST 合并"
+- ~~`-A` / 全集群 LIST 现在对租户直接 Forbidden~~ ✅ **已解决(LIST 部分)**:
+  改成逐 namespace 扇出后,`-A` 从 `Forbidden ... at the cluster scope` 变成正常返回 ——
+  逐 namespace 读租户有权限,全集群读没有。实现 `pkg/proxy/fanout.go`,
+  设计 `design-list-fanout-cn.md`,实测前后对照见架构文档 §7.2。
+  ⚠️ **只改了 LIST**:`-A` 的 **watch** 与 **cluster 级资源**仍走全集群老路
 - 跨租户 Ingress host/path 抢占:一旦两租户都接到平台 ingress 控制器上(见 I②),
   归属由控制器裁决,kubezoo 不参与 —— 未测,属 3.1 策略层
 - 租户自建 webhook 的 `failurePolicy: Fail` 对平台组件的影响面(已限 Namespaced + 本租户 ns,

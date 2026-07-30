@@ -311,10 +311,12 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
 findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSet 由**策略层**执行,
 策略在 `config/policy/`,lab 默认装 Kyverno 并应用):
 
-- [ ] **`-A` 与 cluster-scoped 请求** —— #87 之后对租户直接 Forbidden。
-      改成"逐 namespace 扇出合并"要先定两个语义让步,见 §4.1 与架构文档 §11.5:
-      **分页**(kubectl 默认就带 `--chunk-size=500`)与 **resourceVersion**
-      (跨 namespace 没有单一快照,而旧行为是有的)
+- [x] ✅ **`-A` 已改为逐 namespace 扇出**(见 1.2)。
+      ⚠️ **本条原先写的"要先定两个语义让步(分页 / resourceVersion)"是错的** ——
+      原生分页本来就是快照,扇出用 `resourceVersionMatch=Exact` 钉住同一 revision 即可。
+      实测:扇出前 `-A` 是 `Forbidden ... at the cluster scope`,扇出后正常返回。
+- [ ] **cluster-scoped 请求仍走"全量 + 过滤"** —— 未改。集群级资源没有 namespace 可扇,
+      得另想(名字前缀不是 API 能表达的维度)
 
 > ⚠️ 每条测试**必须带负向对照**(确认测试真的走到了被测分支)—— 本项目在这上面栽过四次:
 > 脚本参数错位、前一步删过 Pod 导致用量归零、`nodeName` 造假让 Pod 被 GC、
@@ -459,9 +461,10 @@ kubezoo 管控制面多租户,kubetron 管数据面/网络多租户,kata 管计�
 
 四堵墙,按预计撞上的先后:
 
-- [ ] **`-A` 全量 LIST 且无 cache** —— 任一租户执行 `kubectl get pods -A` 就是一次全集群 LIST;
-      `pkg/proxy/` 内**零处 informer/cache**。租户越多单次越贵,**代价由全体承担**,
-      同时是 DoS 面。(修法见 1.2)
+- [x] ✅ **`-A` 的 LIST 已从全集群改为逐 namespace 扇出**(见 1.2),
+      代价从 O(全集群) 降到 O(租户),DoS 面随之消失
+- [ ] **`-A` 的 WATCH 仍是全集群** —— informer 与 `kubectl get -w -A` 走的是这条。
+      下一步就是它(多路复用),现在能从 LIST 返回的 R 干净起步
 - [ ] **准入 webhook 同步开销** —— 高频短任务创建 Pod,每次同步过 Kyverno,须压测
 - [ ] **策略引擎的集群状态缓存** —— 与第一条同类,能不用就不用
 - [ ] **上游 etcd 单一键空间(#84)** —— N 租户全部对象共用一套 keyspace,

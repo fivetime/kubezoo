@@ -267,7 +267,7 @@ Cluster-scoped 那部分**永远只能靠改写层**。但绝大多数流量是 
 |---|---|---|
 | ~~Node 无条件可见(§7.1)~~ **已修** | 删掉**三处**豁免(不是一处) | Conformance 测试会挂——它正是为此而加 |
 | 平台指纹泄露(§5) | convert 层出站擦除/还原 | 需三方契约 |
-| `-A` 全量 LIST(§7.2) | 先取租户 namespace 列表,再逐 namespace 发 scoped LIST 合并 | 请求放大(N 个 ns = N 次上游请求),但数据量从全集群降到租户自身。⚠️ 分页与 resourceVersion 语义要先定,见 §11.5 |
+| ~~`-A` 全量 LIST(§7.2)~~ **LIST 已修** | 逐 namespace scoped LIST,所有子 LIST 钉同一 revision | 请求放大(N 次上游请求)已由 `maxFannedNamespaces` 硬上限约束。**分页与 resourceVersion 无语义让步**(原文说要让步,是错的)。⚠️ `-A` 的 **watch** 与 cluster 级资源仍未改 |
 
 **② 纵深防御** —— §6.2 的 per-namespace RBAC。
 
@@ -308,21 +308,31 @@ Cluster-scoped 那部分**永远只能靠改写层**。但绝大多数流量是 
 三处一起去掉后 Node 回归成普通集群级资源(名字前缀说了算,平台节点都没有前缀):
 list 空 / get NotFound / raw GET 404 / watch 静默 / 平台自己不受影响。**均已实测。**
 
-### 7.2 `-A` 与 cluster-scoped 请求走"全量 + 过滤"
+### 7.2 ✅ `-A` 已改为按 namespace 扇出
 
-`pkg/proxy/proxy.go:178-180` 的 `getClient()` 只在 `requestInfo.Namespace != ""` 时限定
-namespace;否则客户端不限范围,靠 `FilterUnstructuredList`(`pkg/util/util.go:408`)事后筛。
+**本节原来的内容已作废。** 原文说 `-A` 走"全集群 LIST + 内存过滤",
+并且 #87 之后对租户**直接 Forbidden**、"问题本身没解决"。
+前半句曾经属实,后半句现在不成立了 —— 实现见 `design-list-fanout-cn.md`,
+代码 `pkg/proxy/fanout.go`。
 
-⚠️ **现状已变**:#87 的 per-namespace RBAC 落地后,`-A` 对租户**直接 Forbidden** ——
-下表描述的是被权限挡住之前的行为。问题本身没解决,而且 `-A` 这个常用能力也没了,
-详见 §11.5。
+**实测的前后对照**(同一个 lab,只切换扇出开关):
+
+| | `kubectl get cm -A` |
+|---|---|
+| 扇出关闭(旧行为) | ⛔ `Forbidden ... cannot list resource "configmaps" ... at the cluster scope` |
+| 扇出开启(现在) | ✅ 正常返回该租户全部 namespace 的对象 |
+
+⭐ **扇出顺带把 `-A` 这个能力修回来了**:逐 namespace 读租户有权限,全集群读没有。
+#87 的 per-namespace RBAC 之所以挡住旧实现,正是因为旧实现要的是集群级权限。
 
 | 租户操作 | 上游查询范围 | 隔离靠什么 |
 |---|---|---|
 | `kubectl get pods`(带 ns) | 限定 `111111-default` | ✅ 查询范围够不着别人 |
-| `kubectl get pods -A` | ~~全集群~~ → **现在 Forbidden** | 上游 RBAC(#87) |
-| cluster 级资源 | **全集群** | ⚠️ 拉回全部再内存过滤 |
-| watch | 同上两种 | `pkg/proxy/watch.go:91` 逐事件过滤 |
+| `kubectl get pods -A` | **该租户的每个 namespace,逐个 scoped LIST** | ✅ 查询范围够不着别人 |
+| cluster 级资源 | **全集群** | ⚠️ 拉回全部再内存过滤(**未改**) |
+| watch | 带 ns 的已 scoped;`-A` 的 watch **仍是旧路径** | `pkg/proxy/watch.go` 逐事件过滤 |
+
+⚠️ **只改了 LIST。** `-A` 的 **watch** 与 **cluster 级资源**仍走老路。
 
 两个后果:
 
@@ -379,13 +389,6 @@ merge patch 置 null、json patch remove、改成别的租户 id)上游标签一
 以及任何策略引擎自己约定的匹配标签 —— 那些没有转换器守着,租户能改。
 这正是 §8.1 铁律要反向写(exclude 平台自身 namespace)的原因:
 **判据只能建立在租户改不动的东西上**。
-
-## 7.9 租户 `-A` 的扇出
-
-设计见 `design-list-fanout-cn.md`。要点:**没有语义让步** ——
-原生分页本来就把整轮 LIST 钉在一个 revision 上(`continue` token 里带 rv),
-扇出用 `resourceVersionMatch=Exact` 照抄即可;成本从 O(集群) 降到 O(租户)。
-⭐ 它同时是**租户自装 operator 的必需件**(cluster-wide informer 走这条路)。
 
 ## 8. 准入策略层
 
@@ -923,7 +926,7 @@ kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
 
 | # | 墙 | 触发条件 | 关联 |
 |---|---|---|---|
-| 1 | **`-A` 全量 LIST 无 cache** | 任一租户执行 `kubectl get pods -A`;租户数越多单次越贵 | §7.2;打在 KubeBrain 上即 #41/#43 类问题 |
+| 1 | ~~**`-A` 全量 LIST 无 cache**~~ **LIST 已修**(§7.2)。⚠️ 剩 `-A` 的 **watch** 仍是全集群 | 任一租户 `kubectl get pods -A -w` 或 informer | §7.2;打在 KubeBrain 上即 #41/#43 类问题 |
 | 2 | **准入 webhook 同步开销** | 高频短任务创建 Pod,每次同步过 Kyverno | §8.5 |
 | 3 | **策略引擎的集群状态缓存** | Kyverno `context` lookup / Gatekeeper referential constraint 需 cache 全集群对象 → 全量 watch | 与 #1 同类。**能不用就不用** |
 | 4 | **上游 etcd 单一键空间** | N 租户全部对象共用一套 keyspace | 任务 #84;这是 KubeBrain 的主场,也是产品天花板 |
@@ -933,45 +936,35 @@ kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
 
 ---
 
-## 11.5 `-A` 全量 LIST:现状、过渡方案、以及结合 KubeBrain 的目标解
+## 11.5 `-A` 全量 LIST ✅ 已解决(LIST 部分)
 
-### 现状(实测)
+**本节原来的内容大半已作废,保留是为了记住哪里判断错了。**
 
-租户敲 `kubectl get pods -A` 时,kubezoo 走的是**全集群 LIST → 内存里按租户前缀丢弃**
-(`tenantProxy.getClient` 在无 namespace 时用集群级客户端,再由 `FilterUnstructuredList` 过滤)。
-代价与**全体租户的数据量**成正比 —— 100 租户 × 1000 Pod,任何一个租户随手一敲就是 10 万对象的读取。
-既是规模墙,也是**任何租户都能发的 DoS**。
+原文提出"过渡方案"要带三个决定去做,其中两个被写成**必须做的语义让步**:
 
-⚠️ 顺带说明:#87 的 per-namespace RBAC 落地后,`-A` 对租户**已经直接 Forbidden**,
-所以这条路径当前打不通。但它只是被权限挡住了,**问题本身没解决**,而且 `-A` 这个常用能力也没了。
+- ~~"分页:要么实现复合 token,要么明确声明 `-A` 不支持分页"~~
+- ~~"resourceVersion:返回 N 个结果中的最小 RV,写明 `-A` 的 watch 语义是最终一致而非快照"~~
 
-### 过渡方案:逐 namespace scoped LIST 合并
+**这两条都是错的。** 原生 apiserver 的分页本来就是**快照**:`continue` token 里带着 revision,
+store 强制每一页来自同一 revision。扇出把所有子 LIST 用 `resourceVersionMatch=Exact`
+钉在同一个 R 上,就得到**完全相同的语义** —— 复合 token 是要写,但它不是"让步",
+而且返回的 RV 就是 R,**是真快照,informer 可以直接用**。
 
-解决**唯一不可接受**的那条:跨租户放大与 DoS 消失,代价降到与该租户自身数据成正比。
+原文第三条(**请求放大 ⇒ 租户 namespace 数必须有配额**)**仍然成立**,已在实现里落成硬上限
+(`maxFannedNamespaces`,超限报错而不是悄悄截断)。
 
-但要带着三个明确决定去做,否则是换个地方踩:
+### 关于"目标解:存储层前缀扫描"
 
-1. **请求放大** —— 一个租户请求变 N 个上游请求(N = 该租户 namespace 数)。
-   ⇒ **租户 namespace 数必须有配额约束**,否则请求放大本身成为新的 DoS
-2. **分页** —— ⚠️ 现有实现**根本没有 continue token 处理**(全量读回再过滤)。
-   合并之后 N 个游标要合成一个连贯 token,否则 kubezoo 必须把租户全部数据 materialize 在内存里。
-   ⇒ 要么实现复合 token,要么**明确声明 `-A` 不支持分页**并对结果规模设硬上限(超限报错,不是 OOM)
-3. **resourceVersion** —— 合并列表没有单一 RV,N 次 LIST 取自不同 revision,不是快照。
-   而 `kubectl get -w -A` 与 informer 都要拿 LIST 的 RV 去起 watch。
-   ⇒ 返回 N 个结果中的**最小 RV**(宁可重放也不漏),并写明 `-A` 的 watch 语义是最终一致而非快照
+原文说真正的解是在存储层按 `/registry/pods/<tid>-` 做一次前缀扫描,
+并把缺口归结为"没法把这个意图从 API 表达下去"。**这个判断是对的**,
+但结论应该反过来:**正因为表达不下去,才不该往那个方向走** ——
+绕过 apiserver 直读存储等于放弃准入、RBAC 和 watch cache,是重写 apiserver 的读路径。
 
-### ⭐ 目标解:结合 KubeBrain 做到 O(租户数据)
+而扇出的成本已经足够低:watch cache 按 namespace 建了索引,
+且 `ListFromCacheSnapshot` 自 1.34 起默认开,`Exact` 可由缓存快照服务
+⇒ **N 次带 scope 的缓存读**,不是 N 次存储扫描。
 
-**因为 kubezoo 给 namespace 加了租户前缀,一个租户某类资源的全部对象在存储层本来就是
-一段连续的 key 区间** —— apiserver 的 `NamespaceKeyRootFunc` 就是
-`prefix + "/" + namespace` 拼前缀,所以 `/registry/pods/<tid>-` 是一个天然的连续区间。
-
-一次前缀扫描即可:**O(租户数据)、单一 RV、分页天然正确** —— 上面三个问题一次全消。
-
-⚠️ **但缺口不在存储层,而在 apiserver。** KubeBrain 侧的能力是现成的(前缀区间扫描、RangeStream),
-真正缺的是**没有办法把"按 namespace 前缀 LIST"这个意图从 API 表达下去**:
-k8s 的 LIST 只有"全部 namespace"或"精确某个 namespace",field selector 对 `metadata.namespace`
-也只能精确匹配。kubezoo 打的是真 apiserver,绕不过去。
+详见 `design-list-fanout-cn.md`。
 
 因此目标解需要一个 **apiserver 侧的改动**(我们本来就维护 k8s fork):
 让 LIST 能表达 namespace 前缀,由 store 层把它算成 `/registry/<res>/<tid>-` 这一段区间下发。
