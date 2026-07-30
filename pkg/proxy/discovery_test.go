@@ -35,12 +35,17 @@ import (
 func TestNewDiscoveryProxy(t *testing.T) {
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{})
 	crdLister := &util.FakeCRDLister{}
-	_, err := NewDiscoveryProxy(nil, crdLister)
+	served := map[string]bool{"": true, "apps": true}
+	_, err := NewDiscoveryProxy(nil, crdLister, served)
 	assert.Error(t, err)
-	_, err = NewDiscoveryProxy(client, nil)
+	_, err = NewDiscoveryProxy(client, nil, served)
 	assert.Error(t, err)
-	_, err = NewDiscoveryProxy(client, crdLister)
+	_, err = NewDiscoveryProxy(client, crdLister, served)
 	assert.NoError(t, err)
+	// An empty served set would advertise nothing at all, which is worse than
+	// advertising too much; it has to be an error rather than a quiet blank.
+	_, err = NewDiscoveryProxy(client, crdLister, nil)
+	assert.Error(t, err)
 }
 
 // TestDiscoveryProxy_ServerGroups test some cases of ServerGroups.
@@ -128,11 +133,24 @@ func TestDiscoveryProxy_ServerGroups(t *testing.T) {
 	defer ts.Close()
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	crdLister := &util.FakeCRDLister{tenantCRDs}
-	proxy, err := NewDiscoveryProxy(client, crdLister)
+	// A native group is advertised when this build serves it and dropped when it
+	// does not. Asking the scheme instead advertises every group Kubernetes has,
+	// and a tenant then finds resources in api-resources that error on every
+	// call -- certificatesigningrequests did exactly that.
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"extensions": true})
 	assert.NoError(t, err)
 	actual, err := proxy.ServerGroups(tenantID)
 	assert.NoError(t, err)
 	assert.Equal(t, tenantAPIGroupList, actual)
+
+	// The same upstream list, with extensions no longer served: the tenant's own
+	// CRD group survives, the unserved native group does not.
+	proxy, err = NewDiscoveryProxy(client, crdLister, map[string]bool{"apps": true})
+	assert.NoError(t, err)
+	actual, err = proxy.ServerGroups(tenantID)
+	assert.NoError(t, err)
+	assert.Len(t, actual.Groups, 1, "an unserved native group is still being advertised")
+	assert.Equal(t, "kubezoo.io", actual.Groups[0].Name)
 }
 
 // TestDiscoveryProxy_ServerVersionsForGroup test some cases of ServerVersionsForGroup.
@@ -190,7 +208,7 @@ func TestDiscoveryProxy_ServerVersionsForGroup(t *testing.T) {
 	defer ts.Close()
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	crdLister := &util.FakeCRDLister{tenantCRDs}
-	proxy, err := NewDiscoveryProxy(client, crdLister)
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true})
 	assert.NoError(t, err)
 	actual, err := proxy.ServerVersionsForGroup(tenantID, "kubezoo.io")
 	assert.NoError(t, err)
@@ -251,7 +269,7 @@ func TestDiscoveryProxy_ServerResourcesForGroupVersion(t *testing.T) {
 	defer ts.Close()
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	crdLister := &util.FakeCRDLister{tenantCRDs}
-	proxy, err := NewDiscoveryProxy(client, crdLister)
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true})
 	assert.NoError(t, err)
 	actual, err := proxy.ServerResourcesForGroupVersion(tenantID, "kubezoo.io", "v1beta1")
 	assert.NoError(t, err)

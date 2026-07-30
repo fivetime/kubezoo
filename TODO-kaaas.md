@@ -158,9 +158,10 @@
       ⇒ 设计:kubezoo 以自己身份代写 ClusterRole,**必须守卫保留名字**;
       部署要求(kubezoo 上游身份需能写任意 ClusterRole)是**真实的信任扩大,要显式记录**。
       三个待解:读回、新 ns 补投影、更新/删除传播
-- [ ] ⚠️ **命名撞车本身值得单独修**:`<tid>-cluster-admin` 等保留对象落在租户可寻址的名字空间里。
-      今天只是自伤(租户能删掉自己那个角色,控制器 4s 补回),
-      但**任何给这条路加权限的改动都会踩上它**
+- [x] ✅ **命名撞车已修**:`proxy.refuseReservedName` 在写路径拒绝租户寻址
+      `<tid>-cluster-admin` / `<tid>-admin`(仅限 RBAC 组;同名 PV 不受影响)。
+      守卫已验证会红,且红测顺带证明了价值:守卫一关,一条 `delete clusterrole cluster-admin`
+      就让租户自己失去集群级权限,连锁红 6 条
 - [ ] **P0 剩余(承接):租户自装 operator**(审计 §X②,另两条已由 §Z/§AA 解掉)
       `helm --create-namespace` 不工作 —— **根因已查明**(审计 §AA):helm 先检查资源
       再建 ns,而租户在不存在的 ns 里 `GET` 得到 **Forbidden**(上游 admin 得到 NotFound),
@@ -201,9 +202,11 @@ kubezoo / kubetron / Kyverno **都会往租户的 Pod 上写东西**,而**只有
 注入的 `runtimeClassName`、被清空的 `tolerations`、暴露平台节点名的 `nodeName`。
 后果:GitOps 永久漂移、租户排障对不上、平台拓扑泄露。
 
-- [ ] ⚠️ **公告面与服务面对齐** —— `api-resources` 公告了 `certificatesigningrequests`,
-      但 `get csr` 报 `Unable to list`(审计 §AF)。fail-closed 不是漏洞,但是坏掉的能力公告;
-      与阶段 0 记的"12 个陈旧 GV 是活端点"同类
+- [x] ✅ **公告面与服务面已对齐**(审计 §AG):discovery 改为按 `ServedAPIGroups()` 过滤,
+      从构建存储的同一份数据导出。⚠️ **它现在是决定租户能看见什么的开关**,
+      往服务面加东西必须同步加到这里 —— 第一版漏了 `apiextensions.k8s.io`,
+      **租户直接不能管 CRD 了**,是验证套件先抓到的。
+      教训:**公告太宽只是看到用不了的东西,公告太窄是直接砍能力**
 - [ ] 约定一份"平台内部字段"清单,kubezoo 出站时统一擦除
 - [ ] **被改写的字段必须可还原** —— kubetron 把原探针存进约定注解,kubezoo 出站还原。
       这是**跨项目接口,必须先定**,不能事后补
@@ -466,8 +469,8 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
         跑在 apiserver 进程内,**根本没有 failurePolicy 这一说**。凡能用 CEL 表达的走 MAP/VAP
       - ⚠️ 若确实用 Kyverno:`forceFailurePolicyIgnore` 环境变量能**一次性把所有策略变成 Ignore**
         (`pkg/toggle/toggle.go:24`)。必须锁死并纳入巡检,否则 `Fail` 只是纸面上的
-- [ ] ⚠️ 实测租户看到的**拒绝消息**内容 —— `TrimTenantIDFromError` 能擦租户前缀,
-      但擦不掉策略名和平台标签白名单(泄露面)
+- [x] ✅ **拒绝消息已实测并加固**(审计 §V):7 条策略消息无 `<tid>-` 前缀;
+      唯一真泄漏是 `admission webhook "validate.kyverno.svc-fail"`(暴露策略引擎),已擦除
 - [ ] ⚠️ **能不用 Kyverno 的 `context` lookup 就别用** —— 它要 cache 集群状态,
       与 4.1 是同一类全量 watch
 

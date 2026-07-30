@@ -1779,6 +1779,53 @@ port-forward 正常绑定,且 exec / `logs -f` 不受影响。
 
 守卫 `verify.sh` 六条,**已验证退回原注册会红**(恰好 attach 与 port-forward 两条)。
 
+## AG. 两个已知缺陷修复:保留名字撞车 + 公告面与服务面错位
+
+### ① 保留名字守卫(§AC 那条撞车)
+
+kubezoo 给每个租户建的集群级对象叫 `<tid>-cluster-admin` 和 `<tid>-admin`,
+而**租户把 ClusterRole 命名为 `cluster-admin` 就得到同一个上游名字** ——
+那正是控制器已经集群级绑定给它的角色。
+
+`proxy.refuseReservedName`:写路径(Create / Update / Delete)上,
+若目标是 RBAC 组的集群级对象且上游名字是保留名,直接 Forbidden。
+**范围只限 RBAC** —— 租户完全可以有一个叫 `admin` 的 PersistentVolume。
+
+复测:删除 Forbidden、改写 Forbidden、上游 `111111-cluster-admin` 规则数不变(10 条)、
+同名 PV 照常创建。
+
+⭐ **守卫关掉时的红测揭示了它的价值**:那条"删除保留角色"的断言会**真的删掉**
+`111111-cluster-admin`,租户的集群级权限随之消失,后面 6 条断言连锁失败 ——
+一条 `kubectl delete clusterrole cluster-admin` 就能让租户自己短暂失权。
+
+### ② discovery 公告了服务不了的东西(§AF 那条)
+
+**根因是系统性的**:`filterAPIGroupList` 按 `nativeScheme.IsGroupRegistered` 过滤,
+即"**Kubernetes 认识哪些原生组**";而实际服务的是 `apigroups.go` 里注册了存储的
+**13 个组 + core**。两者不是一回事,差集里的资源全都是"公告了但一用就报错"。
+
+修法:`ServedAPIGroups()` 从**构建存储的同一份数据**导出,discovery 按它过滤。
+
+### ⛔ 但我第一版修出了一个更糟的回归
+
+`apiextensions.k8s.io` 不在 `nonLegacyGroups` 里(CRD 走的是委托给
+apiextensions-apiserver 的另一条路),被我一并过滤掉了 ⇒
+**租户完全不能管 CRD 了**,`kubectl get crd` 报 `the server doesn't have a resource type "crd"`。
+
+> **公告太宽只是让人看到用不了的东西;公告太窄是直接砍掉能力。后者严重得多。**
+
+⭐ **是验证套件先抓到的**,不是我:跑一遍 3 条红,全在 CRD 下游。
+补上 `apiextensions.k8s.io` / `tenant.kubezoo.io` / `quota.kubezoo.io` 后 50/50。
+
+⚠️ 这也意味着 `ServedAPIGroups()` 现在是**决定租户能看见什么的那个开关** ——
+以后往服务面加东西,必须同步加到这里。函数注释里写死了这一点。
+
+### 守卫
+
+`verify.sh` 五条:保留名删/改被拒、同名 PV 不受影响、未服务的组不公告、
+**租户需要的资源(含 `customresourcedefinitions`)都在公告里**。
+最后一条正是为了防我刚犯的那个回归。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

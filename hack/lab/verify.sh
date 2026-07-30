@@ -408,6 +408,32 @@ else
   bad "own custom resource grant" "still refused after 60s -- the CRD event is not reaching the controller, or the group is not in the tenant's cluster role"
 fi
 
+# The names kubezoo keeps for itself have to be unaddressable, because a tenant
+# naming a ClusterRole cluster-admin is naming the role bound cluster-wide to it.
+expect_denied "deleting the tenant's own reserved cluster role" "managed by the platform" -- \
+  $T delete clusterrole cluster-admin
+expect_denied "overwriting it" "managed by the platform" -- \
+  $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: cluster-admin}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+EOF
+# Scoped to RBAC: a tenant may perfectly well have other objects by that name.
+expect_allowed "an object of another kind may still be called admin" \
+  $T apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: admin}
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadWriteOnce]
+  hostPath: {path: /tmp/reserved-name-check}
+EOF
+
 expect_denied "a ClusterRole over shared resources" "attempting to grant RBAC permissions not currently held" -- \
   $T create clusterrole shared-secrets --verb=get --resource=secrets
 
@@ -642,6 +668,28 @@ if [ "$($K -n "$NS" get pod log-probe -o jsonpath='{.status.phase}' 2>/dev/null)
   expect_denied "a privileged debug container beside a running pod" "restricted\|forbidden" -- \
     timeout 30 $T -n default debug log-probe --image=busybox --profile=sysadmin -- true
 fi
+
+echo
+echo "== what discovery advertises is what the server can actually serve =="
+# Discovery used to be filtered by the scheme, which knows every group Kubernetes
+# has rather than the ones this build installs storage for, so a tenant found
+# resources in api-resources that errored on every call. The reverse mistake is
+# worse and was made first: filtering too tightly dropped apiextensions and
+# tenants could not manage CRDs at all.
+advertised=$($T api-resources --no-headers 2>/dev/null | awk '{print $1}' | sort -u)
+if grep -qx certificatesigningrequests <<<"$advertised"; then
+  bad "discovery advertises what is not served" "certificatesigningrequests is listed but every call to it errors"
+else
+  ok "an unserved group is not advertised"
+fi
+for needed in customresourcedefinitions deployments configmaps roles; do
+  if grep -qx "$needed" <<<"$advertised"; then
+    continue
+  fi
+  bad "discovery drops something that is served" "$needed is missing from api-resources, so tenants cannot address it"
+  discovery_narrow=yes
+done
+[ "${discovery_narrow:-no}" = no ] && ok "the resources a tenant needs are all advertised"
 
 echo
 echo "== node pools must not overlap =="

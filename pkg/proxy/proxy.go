@@ -402,6 +402,9 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	if err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseReservedName(tenantID, utd.GetName()); err != nil {
+		return nil, false, err
+	}
 	if subresource := tp.subresource; subresource == "" {
 		got, created, err = client.Update(ctx, utd, *options)
 	} else if subresource == "status" {
@@ -468,6 +471,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err != nil {
 		return nil, err
 	}
+	if err := tp.refuseReservedName(tenantID, utd.GetName()); err != nil {
+		return nil, err
+	}
 
 	// 3. call create api
 	var got *unstructured.Unstructured
@@ -527,6 +533,9 @@ func (tp *tenantProxy) Delete(ctx context.Context, name string, _ rest.ValidateO
 
 	if !tp.namespaceScoped {
 		name = util.ConvertTenantObjectNameToUpstream(name, tenantID, tp.kind)
+	}
+	if err := tp.refuseReservedName(tenantID, name); err != nil {
+		return nil, false, err
 	}
 	var (
 		got     *unstructured.Unstructured
@@ -634,6 +643,33 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 	}
 
 	return oupList, nil
+}
+
+// refuseReservedName stops a tenant addressing the cluster-scoped RBAC objects
+// kubezoo manages on its behalf.
+//
+// Names of cluster-scoped objects carry the tenant prefix, so a tenant asking
+// for a ClusterRole called cluster-admin is asking for <tid>-cluster-admin --
+// the role the controller creates and binds cluster-wide to that tenant. Today
+// that only lets it delete or narrow its own rights, which the controller
+// repairs within seconds, but it is the collision that would turn any future
+// privilege here into an escape: with escalate granted, overwriting that role
+// reached kube-system's and another tenant's secrets. Measured.
+//
+// Scoped to RBAC. A tenant may perfectly well have a PersistentVolume called
+// admin; it is the roles kubezoo binds that must stay its own.
+func (tp *tenantProxy) refuseReservedName(tenantID, upstreamName string) error {
+	if tp.namespaceScoped || tp.kind.Group != "rbac.authorization.k8s.io" {
+		return nil
+	}
+	if !common.IsReservedClusterName(tenantID, upstreamName) {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: tp.kind.Group, Resource: tp.resource},
+		util.TrimTenantIDPrefix(tenantID, upstreamName),
+		fmt.Errorf("this name is managed by the platform for your tenant and cannot be written directly; "+
+			"choose another name"))
 }
 
 // shouldFanOut reports whether this list has to be assembled from the tenant's

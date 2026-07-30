@@ -966,3 +966,40 @@ func groupVersionKindForScale(containingGV schema.GroupVersion) schema.GroupVers
 		return autoscalingv1.SchemeGroupVersion.WithKind("Scale")
 	}
 }
+
+// ServedAPIGroups names the API groups kubezoo actually installs storage for.
+//
+// Discovery used to advertise every native group the scheme knows about, which
+// is a much larger set: the scheme is Kubernetes', while the storage installed
+// here is this file. A tenant therefore saw resources it could not use --
+// certificatesigningrequests was advertised by `kubectl api-resources` and
+// answered "Unable to list" on every request. It failed closed, so it was not a
+// hole, but a resource that appears and then does not work is worse than one
+// that never appears.
+//
+// Derived from the same values that build the storage, so the two cannot drift
+// apart again.
+func ServedAPIGroups() map[string]bool {
+	served := map[string]bool{legacyGroup.Group: true}
+	for i := range nonLegacyGroups {
+		served[nonLegacyGroups[i].Group] = true
+	}
+	// Groups kubezoo serves through a path other than the storage configs
+	// above, and which have to be listed by hand because they are installed
+	// elsewhere. Leaving apiextensions out of the first version of this
+	// function stopped tenants managing CRDs at all -- `kubectl get crd` came
+	// back with "the server doesn't have a resource type crd" -- which is worth
+	// more than a comment: this set is now the thing that decides what a tenant
+	// can see, so anything added to the served surface has to be added here.
+	for _, elsewhere := range []string{
+		// CustomResourceDefinitions, installed by the delegated
+		// apiextensions-apiserver (cmd/kubezoo/app/apiextensions.go).
+		"apiextensions.k8s.io",
+		// kubezoo's own APIs.
+		"tenant.kubezoo.io",
+		"quota.kubezoo.io",
+	} {
+		served[elsewhere] = true
+	}
+	return served
+}

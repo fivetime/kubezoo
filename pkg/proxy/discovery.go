@@ -63,17 +63,23 @@ type discoveryProxy struct {
 	discoveryClient *discovery.DiscoveryClient
 	// crdLister helps list CustomResourceDefinitions from upstream cluster.
 	crdLister v1.CustomResourceDefinitionLister
+	// servedGroups are the API groups this build installs storage for, which is
+	// what may be advertised. The scheme knows many more.
+	servedGroups map[string]bool
 }
 
 func NewDiscoveryProxy(discoveryClient *discovery.DiscoveryClient,
-	crdLister v1.CustomResourceDefinitionLister) (DiscoveryProxy, error) {
+	crdLister v1.CustomResourceDefinitionLister, servedGroups map[string]bool) (DiscoveryProxy, error) {
 	if discoveryClient == nil {
 		return nil, fmt.Errorf("discoveryClient is nil")
 	}
 	if crdLister == nil {
 		return nil, fmt.Errorf("crdLister is nil")
 	}
-	return &discoveryProxy{discoveryClient: discoveryClient, crdLister: crdLister}, nil
+	if len(servedGroups) == 0 {
+		return nil, fmt.Errorf("servedGroups is empty; discovery would advertise nothing")
+	}
+	return &discoveryProxy{discoveryClient: discoveryClient, crdLister: crdLister, servedGroups: servedGroups}, nil
 }
 
 // ServerGroups returns the supported groups for tenant, with information like supported versions and the
@@ -88,11 +94,12 @@ func (dp *discoveryProxy) ServerGroups(tenantID string) (*metav1.APIGroupList, e
 	if err != nil {
 		return nil, err
 	}
-	return filterAPIGroupList(groupList, grm, tenantID), nil
+	return filterAPIGroupList(groupList, grm, tenantID, dp.servedGroups), nil
 }
 
 // filterAPIGroupList filter the apigroup according to the tenantId prefix.
-func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupResourcesMap, tenantID string) *metav1.APIGroupList {
+func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupResourcesMap,
+	tenantID string, servedGroups map[string]bool) *metav1.APIGroupList {
 	if apiGroupList == nil {
 		return nil
 	}
@@ -113,8 +120,11 @@ func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupR
 		if groupName == "" {
 			continue
 		}
-		// native groups
-		if nativeScheme.IsGroupRegistered(groupName) {
+		// Native groups this build actually serves. Asking the scheme instead --
+		// which is what this did -- advertises every group Kubernetes has,
+		// including ones with no storage installed here, and a tenant then finds
+		// them in `api-resources` and gets an error from every call.
+		if servedGroups[groupName] {
 			filtered.Groups = append(filtered.Groups, apiGroupList.Groups[i])
 			continue
 		}

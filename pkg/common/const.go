@@ -32,3 +32,32 @@ const (
 
 	TenantQuotaNamePrefix = "kubezoo-tenant-quota"
 )
+
+// ReservedClusterRoleNames are the upstream names kubezoo keeps for itself, per
+// tenant, in the RBAC group.
+//
+// They collide with what a tenant produces: names of cluster-scoped objects get
+// the tenant prefix, so a tenant creating a ClusterRole called cluster-admin
+// addresses <tid>-cluster-admin -- which is the very role the controller creates
+// and binds cluster-wide to that tenant. Measured: with escalate granted, a
+// tenant overwrote it with star-on-star and reached kube-system's and another
+// tenant's secrets. Without escalate it can still delete it, which is self-harm
+// the controller repairs, but the collision is what turns any future privilege
+// on this path into an escape.
+func ReservedClusterRoleNames(tenantID string) []string {
+	return []string{
+		tenantID + "-cluster-admin",
+		tenantID + "-admin",
+	}
+}
+
+// IsReservedClusterName reports whether an upstream name is one kubezoo manages
+// for this tenant and the tenant must not write.
+func IsReservedClusterName(tenantID, upstreamName string) bool {
+	for _, reserved := range ReservedClusterRoleNames(tenantID) {
+		if upstreamName == reserved {
+			return true
+		}
+	}
+	return false
+}

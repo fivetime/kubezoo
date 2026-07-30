@@ -96,8 +96,8 @@ import (
 	"github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
 	quotaclient "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions"
-	"github.com/kubewharf/kubezoo/pkg/proxy"
 	tenantlister "github.com/kubewharf/kubezoo/pkg/generated/listers/tenant/v1alpha1"
+	"github.com/kubewharf/kubezoo/pkg/proxy"
 	tenantrest "github.com/kubewharf/kubezoo/pkg/rest"
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
@@ -650,8 +650,11 @@ func buildGenericConfig(
 	}
 
 	var discoveryProxy proxy.DiscoveryProxy
+	// The served groups go in so that discovery advertises what is installed
+	// rather than everything the scheme knows about.
 	discoveryProxy, lastErr = proxy.NewDiscoveryProxy(proxyConfig.discoveryClient,
-		proxyConfig.crdInformers.Apiextensions().V1().CustomResourceDefinitions().Lister())
+		proxyConfig.crdInformers.Apiextensions().V1().CustomResourceDefinitions().Lister(),
+		ServedAPIGroups())
 	if lastErr != nil {
 		return
 	}
