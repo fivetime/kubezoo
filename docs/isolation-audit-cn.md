@@ -1062,6 +1062,66 @@ system:node:... / system:kube-controller-manager(非 SA)                    ⇒ 
 
 守卫测试 `pkg/controller/rbac_frozen_test.go`,**已验证摘掉 `markFrozen` 会变红**。
 
+## U. 策略验证套件 `hack/lab/verify.sh` —— 以及它第一次跑就抓到的两件事
+
+**为什么要有它**:本项目被"`READY=True` / 绿 / 装上了"骗过**四次**。
+套件的每一条断言都是**提交一个必须被拒的东西,然后看它被谁拒**。
+`hack/lab/verify.sh`,21 条,含正向对照;**已验证摘掉策略会红**(摘两条 → 4 条 FAIL,
+且不误伤其余)。
+
+### ⛔ 第一次跑就抓到:我自己引入的 VAP 打死了 Kyverno
+
+`tenant-frozen-deny-writes`(commit `6d1baa9` 引入)让 **Kyverno 无法注册自己的 webhook**:
+
+```
+validatingwebhookconfigurations "kyverno-resource-validating-webhook-cfg" is forbidden:
+ValidatingAdmissionPolicy 'tenant-frozen-deny-writes' denied request: expression '...'
+```
+
+**根因**:`matchResources.namespaceSelector` 对**集群级资源根本不过滤** ——
+k8s 的语义是"cluster-scoped 资源永不跳过策略"。于是这条规则套到了
+**全集群每一次集群级写入**上;那时 `request.namespace` 是空串,
+`split('-')[0]` 越界让 CEL 表达式报错,而 `failurePolicy: Fail` 下**表达式报错 == 拒绝**。
+
+**后果链**:Kyverno 注册不了 webhook → 三条策略永远不就绪 →
+**validate webhook 只注册了 `daemonsets`,`pods` 根本没注册** →
+租户的 `hostNetwork` / `hostPID` / `hostIPC` / `hostPath` / `spec.nodeName` **全部放行**。
+
+⚠️ **而这一切的外在症状只是 `kubectl get clusterpolicy` 显示 `READY=<none>`** ——
+看着像"还在同步中"。`up.sh` 早就把这行打在屏幕上了,**我看见了没反应**。
+
+**修**:`matchConstraints.resourceRules` 加 `scope: Namespaced`,
+再给表达式加一个 `request.namespace == ''` 的兜底。
+`up.sh` 现在会**等待并在策略不就绪时直接失败**,而不是打印一行 `<none>` 就往下走。
+
+> **教训:VAP 的 `namespaceSelector` 不是范围限定,`scope: Namespaced` 才是。**
+> 而且 `failurePolicy: Fail` 下,**CEL 表达式出错等于拒绝** —— 一个越界就是全集群故障。
+
+### ⚠️ 第二件:in-tree 的 RuntimeClass 准入跑在 mutating webhook 之前
+
+租户写一个**不存在的** `runtimeClassName`,Pod 被直接拒:
+
+```
+pods "placed" is forbidden: pod rejected: RuntimeClass "kata" not found
+```
+
+Kyverno 的擦除规则**根本没机会跑**。这不是安全问题(租户只是自伤),
+但意味着:**擦除只对平台真实存在的 class 有效** —— 而那恰好就是真正的威胁
+(租户写 `runc` 想跑出 kata 沙箱)。所以套件的 fixture 改成先建一个真实的
+平台 RuntimeClass 再让租户引用它,否则测的是另一回事。
+
+### ⭐ 写这套东西时,我自己又踩了三次同一个坑
+
+都是"**读一个不存在的对象**",而空值看起来正好像"字段被策略擦掉了":
+
+1. Pod 被拒 → jsonpath 返回空 → 报"nodeSelector 被替换成空",实际是**对象不存在**
+2. 等待条件写成"namespace 存在" —— **Terminating 的也算存在**,于是在正在销毁的
+   namespace 里建 Pod,报 `because it is being terminated`
+3. fixture 失败后仍继续断言,给出**假通过**("runtimeClassName stripped" 读的是空)
+
+⇒ 套件现在:先确认对象存在再读字段;等 namespace `Active` 而不是"存在";
+fixture 失败就**跳过**依赖它的断言,而不是让它们报绿。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

@@ -100,6 +100,26 @@ Deployment 被拒,以为规则生效了,实际是 `kubectl create deploy` 的默
 `restricted`,拒它的是 pod security 那条。
 **判据是拒绝消息里的 `策略名: 规则名`**,并且要把被测对象改成**只剩下被测的那一处违规**。
 
+### 6. ⛔⛔ VAP 的 `namespaceSelector` 不限定范围,`scope: Namespaced` 才限定
+
+`matchResources.namespaceSelector` 对**集群级资源根本不过滤** ——
+k8s 的语义是"cluster-scoped 资源永不跳过策略"。少了 `scope: Namespaced`,
+一条本意只管租户 namespace 的规则会套到**全集群每一次集群级写入**上。
+
+**实测后果**:`tenant-frozen-deny-writes` 曾因此让 **Kyverno 注册不了自己的 webhook**,
+三条策略永远不就绪,`pods` 的 validate webhook 根本没注册,
+租户的 `hostNetwork`/`hostPID`/`nodeName` 全部放行 ——
+而外在症状只是 `kubectl get clusterpolicy` 显示 `READY=<none>`,看着像还在同步。
+
+⚠️ 并且:`failurePolicy: Fail` 下 **CEL 表达式出错 == 拒绝**。
+`request.namespace` 在集群级请求里是空串,`split('-')[0]` 越界 ⇒ 一个越界就是全集群故障。
+表达式里凡是索引都要有兜底。
+
+### 7. 改完策略跑 `hack/lab/verify.sh`
+
+21 条断言,每条都**提交一个必须被拒的东西再看它被谁拒**。已验证摘掉策略会红。
+`READY=True` 不是证据 —— 本项目在这上面栽过四次。
+
 ## ⚠️ 部署注意
 
 ### 装上策略之后,必须做一次存量修正 + 存量清理

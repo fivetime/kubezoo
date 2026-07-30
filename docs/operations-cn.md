@@ -28,6 +28,20 @@ kubectl get clusterpolicy                    # Kyverno 的,应有 5 条,READY=Tr
 kubectl get validatingadmissionpolicy        # 原生的,应有 2 条
 ```
 
+⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
+实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,
+于是三条策略永远不就绪,**`pods` 的 webhook 根本没注册**,
+租户的 `hostNetwork` / `hostPID` / `nodeName` 全部放行 ——
+而屏幕上只有那几个 `<none>`。**看到 `<none>` 就当故障处理,先查 Kyverno admission 控制器日志。**
+
+### 1.0 ⭐ 最可靠的一步:跑验证套件
+
+```bash
+hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的东西再看它被谁拒
+```
+
+上面那些 `get` 只能告诉你"对象在";**只有这个能告诉你"它真的会拒"**。
+
 ⚠️⚠️ **`config/policy/` 里有两条是 Kubernetes 原生的 `ValidatingAdmissionPolicy`,
 不是 Kyverno** —— `kubectl get clusterpolicy` **看不到它们**。
 只查 Kyverno 就以为装全了,是最容易犯的错。

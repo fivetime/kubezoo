@@ -152,6 +152,23 @@ kubectl --context "kind-$CLUSTER" apply -f "$ZOO/config/policy/" 2>&1 | grep -v 
 # config/policy/ holds one native ValidatingAdmissionPolicy alongside the Kyverno
 # ones -- Kyverno cannot match the pods/binding subresource, see that file.
 kubectl --context "kind-$CLUSTER" get validatingadmissionpolicy -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | sed 's/^/vap: /' 
+# A policy that is listed but has no status is enforcing nothing, and printing
+# READY=<none> next to it reads like "still syncing" rather than "broken". That
+# happened: a policy of ours refused the writes Kyverno needs to register its own
+# webhooks, so three policies never became ready and pods went entirely
+# unguarded while the lab looked fine. Wait, then fail loudly.
+for _ in $(seq 40); do
+  not_ready=$(kubectl --context "kind-$CLUSTER" get clusterpolicy \
+    -o custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status --no-headers 2>/dev/null \
+    | awk '$2 != "True" {print $1}')
+  [ -z "$not_ready" ] && break
+  sleep 3
+done
 kubectl --context "kind-$CLUSTER" get clusterpolicy -o custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status --no-headers
+if [ -n "$not_ready" ]; then
+  echo "FATAL: these policies never became ready, so they are enforcing nothing: $not_ready" >&2
+  echo "       check the kyverno admission controller log; a policy of ours can block its own webhook registration" >&2
+  exit 1
+fi
 
 echo "lab up: upstream ctx = kind-kz-audit3, zoo admin ctx = zoo"

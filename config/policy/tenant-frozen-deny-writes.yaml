@@ -32,12 +32,23 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
+      # ⚠️⚠️ scope: Namespaced 不是可省的。`matchResources.namespaceSelector`
+      # 对**集群级资源根本不过滤** —— k8s 的语义是"cluster-scoped 资源永不跳过策略"。
+      # 少了这一行,本规则会套到**全集群每一次集群级写入**上,而那时
+      # request.namespace 是空串,下面的 split 越界报错,配上 failurePolicy: Fail
+      # 就是拒绝。**实测后果:Kyverno 注册不了自己的 webhook,三条策略永远不就绪,
+      # 而 `kubectl get clusterpolicy` 只显示 READY=<none>,看着像还没同步完。**
       - apiGroups: ["*"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["*"]
+        scope: Namespaced
   validations:
+    # 第一个子句是**兜底**:scope: Namespaced 之后 request.namespace 不该为空,
+    # 但空串会让 split 越界,而 CEL 表达式报错在 failurePolicy: Fail 下等同拒绝 ——
+    # 那是本项目已经栽过一次的形态,便宜的守卫留着。
     - expression: >-
+        request.namespace == '' ||
         !request.userInfo.username.startsWith('system:serviceaccount:') ||
         request.userInfo.username.split(':')[2].split('-')[0] != request.namespace.split('-')[0]
       message: "this tenant is frozen: its credentials cannot change anything until it is lifted. Nothing of yours has been deleted"

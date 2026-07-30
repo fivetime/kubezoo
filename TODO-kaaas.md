@@ -274,6 +274,11 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
 > 事策略层做不了;只在写路径且**换个平台会变**的才归这里。
 > ⭐ 能用 CEL 表达的优先 **MAP/VAP(进程内)**,不必是 webhook。
 
+- [x] ✅ **策略验证套件 `hack/lab/verify.sh`**(21 条,已验证摘掉策略会红)。
+      ⛔ 第一次跑就抓到我自己引入的 P0:`tenant-frozen-deny-writes` 少了
+      `scope: Namespaced` ⇒ 套到全集群每一次集群级写入 ⇒ **Kyverno 注册不了自己的
+      webhook** ⇒ 三条策略永不就绪、`pods` webhook 根本没注册 ⇒ 租户 hostNetwork/
+      hostPID/nodeName 全放行。症状只有 `READY=<none>`。详见审计 §U
 - [ ] ⭐⭐ **铁律:所有策略匹配一律反向写**(`exclude` 平台自身 namespace,匹配其余全部)。
       **禁止用正向 selector 选租户 namespace 的标签** —— 租户能编辑自己建的 namespace,
       摘掉标签即**绕过整套策略**,此时他仍有全权建 Pod ⇒ B1 隔离前提全部落空
