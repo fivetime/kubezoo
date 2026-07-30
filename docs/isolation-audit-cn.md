@@ -2473,6 +2473,80 @@ SA 读 ClusterIssuer(集群级 CR) → no
 
 ⇒ **结论:cert-manager 现在能装进去,不能用。** 差的是这一件事。
 
+## AS. 投影能不能把集群级也解决?—— **一半能,而且那一半是干净的**;另一半 RBAC 表达不了
+
+§AR 的结论是"投影只承载命名空间级"。再往下问一层:**用别的形状的投影行不行?** 实测三条。
+
+### ✅ 能:租户自己前缀的 **CR 组**(ClusterIssuer 这类)
+
+租户的 CRD 组是 `111111-cert-manager.io` —— **组名本身带租户**。
+所以给它一条**真的** ClusterRoleBinding、角色限定在这个组上,是**结构上封闭**的:
+
+```
+SA list clusterissuers.111111-cert-manager.io  → yes
+SA list clusterissuers.222222-cert-manager.io  → no      ← 别人的组够不到
+SA get  任意 CRD                                → no
+```
+
+⇒ **零信任扩大**,和 `ownCustomResourceRules` 给租户自己凭据用的是同一个道理。
+operator 的集群级 CR(ClusterIssuer / ClusterPolicy / ClusterSecretStore …)**都归这一类**。
+
+### ✅ 能:原生集群级资源的 `get`,用 `resourceNames`
+
+租户的集群级对象名字带前缀,而 `resourceNames` 是精确匹配:
+
+```
+get customresourcedefinitions/certificates.111111-cert-manager.io  → yes
+get customresourcedefinitions/certificates.222222-cert-manager.io  → no
+```
+
+### ⛔ 不能:原生集群级资源的 `list` / `watch`
+
+```
+list customresourcedefinitions(带 resourceNames)→ no
+```
+
+**list 请求没有名字可言**,RBAC 里 `resourceNames` 对 list/watch 不生效 —— 这是 RBAC 的定义,不是实现问题。
+⇒ 这一类只能走 §AN 那个**路径绑定的组**(经 kubezoo 才存在,读路径按前缀过滤)。
+
+cert-manager 要 `list/watch` 的原生集群级资源:
+`customresourcedefinitions` / `validating+mutatingwebhookconfigurations` / `apiservices` / `certificatesigningrequests`。
+
+### 对照实验:把这一半手工授上去,确实是那道坎
+
+派生 8 条"只含集群级规则"的角色并真绑上:
+
+```
+cainjector   CrashLoop ×6  →  1/1 Running
+controller   informer 一直报错 → 拿到 leader、ClusterIssuer 缓存建好
+```
+
+## AT. ⛔⛔ 但 cert-manager 还是没跑起来,最后一道坎**与 RBAC 无关**:Server-Side Apply 是坏的
+
+```
+controller: failed to apply secret default/demo-tls:
+            expected pointer, but got invalid kind
+```
+
+最小复现,**一个普通 ConfigMap 就够**:
+
+| | |
+|---|---|
+| `kubectl apply` 经 kubezoo(客户端 apply) | ✅ created |
+| **`kubectl apply --server-side` 经 kubezoo** | ⛔ **`expected pointer, but got invalid kind`** |
+| 同样的 SSA 直连上游 | ✅ serverside-applied |
+
+⇒ **kubezoo 的 SSA 整个是坏的,与租户、资源类型都无关。**
+
+⚠️ **这会挡住绝大多数现代 operator**:controller-runtime 普遍用 SSA 写对象,
+cert-manager 的 webhook 自签 CA、controller 写证书 Secret 走的都是这条。
+
+⇒ 所以 cert-manager 的完整清单是**三件事**,做完才叫"能用":
+1. ✅ ClusterRole 可写(§AP)
+2. ✅ ClusterRoleBinding 投影(§AQ)
+3. ⛔ 集群级授权分发给 SA(§AS:CR 组那半干净,原生 list/watch 需路径绑定组)
+4. ⛔ **Server-Side Apply**(§AT)—— **优先级最高,因为它跟多租户无关,是纯粹的功能缺口**
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

@@ -153,6 +153,19 @@
       三条绑定路径全堵(自己 ns 的 RoleBinding 允许且只在该 ns 生效 / ClusterRoleBinding 照拒 /
       先自授 bind 再试仍拒 —— RoleBinding 授不了集群级资源)。
       `refuseReservedName` 覆盖 **apply + patch 两条**写入口。守卫红测恰好红 8 条
+- [ ] ⛔⛔ **P0(最高):Server-Side Apply 经 kubezoo 整个是坏的**(审计 §AT,最小复现)
+      `kubectl apply --server-side` 一个**普通 ConfigMap** 就失败:`expected pointer, but got invalid kind`;
+      同样请求直连上游正常。**与租户、资源类型无关,是纯功能缺口**。
+      ⚠️ 挡住绝大多数现代 operator(controller-runtime 普遍用 SSA);
+      cert-manager 的 controller 写证书 Secret、webhook 自签 CA 都卡在这
+- [ ] ⛔ **P0:集群级授权分发给租户的 SA**(审计 §AS,三条都实测过)
+      ✅ **能且干净**:租户自己前缀的 **CR 组**(ClusterIssuer 这类)—— 真 ClusterRoleBinding 限定在
+      `111111-cert-manager.io` 上即可,**组名带租户 ⇒ 结构封闭、零信任扩大**(实测别人的组 = no)。
+      **operator 的集群级 CR 全归这一类**
+      ✅ 能:原生集群级资源的 `get` —— `resourceNames` 精确匹配租户前缀的对象名
+      ⛔ **不能**:原生集群级资源的 `list`/`watch` —— **list 没有名字**,`resourceNames` 对它不生效
+      (RBAC 的定义,不是实现问题)⇒ 只能走 §AN 的**路径绑定组**
+      对照实验:手工把这半授上去,cainjector CrashLoop→Running、controller 拿到 leader
 - [ ] ⛔ **P0:投影只能承载命名空间级授权 ⇒ cert-manager 装得进去、跑不起来**(审计 §AR,真装过)
       `helm install` 走完全部阶段(6 CRD / 3 Deployment / 13 ClusterRole / 10 CRB / 1 webhook 配置),
       但 3 个 Pod 挂 2 个:cainjector 读 `customresourcedefinitions` 被拒、
