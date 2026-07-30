@@ -236,8 +236,6 @@ func (tp *tenantProxy) shapeError(ctx context.Context, err error, tenantID strin
 	}, requestInfo.Name)
 }
 
-var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
-
 // Destroy releases resources held by the storage. rest.Storage grew this method
 // in Kubernetes 1.26; the proxy holds no resources of its own.
 func (tp *tenantProxy) Destroy() {}
@@ -585,16 +583,26 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 	if err != nil {
 		return nil, err
 	}
-	client, err := tp.getClient(ctx)
-	if err != nil {
-		return nil, err
+	var utdList *unstructured.UnstructuredList
+	if tp.shouldFanOut(ctx) {
+		// No namespace in the request, so this is the tenant's whole world.
+		// Reading each of its namespaces beats listing the cluster and
+		// discarding everyone else's objects -- see docs/design-list-fanout-cn.md.
+		utdList, err = tp.listAcrossNamespaces(ctx, proxyOptions, tenantID)
+		if err != nil {
+			return nil, util.TrimTenantIDFromError(err, tenantID)
+		}
+	} else {
+		client, err := tp.getClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		utdList, err = client.List(ctx, *proxyOptions)
+		if err != nil {
+			return nil, util.TrimTenantIDFromError(err, tenantID)
+		}
+		utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
 	}
-	utdList, err := client.List(ctx, *proxyOptions)
-	if err != nil {
-		return nil, util.TrimTenantIDFromError(err, tenantID)
-	}
-
-	utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
 
 	// convert internal/unstructured list item one by one
 	for i := range utdList.Items {
@@ -626,6 +634,20 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 	}
 
 	return oupList, nil
+}
+
+// shouldFanOut reports whether this list has to be assembled from the tenant's
+// namespaces one at a time.
+//
+// Only when the resource is namespaced and the request named no namespace --
+// `kubectl get pods -A` and the cluster-wide watches informers open. A request
+// that names a namespace is already scoped and goes upstream untouched.
+func (tp *tenantProxy) shouldFanOut(ctx context.Context) bool {
+	if !tp.namespaceScoped {
+		return false
+	}
+	requestInfo, ok := apirequest.RequestInfoFrom(ctx)
+	return ok && requestInfo.Namespace == ""
 }
 
 // DeleteCollection convert the tenant object to upstream object before listing

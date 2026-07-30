@@ -375,6 +375,60 @@ PROBE
 fi
 
 echo
+echo "== a cross-namespace list is assembled from the tenant's namespaces =="
+# Replaces listing every object of the kind in the cluster and discarding other
+# tenants'. Correctness rests on the pinned revision: paging has to give the same
+# answer as not paging, and no page may contain another tenant's object.
+for extra in fanout-a fanout-b; do
+  $T create namespace "$extra" >/dev/null 2>&1
+done
+for _ in $(seq 20); do
+  [ "$($K get ns "$TID-fanout-a" -o jsonpath='{.status.phase}' 2>/dev/null)" = Active ] && break
+  sleep 2
+done
+for extra in default fanout-a fanout-b; do
+  for i in 1 2 3; do
+    $T -n "$extra" create configmap "fan$i" --from-literal=a=b >/dev/null 2>&1
+  done
+done
+unpaged=$($T get configmaps -A --no-headers 2>/dev/null | wc -l)
+if [ "$unpaged" -lt 6 ]; then
+  bad "cross-namespace list" "only $unpaged objects came back; the fixture did not take, so paging below would prove nothing"
+else
+  ok "a cross-namespace list spans the tenant's namespaces ($unpaged objects)"
+  paging_consistent=yes
+  for size in 1 2 5; do
+    # Bounded, because the interesting way this breaks is not a wrong count. A
+    # cursor that fails to record where it stopped inside a namespace restarts
+    # that namespace on every page and the client pages forever -- measured, by
+    # breaking it on purpose and watching this check hang instead of fail, which
+    # is no better than passing.
+    if ! paged_out=$(timeout 90 $T get configmaps -A --chunk-size=$size --no-headers 2>/dev/null); then
+      bad "paged cross-namespace list" "chunk-size=$size did not finish inside 90s -- the cursor is not advancing, so the client is paging in circles"
+      paging_consistent=no
+      continue
+    fi
+    paged=$(grep -c . <<<"$paged_out")
+    unique=$(sort -u <<<"$paged_out" | grep -c .)
+    if [ "$paged" != "$unpaged" ] || [ "$unique" != "$unpaged" ]; then
+      bad "paged cross-namespace list" "chunk-size=$size gave $paged ($unique unique), unpaged gave $unpaged -- objects are being dropped or repeated across pages"
+      paging_consistent=no
+    fi
+  done
+  [ "$paging_consistent" = yes ] && ok "paging returns exactly the same objects, at every chunk size tried"
+  # The isolation this whole path exists to preserve.
+  if $T get configmaps -A --chunk-size=1 --no-headers 2>/dev/null | grep -qv "^$TID-\|^[a-z-]* " ; then
+    :
+  fi
+  foreign=$($T get configmaps -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null | grep -c "^[0-9]\{6\}-" || true)
+  if [ "$foreign" = 0 ]; then
+    ok "no namespace in the result still carries a tenant prefix"
+  else
+    bad "cross-namespace list leaks" "$foreign entries came back with a prefixed namespace, so another tenant's objects or untranslated names are in the result"
+  fi
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

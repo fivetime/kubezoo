@@ -103,14 +103,19 @@
       - 顺带删掉另外两个 `nopeConvertor` 条目(`PriorityClass` 不服务、`PodSecurityPolicy` 1.25 已删)。
         现在**没有"什么都不做"的转换器条目了** —— 若按 I 的 A 方案把 PriorityClass 服务出去,
         那条 nope 会原样复现 PV 的 bug
-- [ ] **`-A` 走"全量 + 过滤" → 改为按 namespace 扇出**(设计已定稿:`docs/design-list-fanout-cn.md`)
+- [x] ✅ **`-A` 按 namespace 扇出 —— LIST 部分已实现**(`pkg/proxy/fanout.go`,设计 `docs/design-list-fanout-cn.md`)
       ⚠️ **本条原先写着"卡在分页 / resourceVersion 语义让步,需要产品拍板" —— 那是错的。**
-      原生 apiserver 的 `continue` token 里就带着 revision(`storage/continue.go`),
-      store 强制每页同一 revision ⇒ 分页 LIST 本来就是一个快照,途中新建的对象和 namespace
-      根本看不见。扇出把所有子 LIST 用 `resourceVersionMatch=Exact` 钉在同一个 R 上即可,
-      **没有任何语义让步**。而且成本更小:watch cache 按 namespace 建了索引,
-      且 `ListFromCacheSnapshot` 1.34 起默认开 ⇒ N 次带 scope 的缓存读 vs 一次全集群扫描。
-      **不再需要拍板,只是没人写。**
+      原生 `continue` token 里就带着 revision,store 强制每页同一 revision ⇒ 分页 LIST 本来
+      就是一个快照。扇出用 `resourceVersionMatch=Exact` 把所有子 LIST 钉在同一个 R 上即可,
+      **没有语义让步**;成本还更小(watch cache 按 namespace 建索引 + `ListFromCacheSnapshot`
+      1.34 起默认开)。
+      实现三坑(全实测):`continue` 与 `resourceVersionMatch` **互斥**(续读只传 token);
+      游标坏掉是**翻不完**而不是少返回 ⇒ 守卫必须带超时;自己的 token 必须与上游区分,
+      不认识的一律拒而**不是透传**。
+      守卫 `verify.sh` 三条,已验证弄坏游标会红
+- [ ] **下一步:WATCH 多路复用**(`-A` 的 watch 扇成 N 条流,对客户端合成一条)。
+      现在能干净地从 LIST 返回的 R 起步。⭐ **租户自装 operator 的必需件**
+      (cluster-wide informer 走的就是这条路)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
 - [x] ✅ **kubezoo 现在能认 in-cluster ServiceAccount token**(审计 §Y,已实测)
       原因是从未设置 `ServiceAccountTokenGetter`(1.24 fork 时代的遗留:那时非绑定 token 还在)。

@@ -93,9 +93,33 @@ list(ctx, options):
 | **R 的存活窗口** | 与原生同一种失效(compact → 410),但扇出 N 次往返耗时更长,**暴露窗口更宽**。这是程度差异,不是语义差异 |
 | **游标编码** | `{v, rv, nsIndex, inner}` 的 JSON + base64,与原生同构。**必须自己的 token 与上游 token 不混淆** —— 收到不认识的 token 一律拒,不要当成上游的透传 |
 
+## 3.1 ⚠️ 实现时撞到的三件事(都实测过)
+
+**① `continue` 与 `resourceVersionMatch` 互斥。** apiserver 直接拒:
+
+```
+The ListOptions "" is invalid: resourceVersionMatch: Forbidden:
+resourceVersionMatch is forbidden when continue is provided
+```
+
+因为 continue token 本身就带着 revision。所以规则是:
+**新开一个 namespace 时钉 `resourceVersion=R + Exact`;续读某个 namespace 时只传 token**
+—— 两种情况钉的是同一个快照,保证不变。
+
+**② 游标坏掉不是"少返回",是"翻不完"。** 故意把游标里的 `Inner` 丢掉之后,
+每次续读都从该 namespace 头部重来,**客户端永远翻不完**。
+⭐ 所以守卫必须**带超时**:一个会挂住的检查和一个会绿的检查一样糟。
+实测:`chunk-size=1/2/5` 三档全部 `did not finish inside 90s`,而不是报数字不符。
+
+**③ 自己的 token 必须与上游的区分开。** 收到不认识的 token 一律拒
+(`the continue parameter is not one this server issued`),**不要当成上游 token 透传** ——
+上游 token 的含义是"全集群单一区间里的位置",透传过去会**静默列错东西**。
+
 ## 4. 分两步做
 
-**第一步(本次):LIST 扇出。** 上面全部。可独立验证、可独立回滚。
+**第一步(已完成):LIST 扇出。** `pkg/proxy/fanout.go`。
+守卫在 `hack/lab/verify.sh`(跨 namespace 计数 / 各 chunk-size 分页一致 / 结果里无前缀残留),
+**已验证弄坏游标会红**(三档分页全部超时失败,而不是悄悄少返回)。
 
 **第二步(后续):WATCH 多路复用。** `-A` 的 watch 同样要扇出成 N 条流,
 对客户端合成一条。它现在能**干净地从 R 起步** —— 这正是第一步给出的东西。
