@@ -1,0 +1,179 @@
+# 落点控制:每租户节点池 + 注入替换。
+#
+# > 一句话原则(用户定案):租户看不到节点,没有任何调度权,他写的东西会被平台替换掉。
+#
+# 池子约定:节点带标签 kubezoo.io/pool=<租户ID>,并带同值的 NoSchedule 污点。
+# ⭐ 那个标签**必须每租户专属** —— 见架构 §8.2.2:在 pods/binding 那条路上
+# kubelet 不检 NoSchedule 污点、但检 nodeSelector,所以注入的 selector 是
+# 跨租户 binding 的唯一拦阻。用一个所有池子共有的标签等于没兜住。
+#
+# ⚠️ tolerations 里必须带上 not-ready / unreachable:JSON6902 的 add 是整体替换,
+# 会把 DefaultTolerationSeconds(进程内插件,webhook 之前就跑了)加的那两条冲掉,
+# 后果是节点 NotReady 时 Pod 立刻被驱逐而不是等 300s。
+#
+# ⚠️ 用了 JSON6902 就没有 autogen(见 README),所以 9 个 kind 全部显式写。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-placement
+  annotations:
+    policies.kyverno.io/title: 租户落点由平台替换
+spec:
+  failurePolicy: Fail
+  background: false
+  rules:
+    - name: place-pod
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        patchesJson6902: |-
+          - op: add
+            path: /spec/nodeSelector
+            value:
+              kubezoo.io/pool: "{{ split(request.namespace, '-') | [0] }}"
+          - op: add
+            path: /spec/tolerations
+            value:
+              - key: kubezoo.io/pool
+                operator: Equal
+                value: "{{ split(request.namespace, '-') | [0] }}"
+                effect: NoSchedule
+              - key: node.kubernetes.io/not-ready
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+              - key: node.kubernetes.io/unreachable
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+          - op: add
+            path: /spec/schedulerName
+            value: default-scheduler
+          - op: remove
+            path: /spec/affinity
+          - op: remove
+            path: /spec/topologySpreadConstraints
+
+    - name: place-controller
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet, ReplicaSet, ReplicationController, Job]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        patchesJson6902: |-
+          - op: add
+            path: /spec/template/spec/nodeSelector
+            value:
+              kubezoo.io/pool: "{{ split(request.namespace, '-') | [0] }}"
+          - op: add
+            path: /spec/template/spec/tolerations
+            value:
+              - key: kubezoo.io/pool
+                operator: Equal
+                value: "{{ split(request.namespace, '-') | [0] }}"
+                effect: NoSchedule
+              - key: node.kubernetes.io/not-ready
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+              - key: node.kubernetes.io/unreachable
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+          - op: add
+            path: /spec/template/spec/schedulerName
+            value: default-scheduler
+          - op: remove
+            path: /spec/template/spec/affinity
+          - op: remove
+            path: /spec/template/spec/topologySpreadConstraints
+
+    - name: place-cronjob
+      match:
+        any:
+          - resources:
+              kinds: [CronJob]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        patchesJson6902: |-
+          - op: add
+            path: /spec/jobTemplate/spec/template/spec/nodeSelector
+            value:
+              kubezoo.io/pool: "{{ split(request.namespace, '-') | [0] }}"
+          - op: add
+            path: /spec/jobTemplate/spec/template/spec/tolerations
+            value:
+              - key: kubezoo.io/pool
+                operator: Equal
+                value: "{{ split(request.namespace, '-') | [0] }}"
+                effect: NoSchedule
+              - key: node.kubernetes.io/not-ready
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+              - key: node.kubernetes.io/unreachable
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+          - op: add
+            path: /spec/jobTemplate/spec/template/spec/schedulerName
+            value: default-scheduler
+          - op: remove
+            path: /spec/jobTemplate/spec/template/spec/affinity
+          - op: remove
+            path: /spec/jobTemplate/spec/template/spec/topologySpreadConstraints
+
+    - name: place-podtemplate
+      match:
+        any:
+          - resources:
+              kinds: [PodTemplate]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      mutate:
+        patchesJson6902: |-
+          - op: add
+            path: /template/spec/nodeSelector
+            value:
+              kubezoo.io/pool: "{{ split(request.namespace, '-') | [0] }}"
+          - op: add
+            path: /template/spec/tolerations
+            value:
+              - key: kubezoo.io/pool
+                operator: Equal
+                value: "{{ split(request.namespace, '-') | [0] }}"
+                effect: NoSchedule
+              - key: node.kubernetes.io/not-ready
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+              - key: node.kubernetes.io/unreachable
+                operator: Exists
+                effect: NoExecute
+                tolerationSeconds: 300
+          - op: add
+            path: /template/spec/schedulerName
+            value: default-scheduler
+          - op: remove
+            path: /template/spec/affinity
+          - op: remove
+            path: /template/spec/topologySpreadConstraints

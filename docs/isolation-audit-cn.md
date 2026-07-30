@@ -736,9 +736,9 @@ binding 不是"设置",它是**直接写节点名的一次写入**,替换够不�
 按 §8.0 判据这是**读路径 ⇒ kubezoo 的**,策略层结构上够不着(准入看不到响应)。
 真要改还得先摸全泄漏面:`-o wide`、`status` 里、events、PV 的 `nodeAffinity`。
 
-## Q. `pods/binding` 可能绕开整套落点控制 ⚠️ 读码发现,**未实测**
+## Q. `pods/binding` 绕开落点控制 ⛔ **已实测坐实**(但被注入的 nodeSelector 兜住)
 
-⚠️ **这条是查 `schedulerName` 归属时读码撞见的,一次都没跑过。** 先记下来,别当结论用。
+> 原为读码推论,**2026-07-29 多节点 lab 实测坐实**,详见 §R。推论的每一步都对。
 
 三件已确认的事实拼在一起:
 
@@ -815,6 +815,94 @@ return t.Effect == v1.TaintEffectNoExecute
 
 ⚠️ 第三条要小心:那个 `*` on `*` 是**有意的**(覆盖租户 CRD),改成排除列表就等于
 维护一份黑名单 —— 又是"排除条件"那个形状,得先想清楚新增子资源时谁来补。
+
+## R. 落点「注入替换」可行性实测 ✅ 可行(kubezoo + Kyverno)
+
+**问题**:§8.2.2 那条一句话原则 —— 「租户看不到节点,没有任何调度权,他写的东西会被
+平台替换掉」—— kubezoo 配 Kyverno 到底做不做得到?
+
+**lab**:3 节点 kind(control-plane + 2 worker),每租户一个池子:
+
+```
+kz-audit3-worker    label kubezoo.io/pool=111111   taint kubezoo.io/pool=111111:NoSchedule
+kz-audit3-worker2   label kubezoo.io/pool=222222   taint kubezoo.io/pool=222222:NoSchedule
+```
+
+策略 `config/policy/tenant-placement.yaml`,租户 ID 从 namespace 前缀派生
+(`split(request.namespace, '-') | [0]` —— 前缀由 kubezoo 强制,租户伪造不了)。
+
+### ① 替换本身:✅ 全中
+
+租户 111111 提交一个**敌意** Pod(指向 222222 的池子 + 控制面容忍 + affinity + spread):
+
+| 字段 | 租户写的 | 上游实际落地 |
+|---|---|---|
+| `nodeSelector` | `pool: 222222` | **`pool: 111111`** |
+| `tolerations` | 222222 池 + **控制面** | **111111 池 + `not-ready` + `unreachable`(300s)** |
+| `affinity` | required 到 222222 | **无** |
+| `topologySpreadConstraints` | 有 | **无** |
+| `schedulerName` | — | `default-scheduler` |
+| 实际落点 | — | **`kz-audit3-worker`(自己的池子),Running** |
+
+- **租户 ID 是真派生的**:222222 提交同一份,落到 `worker2`
+- **控制器路径同样有效**:Deployment 的 Pod 也落在自己池子
+- ⚠️ 用了 JSON6902 就**没有 autogen**,9 个 kind 全部显式写(README 坑 2)
+
+### ② ⚠️ 预测过的冲突,原样复现
+
+准入链是**所有 mutating 跑完再跑 validating**。先前那条
+`tenant-scheduling: restrict-tolerations`(白名单 validate)把**平台自己注入**的
+池子容忍拒掉了:
+
+```
+denied ... tenant-scheduling: restrict-tolerations:
+Only the tolerations Kubernetes adds itself are allowed
+```
+
+⇒ 那条 deny 已删除(它本就是节点池方案落地前的过渡)。
+**教训:注入型策略上线时,必须同时清掉针对同一字段的验证型策略。**
+
+### ③ ⛔ `pods/binding` 确实绕得过去(§Q 坐实)
+
+把 111111 的池子 `cordon` 掉让 Pod 卡在 Pending,租户直接 POST binding 到 **222222 的节点**:
+
+```
+kubectl create -f binding.json --raw /api/v1/namespaces/default/pods/bindme/binding
+→ {"kind":"Binding",...}          # kubezoo **确实代理**这个子资源,没报错
+上游 bindme: node=kz-audit3-worker2      # 真的绑上了另一个租户的节点
+```
+
+- **kubezoo 代理 `pods/binding`** —— §Q 的前置疑问解决:它不是"解不出请求体"
+- **`NoSchedule` 污点没拦住** —— 与 kubelet 源码一致(只看 `NoExecute`)
+- Kyverno 的 `deny-nodename` 匹配 `kinds: [Pod]`,**匹配不到 Binding**
+
+### ④ ✅ 但注入的 `nodeSelector` 兜住了,而且**前提已实测**
+
+```
+phase  = Failed
+reason = NodeAffinity
+msg    = Pod was rejected: Predicate NodeAffinity failed:
+         node(s) didn't match Pod's node affinity/selector
+```
+
+容器一个都没起。**兜住它的是注入的 nodeSelector,不是污点。**
+
+⭐ **负向对照(这条最重要)**:把 `worker2` 也标上 `pool=111111`(模拟"所有池子共有的标签"),
+同一次 binding —— Pod **Running 在另一个池子的节点上**。
+
+⇒ **「注入的池子标签每租户专属」不是优化项,是承重前提。** 这条现在是量出来的。
+
+### 结论与残余
+
+**可行。** kubezoo + Kyverno 能实现那条原则,但成立依赖两件事,都要写进部署检查单:
+
+1. **池子标签每租户专属**(见上,负向对照已证)
+2. **注入型策略上线时清掉同字段的验证型策略**(见 ②)
+
+⚠️ **残余(已知,未处理)**:binding 在 **API 层是成功的** —— 租户能把 Pod 对象
+绑到别的租户节点上,只是 kubelet 不让它跑(`Failed`)。这是**节点侧的遏制,不是 API 侧的阻止**。
+真要在 API 侧堵,Kyverno 需要匹配 `pods/binding` 子资源(`kinds: [Pod/binding]`)——
+**没测过**,列为下一步。
 
 ## 尚未覆盖
 

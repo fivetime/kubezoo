@@ -524,6 +524,9 @@ PSA 的判定输入是 namespace 标签 `pod-security.kubernetes.io/enforce`,而
 这就是判断"这件事做完了没有"的标准:**租户还能不能通过任何一条路影响落点。**
 
 
+✅ **2026-07-29 多节点 lab 实测:kubezoo + Kyverno 可以实现这条原则**(审计 §R),
+策略见 `config/policy/tenant-placement.yaml`。成立依赖两个前提,见本节末。
+
 **设计已定**(用户确认):**每个租户有自己的 worker 节点池,节点本身带污点**,
 防止普通应用调度过来。平台**替换**租户 Pod 的落点字段 ——
 注入该租户池的 `nodeSelector` + 对应 `toleration`,**而不是拒绝**租户写的。
@@ -550,7 +553,16 @@ spec(Pod spec 建后基本不可变,租户事后拆不掉),kubelet 会拿它核�
 **租户 A 把自己的 Pod bind 到租户 B 的节点上,会被 kubelet 拒**。
 
 ⇒ **它是否承重,取决于那个标签只有该租户的节点才有。**
-用一个所有池子共有的标签(如 `node-role.kubernetes.io/worker`)就等于没兜住。
+
+⭐ **这条已实测**(审计 §R④):租户 POST binding 到别的租户节点,
+kubelet 报 `Predicate NodeAffinity failed`,容器一个都没起;
+**负向对照** —— 把目标节点也标成该租户的池子(模拟共有标签),同一次 binding
+就让 Pod **Running 在了另一个池子的节点上**。
+⇒ **「池子标签每租户专属」是承重前提,不是优化项。**
+
+⚠️ **残余**:binding 在 **API 层是成功的** —— Pod 对象真被绑到了别的租户节点上,
+只是 kubelet 不让它跑。这是**节点侧的遏制,不是 API 侧的阻止**。
+要在 API 侧堵,Kyverno 需匹配 `pods/binding` 子资源(`kinds: [Pod/binding]`),**未测**。
 
 ##### ⚠️ 两个实现坑
 
@@ -562,10 +574,11 @@ merge 的话租户自己写的控制面容忍会活下来。
 (实测确认,§O)。整体覆盖把它们删掉的后果是:节点 NotReady 时 Pod **立刻**被驱逐,
 而不是等默认的 300s。**平台注入的那份必须把这两条带上**,否则等于悄悄改了全体租户的驱逐行为。
 
-**③ 注入(mutate)和现有的 deny 规则会打架。**
-准入链是所有 mutating 先跑、再跑 validating。平台注入了租户池的 toleration 之后,
-`config/policy/tenant-scheduling.yaml` 里的 `restrict-tolerations`(白名单 validate)
-会**把注入的结果拒掉**。上线注入时那条 deny 必须同时改掉 —— 它是**节点池方案落地前的过渡**。
+**③ 注入(mutate)和验证(validate)规则会打架 —— 已实测复现。**
+准入链是所有 mutating 先跑、再跑 validating。平台注入池子 toleration 之后,
+`tenant-scheduling` 里的 `restrict-tolerations`(白名单 validate)**把注入的结果拒掉了**,
+报 `Only the tolerations Kubernetes adds itself are allowed`。那条已删除。
+**通用教训:注入型策略上线时,必须同时清掉针对同一字段的验证型策略。**
 
 ##### 打散与跨租户共驻
 

@@ -26,10 +26,11 @@
 | `tenant-platform-classes.yaml` | 删掉租户设的 `runtimeClassName` / `priorityClassName` / `priority` / `ingressClassName` 及废弃的 `ingress.class` 注解 | 租户可跑出沙箱、可拿 `system-cluster-critical` 抢占全集群 |
 | `tenant-deny-daemonset.yaml` | 拒绝租户建 DaemonSet | 租户可往平台每个节点投放 Pod |
 | `tenant-pod-security.yaml` | Pod 强制 `restricted`;并把 namespace 的 PSA 标签钉回 `restricted` | 租户拿到 privileged + hostNetwork 的 Pod。⛔ **原生 PSA 顶不上**:它的判定输入是 namespace 标签,而那个标签租户自己能写 |
-| `tenant-scheduling.yaml` | 拒 `spec.nodeName`;`tolerations` 只留 k8s 自己加的两条 | 租户可绕过调度器钉节点、可容忍污点跑到控制面或别人的节点池 |
+| `tenant-scheduling.yaml` | 拒 `spec.nodeName` | 租户可绕过调度器钉节点 |
+| `tenant-placement.yaml` | **整体替换**租户的 `nodeSelector`/`tolerations`/`affinity`/`topologySpreadConstraints`/`schedulerName`,换成该租户池子的 | 租户可自选落点。⭐ 注入的 `nodeSelector` 还是 `pods/binding` 那条路上的唯一拦阻(kubelet 不检 NoSchedule 污点但检它)—— **前提是池子标签每租户专属**,已用负向对照证实 |
 
-**还差**(见架构 §8.2.2):平台**注入** `nodeSelector`/`toleration`/`topologySpreadConstraints`
-+ **拒掉租户自写**的 `nodeSelector`/`affinity`。
+**还差**:在 **API 层**堵住 `pods/binding` —— 现在是 kubelet 侧遏制(Pod 绑上了但跑不起来),
+需要 Kyverno 匹配 `pods/binding` 子资源(`kinds: [Pod/binding]`),**未测**。
 ⛔ 打散别用 required podAntiAffinity(扫全量 Pod,调度吞吐杀手);跨租户共驻只能靠节点池。
 
 ## ⚠️⚠️ 两个会让策略"Ready 但什么都不做"的坑(都实测踩过)
@@ -77,7 +78,13 @@ Kyverno 的 `autogen` **只从 `patchStrategicMerge` 派生**。用 JSON6902 时
 apiserver 直接短路,**mutate/validate webhook 根本不会被调用**。看起来就像策略没生效。
 验证时务必改成一个**不同的值**。
 
-### 5. 多条策略并存时,别把拒绝归错策略
+### 5. 注入型策略与验证型策略会打架(实测踩过)
+
+准入链是**所有 mutating 跑完再跑 validating**。`tenant-placement` 注入了池子 toleration,
+而当时 `tenant-scheduling` 还有一条白名单 validate —— 它**把平台自己注入的结果拒掉了**。
+**通用规则:上线注入型策略时,必须同时清掉针对同一字段的验证型策略。**
+
+### 6. 多条策略并存时,别把拒绝归错策略
 
 一个对象可能同时违反好几条规则,谁先拒的不一定是你在测的那条。实测踩过:测调度策略时
 Deployment 被拒,以为规则生效了,实际是 `kubectl create deploy` 的默认模板不满足

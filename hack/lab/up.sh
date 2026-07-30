@@ -19,6 +19,18 @@ if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   # level on every namespace that does not say otherwise. It is off by default
   # because it constrains every pod any later test creates; set it to reproduce
   # the measurement that native PSA is not a tenant-proof control here.
+  # WORKERS=n adds n worker nodes. The per-tenant node pool design needs more
+  # than one node to mean anything: a single-node cluster has no taint that a
+  # pod can fail to tolerate and nowhere for a cross-tenant binding to aim.
+  WORKER_NODES=""
+  if [ -n "${WORKERS:-}" ]; then
+    WORKER_NODES="nodes:
+- role: control-plane"
+    for _ in $(seq "$WORKERS"); do
+      WORKER_NODES="$WORKER_NODES
+- role: worker"
+    done
+  fi
   PSA_PATCH=""
   if [ -n "${PSA_DEFAULT:-}" ]; then
     mkdir -p "$LAB/psa"
@@ -36,6 +48,9 @@ plugins:
     exemptions:
       namespaces: [kube-system, local-path-storage, kyverno, ingress-nginx]
 EOF
+    if [ -n "$WORKER_NODES" ]; then
+      echo "PSA_DEFAULT 与 WORKERS 不能同时用(两者都要写 nodes:)" >&2; exit 1
+    fi
     PSA_PATCH="$(cat <<EOF
 nodes:
 - role: control-plane
@@ -65,6 +80,7 @@ networking:
   apiServerAddress: 127.0.0.1
   apiServerPort: 13486
 $PSA_PATCH
+$WORKER_NODES
 EOF
   kind create cluster --name "$CLUSTER" --config "$LAB/kind.yaml" --image kindest/node:v1.36.1
 fi

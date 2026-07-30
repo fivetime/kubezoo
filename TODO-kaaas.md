@@ -303,7 +303,8 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             即使全局默认已是 `restricted`。**又是"判定条件建在租户可控输入上"那个形状。**
             修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
             并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
-      - [ ] P1 **落点控制:每租户节点池 + 注入替换**(设计已定,见架构 §8.2.2)
+      - [x] ✅ **落点控制:每租户节点池 + 注入替换 —— 已实测可行**(审计 §R)
+            `config/policy/tenant-placement.yaml`;⚠️ 两个承重前提见下,残余=binding 在 API 层仍成功
             > **一句话原则(用户定案):租户看不到节点,没有任何调度权,他写的东西会被平台替换掉。**
             **完成判据 = 租户不能通过任何一条写入路径影响落点**,不只是 PodSpec 字段 ——
             `pods/binding` 是 Pod 建好之后的**另一次写入**,替换够不到它(§Q)
@@ -313,9 +314,13 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             - ⭐⭐ **注入的 `nodeSelector` 是承重件**:binding 那条路上 kubelet 不检污点
               但**检 nodeSelector** ⇒ 它是跨租户 binding 的唯一拦阻。
               **前提是那个标签只有该租户节点才有**,用共有标签等于没兜住
-            - ⚠️ 三坑:必须整体覆盖不能 merge;覆盖会删掉 `not-ready`/`unreachable`
-              两条(注入的那份要带上,否则驱逐从 300s 变成立刻);
-              **注入上线时现有的 `restrict-tolerations` deny 必须同时改掉**(会拒掉注入结果)
+            - ⚠️ 三坑(**全部实测过**):必须整体覆盖不能 merge;覆盖会删掉
+              `not-ready`/`unreachable` 两条(注入的那份已带上);
+              **`restrict-tolerations` 与注入冲突已复现并删除该规则** ——
+              通用教训:注入型策略上线时必须清掉同字段的验证型策略
+            - [ ] **残余**:binding 在 **API 层仍然成功**(Pod 真被绑到别租户节点,
+              只是 kubelet 不让跑)。要在 API 侧堵需 Kyverno 匹配 `pods/binding`
+              子资源(`kinds: [Pod/binding]`)—— **未测**,下一步
             - ⛔ **打散不要用 required podAntiAffinity**:每评估一个节点扫一遍已有 Pod,
               是调度吞吐杀手,按北极星(规模优先)大集群上会先撞这堵墙 ⇒ 用 `topologySpreadConstraints`
             - ⛔ **跨租户共驻 affinity 表达不了**(笛卡尔积)⇒ 只能靠节点池:污点 + 注入
