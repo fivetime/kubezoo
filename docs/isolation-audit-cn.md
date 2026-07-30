@@ -1707,6 +1707,78 @@ Flusher 与 CloseNotifier,只在内层真有 Hijacker 时才加上。
 守卫 `verify.sh` 三条(自己的日志 / **`-f` 8 秒内多于一行** / 平台 Pod 按路径与穿越都够不着),
 **已用原始代码验证会红**(恰好那一条)。
 
+## AF. exec / attach / port-forward / cp / debug 全面体检
+
+按**逃逸潜力**排的,不是按命令表平铺。
+
+### ⛔ 两个真 bug:attach 和 port-forward 根本不工作
+
+`pods/log` 和 `pods/exec` 注册成 `IsConnecter: true`,
+而 **`pods/attach` 和 `pods/portforward` 被注册成了普通对象代理**(带 `NewFunc` 返回 Pod)。
+结果是 apiserver 的 upgrade handler 拿到空响应体却要按 Pod 解析:
+
+```
+error: unable to upgrade connection: the object provided is unrecognized (must be of type Pod):
+couldn't get version/kind; json parse error: unexpected end of JSON input (<empty>)
+```
+
+| | 经 kubezoo | 直连上游(对照) |
+|---|---|---|
+| `exec` | ✅ | ✅ |
+| `cp`(走 exec) | ✅ 文件真落进容器 | ✅ |
+| **`attach`** | ⛔ 0 行 | ✅ 8 行 |
+| **`port-forward`** | ⛔ 上面那个错 | ✅ Forwarding from ... |
+
+**修法**:两者改成 `IsConnecter: true`,和 exec/log 一致。修后 attach 8 行、
+port-forward 正常绑定,且 exec / `logs -f` 不受影响。
+
+### ✅ 隔离:改成连接器之后重验,仍然封死
+
+| | |
+|---|---|
+| `exec` / `attach` / `port-forward` 打平台 Pod | 三条全部 **NotFound** |
+| `cp` 到平台 Pod | NotFound |
+
+⚠️ 对 `exec`/`portforward` 用 `get --raw` 做穿越探测**测不出东西** ——
+它们是仅限 upgrade 的端点,普通 GET 一律返回
+`connect resource request is not upgradeable`。**真判据是 kubectl 层的 NotFound。**
+
+### ⭐ `kubectl debug` —— kubectl 提供的最强提权,两种形态都封死
+
+| | |
+|---|---|
+| `debug node/<节点>`(在节点上起特权 Pod,挂宿主机) | **NotFound** —— 靠的是 Node 不可见(§7.1) |
+| `debug <pod> --profile=sysadmin`(在旁边起特权临时容器) | **Forbidden**,`violates PodSecurity "restricted"` |
+
+### 其余命令一次过
+
+| | |
+|---|---|
+| `cordon` / `taint` / `drain` | 三条全 `nodes ... not found` —— Node 不可见一次封三个 |
+| `top node` / `top pod` | `Metrics API not available`(kubezoo 不代理 metrics APIService) |
+| `certificate approve`(签任意身份) | 资源**根本没服务** |
+| `cluster-info` | 显示的是 **kubezoo 自己的地址**,不漏上游 |
+| `events` / `events -A` | 只有自己的 namespace |
+| `kubectl proxy` | 起得来,但透出的仍是租户视图(只看得到自己那 4 个 namespace) |
+
+### ⚠️ 一个不一致(fail-closed,不是漏洞)
+
+**`api-resources` 公告了 `certificatesigningrequests`,但用不了** ——
+`get csr` 报 `Unable to list`。租户看得见一个用不了的资源类型。
+和 §阶段0 记的"12 个陈旧 GV 是活端点"是同一类:**公告面与服务面没对齐**。
+
+### ⭐ 方法学:两次差点误判
+
+**① 缺陷和隔离长得一模一样。** attach 打平台 Pod 返回 NotFound —— 看着像隔离生效,
+其实它对**自己的 Pod** 也是坏的。**所以守卫必须同时断言"自己的能用"和"别人的不能用"**,
+只测后者的话,一个彻底坏掉的功能会一直报绿。
+
+**② 管道把好功能测成坏的。** port-forward 的断言先是失败,原因是
+`kubectl ... | grep` 在非终端下块缓冲,`timeout` 杀进程时缓冲区丢了。
+改成写文件即通过。**跟前面 `logs -f` 用 `wc -l` 那次是同一个坑。**
+
+守卫 `verify.sh` 六条,**已验证退回原注册会红**(恰好 attach 与 port-forward 两条)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

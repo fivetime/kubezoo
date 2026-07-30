@@ -58,16 +58,15 @@ var legacyGroup = common.APIGroupConfig{
 					return &core.PodList{}
 				},
 			},
+			// attach and portforward are connections, not objects. Registered as
+			// ordinary object proxies they returned an empty body where the
+			// apiserver's upgrade handler expects the Pod, and both failed with
+			// "the object provided is unrecognized (must be of type Pod) ...
+			// unexpected end of JSON input" -- measured, while the same commands
+			// worked against upstream. exec and log were already connecters,
+			// which is why only these two were broken.
 			"pods/attach": {
-				Kind: coreapiv1.
-					SchemeGroupVersion.WithKind("Pod"),
-				Resource:        "pods",
-				Subresource:     "attach",
-				ShortNames:      []string{"po"},
-				NamespaceScoped: true,
-				NewFunc: func() runtime.Object {
-					return &core.Pod{}
-				},
+				IsConnecter: true,
 			},
 			"pods/status": {
 				Kind: coreapiv1.
@@ -116,15 +115,7 @@ var legacyGroup = common.APIGroupConfig{
 				},
 			},
 			"pods/portforward": {
-				Kind: coreapiv1.
-					SchemeGroupVersion.WithKind("Pod"),
-				Resource:        "pods",
-				Subresource:     "portforward",
-				ShortNames:      []string{"po"},
-				NamespaceScoped: true,
-				NewFunc: func() runtime.Object {
-					return &core.Pod{}
-				},
+				IsConnecter: true,
 			},
 			"pods/proxy": {
 				Kind: coreapiv1.

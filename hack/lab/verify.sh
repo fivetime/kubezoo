@@ -595,6 +595,55 @@ else
 fi
 
 echo
+echo "== exec, attach and port-forward reach the tenant's pods and nothing else =="
+# All four of these are connections rather than object reads, and each one is a
+# way into a running container. attach and port-forward were registered as
+# ordinary object proxies rather than connecters and did not work at all -- the
+# apiserver's upgrade handler was handed an empty body where it expects a Pod.
+# So these assert that they work as well as that they are contained: a broken
+# feature and a contained one look identical from the outside.
+if [ "$($K -n "$NS" get pod log-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ]; then
+  if [ "$(timeout 25 $T -n default exec log-probe -- echo reachable 2>/dev/null)" = reachable ]; then
+    ok "exec into the tenant's own pod"
+  else
+    bad "exec" "could not run a command in the tenant's own pod"
+  fi
+  attached=$(timeout 8 $T -n default attach log-probe 2>/dev/null | grep -c probe-line)
+  if [ "${attached:-0}" -gt 1 ]; then
+    ok "attach streams from the tenant's own pod ($attached lines)"
+  else
+    bad "attach" "got ${attached:-0} lines; registered as an object proxy rather than a connecter it returns nothing at all"
+  fi
+  # To a file, not through a pipe. kubectl block-buffers when its output is not a
+  # terminal, so piping it into grep and then killing it on a timeout loses the
+  # line that was being looked for -- the check fails on a feature that works.
+  timeout 10 $T -n default port-forward log-probe 18097:80 >"$LAB/verify-portforward.log" 2>&1
+  if grep -q "Forwarding from" "$LAB/verify-portforward.log"; then
+    ok "port-forward binds for the tenant's own pod"
+  else
+    bad "port-forward" "never reported a forward: $(tr '\n' ' ' <"$LAB/verify-portforward.log" | cut -c1-130)"
+  fi
+  platform_pod=$($K -n kube-system get pods --no-headers 2>/dev/null | awk '{print $1}' | head -1)
+  reached=no
+  for verb in "exec $platform_pod -- echo pwned" "attach $platform_pod" "port-forward $platform_pod 18098:53"; do
+    out=$(timeout 15 $T -n kube-system $verb 2>&1)
+    grep -qiE "notfound|not found|forbidden" <<<"$out" || { bad "reached a platform pod" "kubectl $verb returned: $(tr '\n' ' ' <<<"$out" | cut -c1-110)"; reached=yes; }
+  done
+  [ "$reached" = no ] && ok "exec, attach and port-forward all refuse a platform pod"
+fi
+
+# kubectl debug is the sharpest escalation kubectl offers: one form asks for a
+# privileged pod on a named node, the other for a privileged container beside an
+# existing one.
+node_name=$($K get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+expect_denied "debug against a node" "not found" -- \
+  timeout 30 $T debug "node/$node_name" --image=busybox -- true
+if [ "$($K -n "$NS" get pod log-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ]; then
+  expect_denied "a privileged debug container beside a running pod" "restricted\|forbidden" -- \
+    timeout 30 $T -n default debug log-probe --image=busybox --profile=sysadmin -- true
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

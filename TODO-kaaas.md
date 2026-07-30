@@ -201,6 +201,9 @@ kubezoo / kubetron / Kyverno **都会往租户的 Pod 上写东西**,而**只有
 注入的 `runtimeClassName`、被清空的 `tolerations`、暴露平台节点名的 `nodeName`。
 后果:GitOps 永久漂移、租户排障对不上、平台拓扑泄露。
 
+- [ ] ⚠️ **公告面与服务面对齐** —— `api-resources` 公告了 `certificatesigningrequests`,
+      但 `get csr` 报 `Unable to list`(审计 §AF)。fail-closed 不是漏洞,但是坏掉的能力公告;
+      与阶段 0 记的"12 个陈旧 GV 是活端点"同类
 - [ ] 约定一份"平台内部字段"清单,kubezoo 出站时统一擦除
 - [ ] **被改写的字段必须可还原** —— kubetron 把原探针存进约定注解,kubezoo 出站还原。
       这是**跨项目接口,必须先定**,不能事后补
