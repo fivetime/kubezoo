@@ -153,6 +153,16 @@
       三条绑定路径全堵(自己 ns 的 RoleBinding 允许且只在该 ns 生效 / ClusterRoleBinding 照拒 /
       先自授 bind 再试仍拒 —— RoleBinding 授不了集群级资源)。
       `refuseReservedName` 覆盖 **apply + patch 两条**写入口。守卫红测恰好红 8 条
+- [ ] ⛔ **P0:投影只能承载命名空间级授权 ⇒ cert-manager 装得进去、跑不起来**(审计 §AR,真装过)
+      `helm install` 走完全部阶段(6 CRD / 3 Deployment / 13 ClusterRole / 10 CRB / 1 webhook 配置),
+      但 3 个 Pod 挂 2 个:cainjector 读 `customresourcedefinitions` 被拒、
+      controller 读 `clusterissuers` 被拒、webhook 等不到证书。
+      ⭐ 根因是结构性的:**RoleBinding 永远授不了集群级资源**,投影 = 每 ns 一条 RoleBinding
+      ⇒ ClusterRole 里集群级的那部分一条都过不去。**任何带集群级 CR 的 operator 都会撞上**。
+      对照:租户**自己的凭据**看得见自己的 CRD(§AN 的 proxied 组)⇒ 缺的只是"分给自己的 SA"。
+      ⇒ 方案(需定):按 §AN 的套路,把每条投影里**集群级的那部分规则**派生成角色,
+      绑到**只有 kubezoo 会断言、且只对该 binding 的 subject 断言**的组上。
+      ⚠️ 必须精确到具体 SA,否则等于给该租户所有工作负载集群级权限
 - [x] ✅ **另一半也做完了:ClusterRoleBinding 投影**(审计 §AQ)
       租户说"集群级"= "我所有的 namespace" ⇒ 每条 ClusterRoleBinding **投影成每 namespace 一条
       RoleBinding**;正本放租户的 kube-system(控制器会重建该 ns,删不掉),

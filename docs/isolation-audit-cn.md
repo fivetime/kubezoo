@@ -2321,6 +2321,9 @@ user "admin" (groups=["kubezoo:proxied:111111" "system:authenticated"]) is attem
 
 ## AQ. ⭐ ClusterRoleBinding 投影 ✅ 已实现 —— cert-manager 的 RBAC 现在**全量装得上**
 
+> ⚠️ **先读 §AR**:「RBAC 全量装得上」**不等于「cert-manager 能用」**。真跑一遍是装进去了但跑不起来,
+> 因为投影只能承载命名空间级授权,而 cert-manager 还要集群级的 CRD 和 ClusterIssuer。
+
 §AP 只做了角色那一半,cert-manager 的 10 条 ClusterRoleBinding 里 9 条还是被拒。
 这一节把另一半做完了。
 
@@ -2399,6 +2402,76 @@ verify.sh 最后一条用"删掉 `kubezoo:tenant-admin` 看是否 Forbidden"来�
 现在租户**自己的投影**也在授权,删那一条已经拿不走 configmap 了 —— 探针改成了
 租户任何角色都没授的资源。**这是正确行为,不是回归**,但停机/吊销的实现要注意
 (#90):**撤销必须连租户自己的投影一起处理**。
+
+## AR. ⛔ 真装一遍 cert-manager:**装进去了,但跑不起来** —— 投影只能承载**命名空间级**授权
+
+§AQ 测的是"33 个 RBAC 对象都能创建"。那不等于"能用"。真跑一遍 `helm install`:
+
+```
+helm install cm jetstack/cert-manager v1.16.2  →  INSTALLATION FAILED
+                                                  (卡在 post-install 的 startupapicheck)
+```
+
+### 对象全进去了
+
+| | |
+|---|---|
+| CRD | 6 |
+| Deployment | 3 |
+| ClusterRole / ClusterRoleBinding | 13 / 10 |
+| webhook 配置 | 1 |
+
+⇒ **helm 走完了所有 install 阶段**,这是 §AP/§AQ 换来的。
+
+### 但三个 Pod 有两个起不来
+
+```
+cm-cert-manager              1/1 Running     ← 但它的 informer 一直在报错
+cm-cert-manager-cainjector   0/1 Error ×6    ← CrashLoop
+cm-cert-manager-webhook      0/1 Running     ← 永远 not ready
+```
+
+```
+cainjector: customresourcedefinitions "certificates.cert-manager.io" is forbidden
+controller: failed to list *v1.ClusterIssuer: clusterissuers.cert-manager.io is forbidden
+webhook:    no tls.Certificate available yet          ← 等 controller 给它签证书,而 controller 卡住了
+```
+
+### ⭐ 根因是投影的**结构性上限**,不是 bug
+
+```
+SA 在自己 namespace 读 secrets   → yes     ← 投影生效
+SA 读 CRD(集群级)              → no
+SA 读 ClusterIssuer(集群级 CR) → no
+```
+
+**RoleBinding 永远授不了集群级资源。** 投影 = 每 namespace 一条 RoleBinding
+⇒ 它只能承载 ClusterRole 里**命名空间级**的那部分规则,集群级的那部分**一条都过不去**。
+
+而 cert-manager 恰好两样都要:`customresourcedefinitions`(k8s 自己的集群级资源)
+和 `clusterissuers`(**它自己的集群级自定义资源**)。
+
+⚠️ 注意这不是"cert-manager 特殊":**任何带集群级 CR 的 operator 都会撞上**,
+而集群级 CR 在 operator 生态里非常普遍(ClusterIssuer / ClusterPolicy / ClusterSecretStore …)。
+
+### 对照:租户**自己的凭据**是可以的
+
+`kubectl get crd` 租户自己看得见 6 个(§AN 的 proxied 组给的,且读路径按前缀过滤)。
+**缺的只是"把这份能力按租户的意思分给它自己的 ServiceAccount"。**
+
+### 下一步该怎么做(未做,需要定)
+
+和 §AN 同一个套路:**路径绑定的组**。对每条投影的 ClusterRoleBinding,
+把其中**集群级的那部分规则**派生成一个角色,绑到一个**只有 kubezoo 会断言**的组上,
+并且只在转发**该 binding 的 subject 本人**的请求时断言。
+
+- 经 kubezoo:生效,且读路径本来就按名字前缀过滤 ⇒ 只看得见自己租户的
+- 不经 kubezoo:什么都没有(和 §AN 一样)
+
+⚠️ 要点:组必须精确到"哪个 SA",否则就成了"该租户所有工作负载都拿到集群级权限" ——
+那正是 §AN 里刻意不做的事。
+
+⇒ **结论:cert-manager 现在能装进去,不能用。** 差的是这一件事。
 
 ## 尚未覆盖
 
