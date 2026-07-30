@@ -23,8 +23,13 @@ import (
 	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
-// InitConvertors initialize native convertor and custom convertor
-func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListTenantCRDsFunc) (nativeConvertor, customConvertor common.ObjectConvertor) {
+// InitConvertors initialize native convertor and custom convertor.
+//
+// publicIngressClasses are the IngressClass names that reach the platform's own
+// controller, and so the public internet; every other class a tenant names is
+// prefixed and can only be served by something the tenant runs itself.
+func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListTenantCRDsFunc,
+	publicIngressClasses []string) (nativeConvertor, customConvertor common.ObjectConvertor) {
 	ownerReferenceTransformer := NewOwnerReferenceTransformer(checkGroupKind)
 	objectReferenceTransformer := NewObjectReferenceTransformer(checkGroupKind)
 	defaultConvertor := NewDefaultConvertor(ownerReferenceTransformer)
@@ -38,6 +43,14 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Group: "",
 			Kind:  "Endpoints",
 		}: NewCrossReferenceConverter(defaultConvertor, NewEndpointsTransformer(objectReferenceTransformer)),
+		{
+			// spec.ingressClassName names an IngressClass, which is
+			// cluster-scoped and therefore prefixed -- the same shape as
+			// spec.volumeName below. Left alone, a tenant's own class was
+			// unreachable and the platform's was.
+			Group: "networking.k8s.io",
+			Kind:  "Ingress",
+		}: NewCrossReferenceConverter(defaultConvertor, NewIngressTransformer(publicIngressClasses)),
 		{
 			Group: "discovery.k8s.io",
 			Kind:  "EndpointSlice",

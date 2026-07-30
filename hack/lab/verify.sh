@@ -736,6 +736,59 @@ expect_allowed "writes work again once it is gone" \
 $K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
 
 echo
+echo "== an IngressClass reference reaches the tenant's own, or the platform's on request =="
+# spec.ingressClassName references a cluster-scoped object, so it needs the same
+# prefixing as the object itself -- otherwise a tenant's own class is unreachable
+# while the platform's is reachable by name, which is the wrong way round. The
+# allowlist is how a tenant asks to be exposed.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata: {name: internal}
+spec: {controller: verify.example/own}
+EOF
+for pair in "own:internal" "public:nginx" "borrowed:999999-nginx"; do
+  name=${pair%%:*}; class=${pair##*:}
+  $T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: class-$name}
+spec:
+  ingressClassName: $class
+  rules:
+    - host: $name.verify.example
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+done
+sleep 4
+upstream_class() { $K -n "$NS" get ingress "class-$1" -o jsonpath='{.spec.ingressClassName}' 2>/dev/null; }
+tenant_class() { $T -n default get ingress "class-$1" -o jsonpath='{.spec.ingressClassName}' 2>/dev/null; }
+
+if [ "$(upstream_class own)" = "$TID-internal" ]; then
+  ok "a tenant's own class is prefixed, so its own controller can match it"
+else
+  bad "own class not prefixed" "upstream has '$(upstream_class own)', want $TID-internal -- the tenant's IngressClass object is prefixed and the reference is not, so they never meet"
+fi
+if [ "$(upstream_class public)" = nginx ]; then
+  ok "a class on the public allowlist passes through, which is how a tenant asks to be exposed"
+else
+  bad "public class was rewritten" "upstream has '$(upstream_class public)', want nginx -- prefixed, the tenant cannot reach the platform's controller at all"
+fi
+if [ "$(upstream_class borrowed)" = "$TID-999999-nginx" ]; then
+  ok "another tenant's class is prefixed into something that matches nothing"
+else
+  bad "borrowed class not contained" "upstream has '$(upstream_class borrowed)' -- a tenant can name another tenant's class directly"
+fi
+# The round trip: whatever the rewriting does, the tenant has to read back what
+# it wrote, or applying its own manifest again would prefix it a second time.
+round_trip=yes
+for pair in "own:internal" "public:nginx" "borrowed:999999-nginx"; do
+  name=${pair%%:*}; class=${pair##*:}
+  [ "$(tenant_class "$name")" = "$class" ] || { bad "class round trip" "wrote $class, reads back $(tenant_class "$name")"; round_trip=no; }
+done
+[ "$round_trip" = yes ] && ok "every class reads back exactly as the tenant wrote it"
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

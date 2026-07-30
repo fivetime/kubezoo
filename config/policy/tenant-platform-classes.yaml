@@ -60,27 +60,16 @@ spec:
     # ------------------------------------------------------------------
     # Ingress:字段与那个废弃注解必须一起删
     # ------------------------------------------------------------------
-    - name: drop-ingress-class
-      match:
-        any:
-          - resources:
-              kinds: [Ingress]
-              # ⭐ 判据:命名空间带 kubezoo.io/tenant 标签 —— 这是 kubezoo 保证、
-              # 租户改不动的东西(四种摘法实测都失败)。**不要换成硬编码平台
-              # namespace 的排除表**:那样平台以后新增一个组件 namespace
-              # (如 ingress-nginx)就会被当成租户 —— 实测它的 DaemonSet 被拒、
-              # Pod 的 runtimeClassName 被剥掉。
-              namespaceSelector:
-                matchExpressions:
-                  - key: kubezoo.io/tenant
-                    operator: Exists
-      mutate:
-        patchesJson6902: |-
-          - op: remove
-            path: /spec/ingressClassName
-          # ⚠️ 废弃但多数 ingress 控制器仍然认它。只清字段等于没清。
-          - op: remove
-            path: /metadata/annotations/kubernetes.io~1ingress.class
+    # ⚠️ 这里原本还有一条 drop-ingress-class,把 `ingressClassName` 和废弃的
+    # `kubernetes.io/ingress.class` 注解一起擦掉。**已删除** ——
+    # 擦掉之后 ingress 控制器一个都不认领,租户的 Ingress 成了摆设(审计 §AH)。
+    #
+    # 现在由 **kubezoo** 处理:`spec.ingressClassName` 是对集群级 IngressClass 的引用,
+    # 按 namespace 那样双向前缀化(`pkg/convert/ingress.go`),
+    # 只放行 `--public-ingress-classes` 里的平台 class 不加前缀。
+    # 于是:租户写自己的 class → 命中自己的控制器;写平台的 → 显式请求公网;
+    # 写别的租户的 → 前缀化成谁都命不中。
+    # 按 §8.0 判据这属于 kubezoo(集群级对象引用 + 双向改写),不是策略层。
 
     # ------------------------------------------------------------------
     # ⚠️ pod controller 必须**显式**写,不能靠 autogen。

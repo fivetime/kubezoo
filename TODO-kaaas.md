@@ -393,15 +393,14 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       nodes / PV / runtimeclasses / 两种 webhookconfiguration。
       **不是流量劫持**(对象本体仍受 RBAC 保护),但**能枚举别的租户 ID 与装了什么**。
       ⇒ **端点注入(§Z)从便利变成必需**:租户负载必须经 kubezoo,不能默认直连上游
-- [ ] ⭐ **`ingressClassName` 应由 kubezoo 前缀化改写,而不是策略层擦除**(审计 §AJ,已实测)
-      实测:IngressClass **对象**名加前缀(`111111-internal`),而 Ingress 里的**引用**不加 ——
-      ⇒ ①租户自建控制器**永远选不到自己的 Ingress**;②租户写 `nginx` 直接命中**平台公网控制器**。
-      现在的擦除策略是在挡②,代价是①也没了(Ingress 成摆设)。
-      **设计**:写时加前缀 / 读时去前缀,**白名单放行平台的公网 class 不加前缀** ⇒
-      "指向 Octavia 才接公网"从约定变成机制;策略层随之不再擦除。
-      按 §8.0 判据归 **kubezoo**(集群级对象引用 + 双向改写)。
-      ⚠️ 我一度把策略改成"无条件替换成平台 class",那会把租户**每一个** Ingress 变成公网入口
-      (内部 LB 被暴露),**已撤回未提交**
+- [x] ✅ **`ingressClassName` 已由 kubezoo 双向前缀化,白名单放行平台公网 class**(审计 §AJ)
+      `pkg/convert/ingress.go` + 新 flag `--public-ingress-classes`(默认空 ⇒ 全内部);
+      废弃的 `kubernetes.io/ingress.class` 注解一起改写(它压过字段);
+      策略层那条擦除规则已删。
+      实测三条:自己的 class → `111111-internal`(自己的控制器可匹配)、
+      白名单 → 原样(平台控制器接管)、别人的 → `111111-222222-nginx`(谁都命不中);
+      读回与写入一致。守卫已验证会红。
+      ⇒ **"指向 Octavia 才接公网"从约定变成机制**
 - [ ] ⭐ **优先 MAP/VAP(进程内)而不是 webhook** —— 见架构文档 §8.0。
       代价:MAP **没有 autogen**,PodSpec 那 8~9 个 kind 要逐个手写路径(`CronJob` 多一层)
 - [ ] 必备策略(**都得策略引擎做**;原生 PSA 连它自己那一条都守不住,见下):

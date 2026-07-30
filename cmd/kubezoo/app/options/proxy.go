@@ -16,9 +16,12 @@ type ProxyOptions struct {
 	ProxyClientQPS   float32
 	ProxyClientBurst int
 
-	ClientCAFile          string
-	ClientCAKeyFile       string
-	UpstreamMaster        string
+	ClientCAFile    string
+	ClientCAKeyFile string
+	UpstreamMaster  string
+	// PublicIngressClasses are the IngressClass names that reach the platform's
+	// own ingress controller, and through it the public internet.
+	PublicIngressClasses  []string
 	ServiceAccountKeyFile string
 	BindAddress           string
 	SecurePort            int
@@ -47,6 +50,11 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.ProxyClientBurst, "proxy-client-burst", o.ProxyClientBurst,
 		fmt.Sprintf("the maximun burst for thorttle to the upstream cluster apiserver, default to %v", o.ProxyClientBurst))
 	fs.StringVar(&o.UpstreamMaster, "proxy-upstream-master", o.UpstreamMaster, "upstream apiserver master address")
+	fs.StringSliceVar(&o.PublicIngressClasses, "public-ingress-classes", o.PublicIngressClasses,
+		"IngressClass names that reach the platform's own ingress controller, and so the public internet. "+
+			"A tenant naming one of these is asking to be exposed; every other class it names is prefixed with "+
+			"its tenant id and can only be served by a controller the tenant runs itself. Empty by default, "+
+			"which leaves every tenant Ingress internal.")
 	fs.StringVar(&o.BindAddress, "proxy-bind-address", o.BindAddress, "The server address of the tenants' kubeconfig file, N.B. this address should be a valid server address of the client-ca-file.")
 	fs.IntVar(&o.SecurePort, "proxy-secure-port", o.SecurePort, "The port on which the kubezoo used to serve HTTPS with authentication and authorization.")
 	fs.StringVar(&o.ClientCAKeyFile, "client-ca-key-file", o.ClientCAKeyFile, "Filename containing a PEM-encoded RSA or ECDSA private key used to sign tenant certificates.")

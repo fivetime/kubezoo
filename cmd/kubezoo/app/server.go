@@ -577,7 +577,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	listTenantCRDs := convert.ListTenantCRDsFunc(func(tenantID string) ([]*apiextensionsv1.CustomResourceDefinition, error) {
 		return util.ListCRDsForTenant(tenantID, crdLister)
 	})
-	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs)
+	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, o.PublicIngressClasses)
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)

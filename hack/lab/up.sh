@@ -139,6 +139,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=false \
   --proxy-bind-address=0.0.0.0 --proxy-secure-port=6443 --api-audiences=$UPSTREAM_SA_ISSUER \
+  --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do
