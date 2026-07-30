@@ -130,7 +130,11 @@
       kubezoo 在集群内的可达地址(Service ClusterIP / DNS 名)
 
 - [ ] ⛔ **P0 剩余:租户自装 operator 还差 ClusterRole 这一关**(审计 §X②,§Z 已解掉另外两条)
-      ~~`helm --create-namespace` 不建 ns~~(仍在,但有绕法:先手工建);
+      `helm --create-namespace` 不工作 —— **根因已查明**(审计 §AA):helm 先检查资源
+      再建 ns,而租户在不存在的 ns 里 `GET` 得到 **Forbidden**(上游 admin 得到 NotFound),
+      helm 当致命错误中止;**根本没发出建 namespace 的请求**。
+      修法:租户请求指向「对该租户不存在」的 namespace 时,把 Forbidden 改写成 NotFound
+      (读路径 ⇒ kubezoo;与 `TrimTenantIDFromError` 同一处机制;须窄范围)。**未实现**;
       **任何带 ClusterRole 的 chart 仍装不上** —— 租户集群级零权限,RBAC 提权防护拒绝,
       连 `events`/`secrets` 都不行,**走不走 kubezoo 都一样**(检查在上游做);
       ~~operator 的 Pod 看不见自己的组~~ ✅ 已由 §Z 解决。

@@ -1416,6 +1416,44 @@ lab 里的做法:**用上游集群 CA 给 kubezoo 签一张服务证书**(SAN �
 **kubezoo 现在在租户全部工作负载的 API 路径上。** 这是流量模型的根本改变,
 直接变成 #84/#85 的核心议题。用户已确认接受,并计划用 kubegateway 挡在前面做精准管控。
 
+## AA. `helm --create-namespace` 为什么不工作 —— 抓到请求了
+
+**不是 kubezoo 的 namespace 创建有问题**(kubectl 三种写法都正常:`create ns`、
+`create -f` 的 Namespace 清单、带 labels 的清单,上游全部落地)。
+**也不是 helm 的 bug**(同一条命令打上游集群成功)。
+
+把 kubezoo 开到 `-v=6`,helm 打过来的**全部**请求是:
+
+```
+GET /api/v1/namespaces/minins4/secrets          ← 查历史 release
+GET /api  /api/v1  /openapi/v3                  ← discovery
+GET /api/v1/namespaces/minins4/configmaps/mini  ← 检查资源是否已存在 → Forbidden,中止
+```
+
+**根本没有 `POST /api/v1/namespaces`。** helm 一次都没尝试建 namespace。
+
+### 根因:顺序 + 错误码语义
+
+helm **先**检查 chart 里的资源是否已存在,**再**建 namespace。而:
+
+| | 在不存在的 namespace 里 `GET` 一个对象 |
+|---|---|
+| 上游、cluster-admin | **NotFound** → helm 继续 → 建 namespace → 装成功 |
+| kubezoo、租户 | **Forbidden**(那个 namespace 没有 RoleBinding)→ helm 当致命错误中止 |
+
+⇒ 差别在**错误码**,不在能力。
+
+### 可行的修法(未实现)
+
+**当租户的请求指向一个「对该租户不存在」的 namespace 时,把 Forbidden 改写成 NotFound。**
+
+- 这与租户的视角一致:那个 namespace 在他的世界里就是不存在
+- 按 §8.0 判据属于**读路径 ⇒ kubezoo 的**,而且和已有的 `TrimTenantIDFromError` 是同一处机制
+- 只在错误路径上多一次"该 namespace 是否存在"的查询,热路径无开销
+- ⚠️ 必须**窄范围**:只在目标 namespace 确实不存在时改写,否则会把真正的权限错误也盖掉
+
+⇒ 修好之后 `helm --create-namespace` 应当可用,**"先手工建 ns"这个绕法就不需要了**。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
