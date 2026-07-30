@@ -1206,6 +1206,78 @@ Backward 查   111111-111111-example.com   → 匹配不上
 
 ⇒ **重新评估的触发条件:出现第一个真实消费者,且能点名要审查哪个 operator。**
 
+## X. ⛔⛔ 租户自己装 operator —— 实测**走不通**,而且我上一轮的说法是错的
+
+**起因**:我说过"生态里其余的 operator,答案是租户自己装,kubezoo 天然支持"。
+拿 cert-manager 的官方 chart 实测,**这个说法不成立**。
+
+### 三个坎,前两个卡死 helm,第三个卡死 operator 本身
+
+**① `helm --create-namespace` 不建 namespace。**
+
+```
+helm install ... -n freshns --create-namespace
+→ 租户视角 freshns:      NotFound
+→ 上游 111111-freshns:   NotFound
+```
+
+两次不同的 namespace 名都复现。手工 `kubectl create ns` 则正常(1 秒内可写,
+所以**不是 RoleBinding 收敛竞态**)。原因未追。
+
+**② 租户建不了任何 ClusterRole。**
+
+```
+clusterroles "cert-manager-cainjector" is forbidden: user "admin" is attempting to
+grant RBAC permissions not currently held:
+  {APIGroups:[""], Resources:["events"], Verbs:["get" "create" "update" "patch"]}
+  {APIGroups:[""], Resources:["secrets"], Verbs:["get" "list" "watch"]}
+  ...
+```
+
+⭐ **注意漏出的不只是 CRD 组,连 `events` / `secrets` 这种核心资源都不行** ——
+因为租户的权限是**逐 namespace 授予**的,**集群级什么都不持有**,
+而 RBAC 的提权防护要求"你不能授出你没有的"。
+
+⇒ **任何带 ClusterRole 的 chart 都装不上**,而那是绝大多数 operator,以及很多普通 chart。
+cert-manager 一次报 21 个错。
+
+**③ ⭐⭐ 最要命的:operator 在 Pod 里看不见自己的 CRD。**
+
+租户的 CRD 组会被加前缀,而 **operator 的 Pod 直连上游、不经过 kubezoo**
+(§S 已实测),于是它按代码里写死的组名去查,查不到:
+
+```
+# 从租户 Pod 内,用它的 ServiceAccount 直连上游
+GET /apis/example.com/v1          →  HTTP 404      ← operator 代码里写的
+GET /apis/111111-example.com/v1   →  HTTP 200      ← 上游实际存的
+```
+
+**租户视角看到的是 `example.com`,operator 视角看到的是 `111111-example.com`。**
+这两个视角的差异正是 kubezoo 的立身之本,但 operator 站在错误的那一边。
+
+### 结论:我上一轮的建议要翻过来
+
+我原来说"per-operator 审查只针对平台托管的那几个,生态里其余的租户自己装" ——
+**后半句不成立**。租户自装被两条**互相独立**的结构性问题卡住:
+② 装不上(ClusterRole),③ 装上也跑不起来(组名错位)。
+
+要让它通,需要同时满足:
+
+- **把 operator 指向 kubezoo 而不是集群内的上游端点**(给它挂一份租户 kubeconfig)——
+  这样它看到的就是去前缀的视图。⚠️ 本轮 lab 里 kubezoo 绑在 `127.0.0.1`,
+  Pod 够不着,**这条路只在架构上成立,没实测**
+- **operator 支持 namespace 级运行、只用 Role 不用 ClusterRole** ——
+  cert-manager 不支持;支持的是少数
+
+⇒ **能自装的是生态里的一个小子集,不是"其余全部"。**
+这反过来让**平台托管形态更重要**,不是更不重要 —— 跟我上一轮的结论方向相反。
+
+### ⚠️ 顺带一条运维事实
+
+本轮 lab 没建节点池,于是 `tenant-placement` 注入的 `nodeSelector` 指向一个不存在的池子,
+**租户的每一个 Pod 都卡在 Pending**。这是 fail-closed,是对的 ——
+但**症状是"Pod 不调度",没有任何东西指向策略**。运维手册已记。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

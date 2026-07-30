@@ -107,6 +107,15 @@
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
+- [ ] ⛔⛔ **P0 产品问题:租户自己装 operator 走不通**(审计 §X,cert-manager 实测)
+      三个坎:`helm --create-namespace` 不建 ns;**任何带 ClusterRole 的 chart 都装不上**
+      (租户集群级零权限,RBAC 提权防护拒绝,连 `events`/`secrets` 都不行);
+      ⭐⭐ **operator 的 Pod 直连上游,看到的 CRD 组带租户前缀 → 查自己的组 404**。
+      ⚠️ **这推翻了我上一轮的说法**("生态里其余的租户自己装")——
+      能自装的是小子集,**平台托管形态因此更重要而不是更不重要**。
+      待定路线:给 operator 挂租户 kubeconfig 指向 kubezoo(架构上成立,**未实测**,
+      本轮 lab 里 kubezoo 绑 127.0.0.1,Pod 够不着)
+
 - [x] ✅ **system CRD 共享:FAQ 已是实话;产品决策 = 先不实现**(审计 §W)
       触发重评的条件:**出现第一个真实消费者**(候选:kubetron 网络 CRD)。
       理由:难点不在 kubezoo(它只决定"谁看得见"),而在平台 operator 用平台凭据
