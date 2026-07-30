@@ -76,7 +76,11 @@ func (t *ownerReferenceTransformer) Backward(or *metav1.OwnerReference, tenantID
 		return nil, err
 	}
 
-	namespaced, customResourceGroup, err := t.checkGroupKind(gv.Group, or.Kind, tenantID, true)
+	// false, not true: the group arriving from upstream is prefixed already.
+	// Passing true prefixed it a second time, so the tenant's own CRD never
+	// matched and the group was returned to the tenant still carrying the
+	// prefix -- an object the tenant could read but could not apply back.
+	namespaced, customResourceGroup, err := t.checkGroupKind(gv.Group, or.Kind, tenantID, false)
 	if err != nil {
 		return nil, err
 	}

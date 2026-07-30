@@ -66,6 +66,7 @@ kubezoo 侧拦截只约束租户本人的 `kubectl`。
 | OpenAPI v2/v3 按租户过滤与去前缀 | `pkg/filters` |
 | access review 的 namespace / 组 / 主体转换 | `pkg/convert/accessreview.go` |
 | 退租强制清理 finalizer | `pkg/controller/teardown.go` |
+| 错误消息擦除:租户前缀 **+ webhook 名字**(后者会暴露平台用什么策略引擎) | `pkg/util/errors.go` |
 | 停机两种模式(read-only / frozen),前门 + 上游 RBAC 两层 | `pkg/filters/suspension.go` + 控制器 |
 | **冻结时给租户 namespace 打 `kubezoo.io/frozen`,上游 VAP 据此拒绝租户身份的写** —— 这是唯一够得到租户预置 ServiceAccount 的一层 | `pkg/controller/rbac.go` + `config/policy/tenant-frozen-deny-writes.yaml` |
 
@@ -152,6 +153,10 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 - [ ] 租户建 `*` on `*` 的 ClusterRole 并绑给自己 → 上游判定仍无权
 - [ ] `kubectl get nodes` 为空,`kubectl get node <名字>` NotFound,watch 无事件
 - [ ] 租户 A 的 `/openapi/v2` 与 `/openapi/v3` 里没有租户 B 的任何痕迹
+- [ ] 策略拒绝消息里既无 `<租户ID>-` 前缀,也无 `admission webhook "..."` 字样
+      ⚠️ 核对时先问"**这条信息租户本来知不知道**" —— 他自己敲进去的字符串被回显不算泄漏
+- [ ] 租户读回自己对象的 `ownerReferences`,`apiVersion` **没有**带 `<租户ID>-` 前缀
+      (带了就意味着导出再 apply 会被二次前缀)
 - [ ] 四种写法都摘不掉 `kubezoo.io/tenant` 标签
 - [ ] 租户留 finalizer 后退租 → namespace 仍能终结,租户 ID 可复用
 - [ ] 租户新建一个 namespace 后,能在里面正常创建对象(RoleBinding 自动下发)

@@ -1122,6 +1122,90 @@ Kyverno 的擦除规则**根本没机会跑**。这不是安全问题(租户只�
 ⇒ 套件现在:先确认对象存在再读字段;等 namespace `Active` 而不是"存在";
 fixture 失败就**跳过**依赖它的断言,而不是让它们报绿。
 
+## V. 拒绝消息泄漏扫描 —— 主结论干净,揪出两件别的
+
+**做法**:以租户身份触发每一条策略的拒绝,逐条看**租户实际看到的字符串**,
+在里面找上游痕迹(`111111-` 前缀、别的租户、平台 namespace)。
+
+### 主结论:✅ 没有上游前缀泄漏
+
+| 路径 | 结果 |
+|---|---|
+| 全部 7 条策略的拒绝消息 | ✅ **一条都不含 `111111-`** —— `TrimTenantIDFromError` 有效 |
+| 按名字读**别的租户**的 CRD | ✅ `not found` —— **没有存在性预言** |
+| 读 Node | ✅ `not found` |
+| 跨租户 namespace | ✅ 回显的是租户自己敲的字符串 |
+
+⚠️ **方法学**:第一遍 grep 报了四条"泄漏",逐条核实后**三条是租户自己的输入被回显**
+(他自己敲的 `222222-default`、`private.example`)。
+**判据是"这条信息是不是租户本来就知道的"**,不是"字符串里有没有出现别的租户"。
+
+### ⛔ 真泄漏:webhook 名字暴露了平台用什么策略引擎
+
+```
+admission webhook "validate.kyverno.svc-fail" denied the request: ...
+```
+
+这句是 **apiserver 加的**,webhook 名字就是跑它的 service —— 等于告诉租户
+"平台用 Kyverno,在 kyverno namespace"。知道是 Kyverno 就知道该试哪些绕过
+(比如 `forceFailurePolicyIgnore`、版本 CVE),而这半句**对租户毫无用处** ——
+他能用的是后半截策略消息。
+
+**已修**:`TrimTenantIDFromStatus` 里加一条正则,擦掉
+`admission webhook "..." denied the request: ` 这个前缀,保留后面全部。
+按 §8.0 判据这是**读路径 ⇒ kubezoo 的**,而且和已有的前缀擦除是同一个机制、同一个位置。
+守卫测试 `TestPlatformDetailIsRemovedFromMessages`,**已验证去掉实现会红**,
+且断言"策略名/规则名/原因必须留下" —— 否则这笔交易不划算。
+
+现场复测,租户现在看到:
+
+```
+resource Pod/default/z2 was blocked due to the following policies
+tenant-scheduling: deny-nodename: 'spec.nodeName is not available to tenants: ...
+```
+
+## W. `ownerReference` 把内部前缀漏给租户 ⛔ 坐实并已修
+
+扫消息时顺手查 system CRD 那段 `TODO: temporary fix`(FAQ 说"未实现"),
+读码推出一个 bug,**实测坐实**。
+
+`ownerReferenceTransformer.Backward` 传的是 `isTenantObject=true`,
+于是**给已经带前缀的组再加一次前缀**:
+
+```
+上游存的      111111-example.com
+Backward 查   111111-111111-example.com   → 匹配不上
+落进 system-crd 分支 → Trim 一次 → 111111-example.com → 匹配上
+                     → 但返回 customResourceGroup=false
+                     → apiVersion 不被去前缀
+```
+
+**实测**:租户读回自己的 ConfigMap,`ownerReferences[0].apiVersion` = `111111-example.com/v1`。
+不只是难看 —— 租户导出对象再 apply 回去会被**二次前缀**。
+
+### 修法
+
+- `Backward` 改传 `false`(上游来的组本来就带前缀,不该再加)
+- `CheckGroupKindFunc` 里那段"system crd"分支**改成只在读方向生效**:
+  平台控制器可能往租户对象上盖一个平台 CRD 的引用,租户得读得回来;
+  但**写方向不能接受** —— 那既与 FAQ 的"未实现共享"矛盾,
+  又是一个"这个 CRD 在上游存不存在"的预言机
+
+守卫测试 `TestTenantCRDResolvesInBothDirections` / `TestPlatformCRDResolvesOnlyOutbound`,
+**已验证退回旧行为两条都会红**。
+
+### ⭐ 关于 system CRD 共享的产品建议:**先不实现**
+
+- **今天没有消费者**。第一个候选是 kubetron 的网络 CRD
+- 难点**不在 kubezoo**:kubezoo 只能决定"谁看得见"。真正的问题是平台 operator
+  用平台凭据去调谐**租户写的 spec**,变成 confused deputy ——
+  它按名字读 Secret 吗?引用 StorageClass 吗?按租户给的 spec 建 Pod 吗?
+  **这个审查必须针对具体 operator 做,没法抽象地做**
+- 集群级的共享 CR **没有 RBAC 兜底**(`resourceNames` 是精确匹配),
+  与审计里已记的那条同一个坑
+
+⇒ **重新评估的触发条件:出现第一个真实消费者,且能点名要审查哪个 operator。**
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

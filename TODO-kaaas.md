@@ -107,11 +107,20 @@
       再逐 namespace 发 scoped LIST 合并。代价是请求放大,但数据量从全集群降到租户自身
       (同时解决 4.1 的规模墙与 DoS 面)
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
-- [ ] **system CRD 共享机制未实现** —— ~~决定:实现,还是把 FAQ 改成实话?~~
-      **FAQ 已改成实话**(中英文都改了,并附实测:平台装 `clonesets.platform.io` 后
-      租户 `api-resources`/`get crd` 全空、创建报 `no matches for kind`)。
-      剩下的只是产品决策:**要不要实现**。若要实现,与 findings I 否决掉的
-      "共享对象按租户投影"是同一个坑,合并设计
+- [x] ✅ **system CRD 共享:FAQ 已是实话;产品决策 = 先不实现**(审计 §W)
+      触发重评的条件:**出现第一个真实消费者**(候选:kubetron 网络 CRD)。
+      理由:难点不在 kubezoo(它只决定"谁看得见"),而在平台 operator 用平台凭据
+      调谐**租户写的 spec** ⇒ confused deputy,**审查必须针对具体 operator**;
+      且集群级共享 CR 无 RBAC 兜底。
+      ⭐ 顺手修掉那段 `TODO: temporary fix for system crd`:它**不是死代码**(读路径要用),
+      但方向传错 ⇒ 租户读回 `111111-example.com/v1`(实测)。已改成只在读方向解析平台 CRD,
+      写方向拒绝(既守住 FAQ 的说法,也堵掉存在性预言机)
+
+- [x] ✅ **拒绝消息泄漏扫描**(审计 §V)—— 主结论干净:7 条策略消息**无 `111111-` 前缀**,
+      跨租户 CRD 查询无存在性预言。真泄漏只有一处:`admission webhook "validate.kyverno.svc-fail"`
+      暴露平台用什么策略引擎 ⇒ 已在 `TrimTenantIDFromStatus` 擦掉,保留可操作部分。
+      ⚠️ 方法学:第一遍 grep 报的四条里**三条是租户自己输入的回显**,
+      判据是"这条信息租户本来知不知道"
 
 ### 1.3 三方对象契约 ⭐ 必须先定再实现
 

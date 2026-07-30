@@ -380,32 +380,48 @@ func NewCheckGroupKindFunc(crdLister v1.CustomResourceDefinitionLister) CheckGro
 			return false, false, err
 		}
 
-		// tenant crd group/kind
+		// isTenantObject says which form the group is already in. A reference on
+		// its way in from the tenant names the group as the tenant sees it, so
+		// the prefix has to be added before looking it up; one on its way back
+		// out carries the upstream group, which is prefixed already. Adding the
+		// prefix in both directions is what this used to do, and on the way out
+		// it produced 111111-111111-example.com, matched nothing, and fell into
+		// the branch below -- which reported the tenant's own CRD as a platform
+		// one, so the group was never trimmed and the tenant read its own
+		// ownerReferences back as 111111-example.com/v1. Measured.
+		lookupGroup := group
 		if isTenantObject {
-			group = AddTenantIDPrefix(tenantID, group)
+			lookupGroup = AddTenantIDPrefix(tenantID, group)
 		}
 		for _, crd := range crdList {
-			if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
+			if crd.Spec.Group == lookupGroup && crd.Spec.Names.Kind == kind {
 				return crd.Spec.Scope == extensionsv1.NamespaceScoped, true, nil
 			}
 		}
-		// TODO: temporary fix for system crd
-		if isTenantObject {
-			// try to find system crd
-			group = TrimTenantIDPrefix(tenantID, group)
+
+		// A group that is not one of this tenant's may still be a real CRD the
+		// platform installed. A platform controller can stamp such a reference
+		// onto a tenant's object, and the tenant has to be able to read that
+		// object back, so resolve it on the way out -- as a platform object,
+		// whose name and group are not prefixed and must not be trimmed.
+		//
+		// Deliberately not on the way in. Sharing a platform CRD with a tenant
+		// is not implemented (see docs/faq.md), and accepting a tenant-authored
+		// reference to one would both contradict that and answer the question
+		// "does this CRD exist upstream" for any group the tenant cares to name.
+		if !isTenantObject {
 			allCRDs, err := crdLister.List(labels.Everything())
 			if err != nil {
 				return false, false, err
 			}
 			for _, crd := range allCRDs {
 				if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
-					// system crds should be treated as custom resource for tenant
 					return crd.Spec.Scope == extensionsv1.NamespaceScoped, false, nil
 				}
 			}
 		}
 
-		return false, false, fmt.Errorf("unregistered crd group: %s, kind: %s", group, kind)
+		return false, false, fmt.Errorf("unregistered crd group: %s, kind: %s", lookupGroup, kind)
 	}
 }
 

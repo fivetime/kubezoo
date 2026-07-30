@@ -19,6 +19,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,20 +36,41 @@ func TrimTenantIDFromError(err error, tenantID string) error {
 		}
 	default:
 		runtime.HandleError(fmt.Errorf("kubezoo received an error that is not an metav1.Status: %#+v", err))
-		return errors.New(strings.ReplaceAll(err.Error(), tenantID+"-", ""))
+		return errors.New(trimPlatformDetail(strings.ReplaceAll(err.Error(), tenantID+"-", "")))
 	}
+}
+
+// admissionWebhookPrefix matches the sentence the API server puts in front of a
+// webhook's own message. The webhook is named after the service that runs it,
+// so the tenant is told which policy engine the platform uses and in which
+// namespace it lives -- infrastructure fingerprinting, and of no use to the
+// tenant, whose actionable part is the policy's message that follows.
+//
+// Measured: a tenant refused by a scheduling rule was shown
+//
+//	admission webhook "validate.kyverno.svc-fail" denied the request: resource
+//	Pod/default/z2 was blocked due to the following policies ...
+//
+// The second half is worth keeping; the first half only says where to aim.
+var admissionWebhookPrefix = regexp.MustCompile(`admission webhook "[^"]*" denied the request: ?`)
+
+// trimPlatformDetail removes the parts of a message that describe the platform
+// rather than the tenant's request.
+func trimPlatformDetail(message string) string {
+	return admissionWebhookPrefix.ReplaceAllString(message, "")
 }
 
 // TrimTenantIDFromStatus trims tenantID from status and returns the new status.
 func TrimTenantIDFromStatus(status metav1.Status, tenantID string) metav1.Status {
-	status.Message = strings.ReplaceAll(status.Message, tenantID+"-", "")
+	status.Message = trimPlatformDetail(strings.ReplaceAll(status.Message, tenantID+"-", ""))
 	if status.Details == nil {
 		return status
 	}
 	status.Details.Name = strings.Replace(status.Details.Name, tenantID+"-", "", 1)
 	status.Details.Group = TrimTenantIDPrefix(tenantID, status.Details.Group)
 	for i := range status.Details.Causes {
-		status.Details.Causes[i].Message = strings.ReplaceAll(status.Details.Causes[i].Message, tenantID+"-", "")
+		status.Details.Causes[i].Message = trimPlatformDetail(
+			strings.ReplaceAll(status.Details.Causes[i].Message, tenantID+"-", ""))
 	}
 	return status
 }
