@@ -2022,6 +2022,61 @@ validatingwebhookconfigurations
 ⚠️ 仍未解决的两条不受影响:`ingressClassName` 引用不前缀化(§AJ)、
 主机名先到先得(§AH)。
 
+## AL. 填别人的 `ingressClassName` 能不能把流量接过来?—— 不能,但**先占**可以
+
+**担心的是**:租户 A 把 `ingressClassName` 填成别的租户的,把 B 的流量接到自己这边观察。
+两个方向分开测(lab 里装了真的平台 ingress 控制器,class = `nginx`)。
+
+### 方向一:A 填 B 的 class(`222222-nginx`)
+
+```
+提交:  ingress/steal1 created            ← API 层没拦
+结果:  victim.example.com 在 nginx 配置里根本不存在
+```
+
+**没有任何控制器接管。** 就算 B 装了自己的控制器也不行 ——
+A 的 Ingress 在 A 的 namespace 里,**B 的控制器读不到**(命名空间级有 RBAC 兜底,
+§AK 实测 `LIST ingress -n 222222-default --as=111111-admin` 是 Forbidden)。
+
+### 方向二:A 用**平台的** class 抢 B **已占用**的主机名
+
+```
+B 先合法占用 own.example.com(class=nginx)
+A 随后用同样的 host + 平台 class 提交,也 created
+
+nginx 实际配置:
+  server_name "own.example.com"
+    set $namespace     "222222-default"    ← 仍归 B
+    set $ingress_name  "legit"
+    set $service_name  "svc-victim"
+```
+
+**抢不走已经被占用的。** 先到先得(§AH),而"先到"的是 B。
+
+### ⇒ 结论:偷不走存量,但**可以先占**
+
+| 攻击 | 成立? |
+|---|---|
+| 填别人的 class 接管别人流量 | ⛔ **不成立**(对方控制器读不到你的 Ingress) |
+| 用平台 class 抢**已被占用**的主机名 | ⛔ **不成立**(先到先得,已占者保留) |
+| 用平台 class **抢先占用**别人还没声明的主机名 | ⛔⛔ **成立** —— 这才是真风险(§AH) |
+
+⇒ 危险的不是"填谁的 class",是**主机名的先占权无人裁决**。
+A 只要比 B 先声明 `b-tenant.example.com`,B 就永远拿不到,而且**双方都收不到任何提示**。
+
+### §AJ 的前缀化会把"碰巧不成立"变成"结构上不可能"
+
+今天方向一之所以无害,是因为**没有控制器去认领** —— 属于"碰巧"。
+把 `ingressClassName` 按集群级引用前缀化之后:
+
+```
+A 写 222222-nginx → 上游变成 111111-222222-nginx → 匹配不到任何 IngressClass
+```
+
+**连写都写不出别人的 class 了**,不依赖"对方恰好没装控制器"。
+
+守卫:主机名先占那条属于平台裁决(§AH,P0);class 前缀化属于 kubezoo(§AJ)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
