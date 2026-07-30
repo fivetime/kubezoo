@@ -105,7 +105,7 @@ func setImpersonateHeaders(req *rest.Request, ctx context.Context) {
 	// the user, so that they exist only on a request kubezoo forwarded. See
 	// util.ProxiedGroup.
 	req.SetHeader(authenv1.ImpersonateGroupHeader,
-		util.ImpersonationGroups(util.TenantIDFrom(ctx), ui.GetName(), ui.GetGroups())...)
+		util.ImpersonationGroups(ctx, ui.GetName(), ui.GetGroups())...)
 }
 
 func (c *dynamicResourceClient) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {

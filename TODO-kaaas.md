@@ -146,18 +146,27 @@
       `ownCustomResourceRules` 按租户自己的 CRD 组逐条加集群级授权(组名带前缀 ⇒ 只可能是它自己的);
       RBAC 没有前缀通配所以只能枚举。顺带加了 **CRD informer**,否则建完 CRD 要等 resync
       才能授权(实测:2 秒 vs 最坏 10 分钟)。边界五条复测全过,守卫已验证会红
-- [ ] ⛔ **P0 剩余:ClusterRole 的第二半 —— 共享资源**(审计 §AC,前提已实测)
-      ⭐ 重新框定:`events`/`secrets` 都是**命名空间级**的,租户在自己 ns 里本来就全有 ——
-      失败是因为提权检查问"你在集群级持有吗",而该问"你在你所有 namespace 里持有吗"。
-      **两个前提已实测成立**:租户在自己 ns 用 RoleBinding 引用 `*on*` 的 ClusterRole ✅ 允许;
-      建 ClusterRoleBinding ⛔ 上游独立拒绝。⇒ 缺的只是**建角色对象**。
-      ⛔ **"只给 escalate 不给 bind"是完全逃逸,已实测**:租户把自己的 ClusterRole 命名为
-      `cluster-admin` → 前缀化成 `111111-cluster-admin` → **正是控制器给它建的、已集群级绑定的那个** →
-      覆盖成 `*on*` → 拿到 kube-system 与别的租户的 secret。
-      **根因是命名撞车:kubezoo 的控制对象和租户对象共用一个名字空间。**
-      ⇒ 设计:kubezoo 以自己身份代写 ClusterRole,**必须守卫保留名字**;
-      部署要求(kubezoo 上游身份需能写任意 ClusterRole)是**真实的信任扩大,要显式记录**。
-      三个待解:读回、新 ns 补投影、更新/删除传播
+- [x] ✅ **ClusterRole 第二半已做(角色那一半)**(审计 §AP)
+      `kubezoo:role-author` 组,**只在写 clusterroles 时**断言,组里**只有一条** `escalate`;
+      create/update 仍来自租户自己的角色 ⇒ 组单独一文不值,停机租户也拿不到东西。
+      实测 cert-manager v1.16.2:**ClusterRole 13/13 从全拒变全建成**。
+      三条绑定路径全堵(自己 ns 的 RoleBinding 允许且只在该 ns 生效 / ClusterRoleBinding 照拒 /
+      先自授 bind 再试仍拒 —— RoleBinding 授不了集群级资源)。
+      `refuseReservedName` 覆盖 **apply + patch 两条**写入口。守卫红测恰好红 8 条
+- [ ] ⛔ **剩下的一半:ClusterRoleBinding**(cert-manager **仍装不上**,10 条里 9 条被拒)
+      租户说"集群级"= "我所有的 namespace" ⇒ 忠实翻译是**投影成每 namespace 一条 RoleBinding**。
+      ⚠️ **不能直接放行成真 ClusterRoleBinding**(那是跨所有租户 namespace,灾难)。
+      三个待解:读回 / 新 ns 补投影 / 更新删除传播。
+      投影后的集群级 LIST/WATCH 正好落在已做好的 `fanout.go` + `watchmux.go` 上
+- [x] ✅ **P0:租户能给它不拥有的身份授权**(审计 §AO,做 §AP 时撞出来的)
+      `transformSubjectToUpstream` 对 Group 主体**只改写 `system:serviceaccounts:<ns>`**,
+      别的组名原样落上游 ⇒ 租户把 `system:authenticated` 绑上自己的角色,
+      **集群里每个已认证身份**(所有其它租户的工作负载 + 平台组件)都拿到了 delete CRD。
+      ⚠️ 提权检查把内容限制在租户已持有范围内,所以当时"只是"跨租户破坏;
+      **但有了 §AP 的 escalate 就是完全逃逸**(`*on*` 绑给所有人)⇒ 必须先修。
+      修法:Group 主体和 User 一样加前缀(空组),SA 组特判保留
+- [ ] ⚠️ 拒绝消息把内部组名 `kubezoo:proxied:<tid>` 透给租户(§AP 末)。不是漏洞(租户拿不到),
+      但把机制名字告诉了对手。未处理
 - [x] ✅ **命名撞车已修**:`proxy.refuseReservedName` 在写路径拒绝租户寻址
       `<tid>-cluster-admin` / `<tid>-admin`(仅限 RBAC 组;同名 PV 不受影响)。
       守卫已验证会红,且红测顺带证明了价值:守卫一关,一条 `delete clusterrole cluster-admin`

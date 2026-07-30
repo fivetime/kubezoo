@@ -121,7 +121,7 @@ func (cp *ConnecterProxy) connect(req *http.Request, w http.ResponseWriter) {
 	}
 	req.Header[authenticationv1.ImpersonateUserHeader] = []string{userInfo.GetName()}
 	req.Header[authenticationv1.ImpersonateGroupHeader] = util.ImpersonationGroups(
-		util.TenantIDFrom(req.Context()), userInfo.GetName(), userInfo.GetGroups())
+		req.Context(), userInfo.GetName(), userInfo.GetGroups())
 
 	// Decorate the response writer to record status and length, then hand it to
 	// the wrapper that puts back the interfaces the decoration hides.

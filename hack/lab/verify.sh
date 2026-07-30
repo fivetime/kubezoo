@@ -434,12 +434,24 @@ spec:
   hostPath: {path: /tmp/reserved-name-check}
 EOF
 
-expect_denied "a ClusterRole over shared resources" "attempting to grant RBAC permissions not currently held" -- \
+# A ClusterRole over shared resources is now writable on purpose -- it is what
+# every operator chart ships, and it used to be refused because the escalation
+# check asks at cluster scope while a tenant holds these per namespace. Writing
+# it is not the thing to guard; what it can reach is.
+expect_allowed "a ClusterRole over shared resources" \
   $T create clusterrole shared-secrets --verb=get --resource=secrets
+if [ "$($K auth can-i get secrets -n kube-system --as="$TID-admin" --as-group="kubezoo:proxied:$TID" 2>/dev/null)" = no ]; then
+  ok "writing it does not give the tenant those resources anywhere new"
+else
+  bad "writing it does not give the tenant those resources anywhere new" \
+      "the tenant can read kube-system's secrets"
+fi
 
 # Naming another tenant's group by its upstream name, which is the way round
-# that would actually be worth trying.
-expect_denied "a ClusterRole over another tenant's group" "attempting to grant RBAC permissions not currently held" -- \
+# that would actually be worth trying. The name survives -- apiGroups are only
+# prefixed when they are the tenant's own -- so the guard is that it buys
+# nothing, not that it cannot be written.
+expect_allowed "a ClusterRole over another tenant's group" \
   $T apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -449,6 +461,54 @@ rules:
     resources: ["things"]
     verbs: ["get"]
 EOF
+foreign_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: someone-elses}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: someone-elses}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
+EOF
+)
+if grep -q "not currently held" <<<"$foreign_out"; then
+  ok "and it can only ever be bound inside the tenant's own namespaces, where that group has nothing"
+else
+  bad "it can only ever be bound inside the tenant's own namespaces" \
+      "got: $(tr '\n' ' ' <<<"$foreign_out" | cut -c1-160)"
+fi
+
+# The sharpest form of the containment: grant yourself bind and escalate on
+# clusterrolebindings in your own namespace, then try again. A RoleBinding never
+# authorizes a cluster-scoped resource, so it changes nothing.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: self-help}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings", "clusterroles"]
+    verbs: ["*"]
+EOF
+$T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: self-help}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: self-help}
+subjects: [{kind: User, name: admin, apiGroup: rbac.authorization.k8s.io}]
+EOF
+selfhelp_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: self-help}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: shared-secrets}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
+EOF
+)
+if grep -qi "forbidden" <<<"$selfhelp_out"; then
+  ok "granting itself bind in its own namespace does not reach a cluster-scoped verb"
+else
+  bad "granting itself bind in its own namespace does not reach a cluster-scoped verb" \
+      "the ClusterRoleBinding went through: $(tr '\n' ' ' <<<"$selfhelp_out" | cut -c1-160)"
+fi
 
 echo
 echo "== a cross-namespace list is assembled from the tenant's namespaces =="
@@ -734,6 +794,130 @@ sleep 5
 expect_allowed "writes work again once it is gone" \
   $T -n default create configmap webhook-recovered --from-literal=a=b
 $K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
+
+echo
+echo "== a tenant can write the ClusterRoles an operator chart ships, and no more =="
+# A tenant holds its namespaced permissions per namespace, so RBAC's escalation
+# check -- asked at cluster scope -- refuses every ClusterRole a chart ships,
+# though the question that means something here, "do you hold it in all of your
+# namespaces?", is yes. kubezoo asserts escalate on writes to clusterroles, and
+# on nothing else.
+expect_allowed "a ClusterRole over namespaced resources, which used to be refused outright" \
+  $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: chart-role}
+rules:
+- apiGroups: [""]
+  resources: [pods, secrets, configmaps, events]
+  verbs: [get, list, watch, create, update, patch, delete]
+EOF
+
+# A ServiceAccount of its own, so that "it can now read secrets" is this binding
+# and not something else in the namespace. The default SA already holds things.
+$T -n default create serviceaccount chart-op >/dev/null 2>&1
+expect_allowed "binding it inside the tenant's own namespace, which is what makes it useful" \
+  $T -n default apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: chart-binding}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
+subjects: [{kind: ServiceAccount, name: chart-op, namespace: default}]
+EOF
+
+chart_sa="system:serviceaccount:$NS:chart-op"
+if [ "$($K auth can-i get secrets -n "$NS" --as="$chart_sa" 2>/dev/null)" = yes ] &&
+   [ "$($K auth can-i get secrets -n kube-system --as="$chart_sa" 2>/dev/null)" = no ]; then
+  ok "the grant lands in the tenant's namespace and nowhere else"
+else
+  bad "the grant lands in the tenant's namespace and nowhere else" \
+      "own=$($K auth can-i get secrets -n "$NS" --as="$chart_sa" 2>/dev/null) kube-system=$($K auth can-i get secrets -n kube-system --as="$chart_sa" 2>/dev/null)"
+fi
+
+# The containment: a ClusterRole grants nothing until it is bound, and binding
+# this one cluster-wide would reach every tenant's namespaces. The exemption is
+# deliberately not asserted here, so upstream refuses it exactly as before.
+crb_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: chart-binding}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
+EOF
+)
+if grep -q "not currently held" <<<"$crb_out"; then
+  ok "binding that same role cluster-wide is still refused, which is the whole containment"
+else
+  bad "binding that same role cluster-wide is still refused" \
+      "got: $(tr '\n' ' ' <<<"$crb_out" | cut -c1-160)"
+fi
+
+# The escape §AC measured: the tenant's ClusterRole named cluster-admin is the
+# role the controller binds cluster-wide to it, and escalate would let the tenant
+# rewrite it. Both write paths must refuse the name.
+expect_denied "writing the platform's reserved role by name" "managed by the platform" -- \
+  $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: cluster-admin}
+rules: [{apiGroups: ["*"], resources: ["*"], verbs: ["*"]}]
+EOF
+expect_denied "and patching it, which is a second way to the same object" "managed by the platform" -- \
+  $T patch clusterrole cluster-admin --type=json \
+    -p '[{"op":"replace","path":"/rules","value":[{"apiGroups":["*"],"resources":["*"],"verbs":["*"]}]}]'
+if [ "$($K auth can-i get secrets -n kube-system --as="$TID-admin" --as-group="kubezoo:proxied:$TID" 2>/dev/null)" = no ]; then
+  ok "and the tenant still cannot read kube-system, which is what that escape reached"
+else
+  bad "the tenant still cannot read kube-system" "it can -- the reserved role was rewritten after all"
+fi
+
+echo
+echo "== a tenant cannot grant anything to an identity it does not own =="
+# Group subjects used to pass through unrewritten while User and ServiceAccount
+# subjects were prefixed. Measured before this: a tenant bound system:authenticated
+# -- every authenticated identity in the cluster -- and delete on
+# customresourcedefinitions became available to every other tenant's workloads.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: give-away}
+rules: [{apiGroups: [apiextensions.k8s.io], resources: [customresourcedefinitions], verbs: [delete]}]
+EOF
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: give-away}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: give-away}
+subjects: [{kind: Group, name: "system:authenticated", apiGroup: rbac.authorization.k8s.io}]
+EOF
+landed=$($K get clusterrolebinding "$TID-give-away" -o jsonpath='{.subjects[0].name}' 2>/dev/null)
+if [ -n "$landed" ] && [ "$landed" != "system:authenticated" ]; then
+  ok "a foreign group named as a subject is prefixed into one with no members"
+else
+  bad "a foreign group named as a subject is prefixed into one with no members" \
+      "the subject landed upstream as '$landed'"
+fi
+if [ "$($K auth can-i delete customresourcedefinitions --as="system:serviceaccount:kube-system:default" 2>/dev/null)" = no ]; then
+  ok "so nothing outside the tenant gained a permission from it"
+else
+  bad "so nothing outside the tenant gained a permission from it" \
+      "an unrelated ServiceAccount can now delete any CRD in the cluster"
+fi
+# The one group shape a tenant legitimately names must keep working.
+$T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: own-sa-group}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: chart-role}
+subjects: [{kind: Group, name: "system:serviceaccounts:default", apiGroup: rbac.authorization.k8s.io}]
+EOF
+if [ "$($K -n "$NS" get rolebinding own-sa-group -o jsonpath='{.subjects[0].name}' 2>/dev/null)" = "system:serviceaccounts:$NS" ] &&
+   [ "$($T -n default get rolebinding own-sa-group -o jsonpath='{.subjects[0].name}' 2>/dev/null)" = "system:serviceaccounts:default" ]; then
+  ok "while the tenant's own ServiceAccount group still resolves, and reads back as written"
+else
+  bad "the tenant's own ServiceAccount group still resolves, and reads back as written" \
+      "upstream='$($K -n "$NS" get rolebinding own-sa-group -o jsonpath='{.subjects[0].name}' 2>/dev/null)'"
+fi
 
 echo
 echo "== the tenant's cluster-scoped permissions exist only on a request kubezoo forwarded =="

@@ -55,6 +55,11 @@ const (
 	// tenant is suspended read-only. A separate role rather than a narrowed one,
 	// because both are shared by every tenant and only the binding differs.
 	tenantNamespaceReadOnlyRole = "kubezoo:tenant-namespace-readonly"
+	// The role behind util.RoleAuthorGroup. Shared by every tenant, because what
+	// it grants is not tenant-specific and it grants nothing on its own: escalate
+	// is an exemption from a check, not a permission to write anything.
+	tenantRoleAuthorRole    = "kubezoo:tenant-role-author"
+	tenantRoleAuthorBinding = "kubezoo:tenant-role-author"
 )
 
 // readOnlyVerbs is what a read-only suspension leaves a tenant.
@@ -308,6 +313,27 @@ func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV
 			Rules:      tenantRules,
 		},
 		{
+			// Lets a tenant create the ClusterRoles an operator chart ships.
+			//
+			// RBAC refuses to let anyone write a role granting permissions they
+			// do not hold, and it asks that at cluster scope, while a tenant
+			// holds its namespaced permissions per namespace. So a ClusterRole
+			// over pods or secrets is refused even though the tenant has both in
+			// every namespace it owns. escalate is the documented exemption.
+			//
+			// The write verbs are not here: they come from the tenant's own role,
+			// so this grants nothing by itself and a suspended tenant gains
+			// nothing. And it covers clusterroles only -- binding one
+			// cluster-wide still faces the check, which is what keeps a role the
+			// tenant could not otherwise have written from taking effect outside
+			// its own namespaces. See util.RoleAuthorGroup.
+			ObjectMeta: metav1.ObjectMeta{Name: tenantRoleAuthorRole},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("escalate").Groups("rbac.authorization.k8s.io").
+					Resources("clusterroles").RuleOrDie(),
+			},
+		},
+		{
 			// The read-only counterpart of the namespace admin role below.
 			// Always reconciled, whether or not anything is bound to it: a
 			// suspension has to take effect immediately, not one resync after
@@ -418,6 +444,22 @@ func syncClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbacclien
 	clusterRoleBindings := []rbacv1.ClusterRoleBinding{
 		rbacv1helpers.NewClusterBinding(tenantClusterRole(tenantId)).
 			Groups(util.ProxiedGroup(tenantId)).BindingOrDie(),
+		// Shared by every tenant, like the role it names, and reconciled here so
+		// that a cluster with tenants on it has it without a separate install
+		// step. Its subject is a group no tenant can present.
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: tenantRoleAuthorBinding},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     tenantRoleAuthorRole,
+			},
+			Subjects: []rbacv1.Subject{{
+				APIGroup: rbacv1.GroupName,
+				Kind:     rbacv1.GroupKind,
+				Name:     util.RoleAuthorGroup,
+			}},
+		},
 	}
 
 	for i := range clusterRoleBindings {

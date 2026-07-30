@@ -100,9 +100,33 @@ func transformSubjectToUpstream(subject *rbacinternal.Subject, tenantID string) 
 			subject.Namespace = util.AddTenantIDPrefix(tenantID, subject.Namespace)
 		}
 	case rbacinternal.GroupKind:
+		// A group that names one of the tenant's namespaces keeps its shape, with
+		// the namespace prefixed. Every other group name is prefixed whole, and
+		// that is the point: a group name used to pass through untouched, so a
+		// tenant could bind any group in the cluster.
+		//
+		// Measured before this: a tenant created a ClusterRoleBinding whose
+		// subject was system:authenticated -- every authenticated identity in the
+		// cluster, including every other tenant's ServiceAccounts and the
+		// platform's own components -- and delete on customresourcedefinitions
+		// became available to all of them. Naming kubezoo's own proxied group for
+		// another tenant worked too, handing that tenant this one's role.
+		//
+		// The escalation check bounds what such a role may contain to what the
+		// tenant already holds, which is why this was destructive rather than a
+		// full escape. It stops bounding anything once a tenant can write roles
+		// it does not hold, which is what escalate below is for -- so this has to
+		// be closed first, not alongside.
+		//
+		// Prefixing rather than refusing, to match every other reference kubezoo
+		// rewrites: a chart naming system:authenticated still installs, and the
+		// grant it asks for lands on a group with no members instead of on
+		// everyone. Silently inert is the safe direction for a grant.
 		if strings.HasPrefix(subject.Name, sa.ServiceAccountGroupPrefix) && len(subject.Name) > len(sa.ServiceAccountGroupPrefix) {
 			namespace := strings.TrimPrefix(subject.Name, sa.ServiceAccountGroupPrefix)
 			subject.Name = sa.MakeNamespaceGroupName(util.AddTenantIDPrefix(tenantID, namespace))
+		} else if len(subject.Name) > 0 {
+			subject.Name = util.AddTenantIDPrefix(tenantID, subject.Name)
 		}
 	}
 	return nil
@@ -129,7 +153,13 @@ func transformSubjectToTenant(subject *rbacinternal.Subject, tenantID string) er
 				return errors.Errorf("invalid subject name %s, should have tenant id %s as prefix", subject.Name, tenantID)
 			}
 			subject.Name = sa.MakeNamespaceGroupName(util.TrimTenantIDPrefix(tenantID, namespace))
+		} else if strings.HasPrefix(subject.Name, tenantID) {
+			subject.Name = util.TrimTenantIDPrefix(tenantID, subject.Name)
 		}
+		// A group carrying neither shape was written before this prefixing
+		// existed. Reading it back unchanged shows the tenant what is really
+		// there; refusing would hide the object instead, and the way to be rid of
+		// it is to be able to see it.
 	}
 	return nil
 }

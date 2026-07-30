@@ -42,6 +42,12 @@ kubectl get validatingadmissionpolicy        # 原生的,get clusterpolicy 看�
 PV / ClusterRole。签发租户证书时必须由平台钉死 subject,不能照抄租户 CSR 里的 O。
 同理:**不要用上游集群信任的 CA 去签租户证书** —— kubezoo 用自己的 CA 是承重设计。
 
+⚠️ **`kubezoo:role-author` 这个组同理,而且更要紧。** 它对应的 ClusterRole 只有一条
+`escalate` on `clusterroles` —— 那是 RBAC 提权检查的**免检通道**。kubezoo 只在租户写
+ClusterRole 时断言它,写对象的动词仍来自租户自己的角色,所以组本身写不动任何东西。
+但**任何持有它、同时又能 create clusterroles 的身份,可以写出任意内容的 ClusterRole**。
+和上面一样:发给租户的凭据不得携带任何 `kubezoo:` 开头的组。
+
 ⚠️ 还有一个**不在策略里、在 kubezoo 启动参数上**的:
 `--public-ingress-classes=<平台的 IngressClass>`。**不设的话租户完全无法接入公网**
 (所有 class 都会被前缀化成租户私有的);设错则等于把公网入口的名字告诉错人。

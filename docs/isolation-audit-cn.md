@@ -2217,6 +2217,108 @@ kubezoo 会把这个组从**进它前门**的身份上剥掉并告警(能抓住�
 binding 的 subject、直连 list、直连 delete;
 而"经 kubezoo 仍可读"和"SA 没被塞组"两条对照保持绿。
 
+## AO. ⛔ 租户能给**它不拥有的身份**授权(实测,已修)
+
+做 §AP 之前先撞上的:`transformSubjectToUpstream` 对 **Group 主体只改写
+`system:serviceaccounts:<ns>` 一种**,别的组名**原样落到上游**。
+而 User 和 ServiceAccount 主体都是加前缀的 —— 只有 Group 漏了。
+
+实测:
+
+```
+租户 111111 建 ClusterRoleBinding,subject = Group/system:authenticated
+                                  roleRef  = 自己的 role(delete CRD)
+上游对象 subject: system:authenticated        ← 原样
+
+之后:
+  222222-admin                                  delete CRD → yes
+  system:serviceaccount:222222-default:default  delete CRD → yes
+  system:kube-controller-manager                delete CRD → yes
+```
+
+**集群里每一个已认证身份**,包括所有其它租户的工作负载和平台自己的组件。
+也能直接点名 kubezoo 自己的 `kubezoo:proxied:222222`,把本租户的角色发给别的租户。
+
+### 为什么之前"只是"破坏而不是完全逃逸
+
+提权检查把这种角色的**内容**限制在租户已持有的范围内 ⇒ 能发出去的最多是租户自己那份
+(删 CRD / 删 PV / 改 webhook 配置)。**够跨租户搞破坏,不够拿到 cluster-admin。**
+
+⚠️ 但**一旦租户能写自己不持有的角色(也就是 §AP 的 escalate),这条就变成完全逃逸** ——
+`*` on `*` 的角色 + 绑给 `system:authenticated` = **集群里任何人都是 cluster-admin**。
+所以这条必须**先**修,不能和 §AP 一起上。
+
+### 修法:Group 主体和 User 一样加前缀
+
+`system:authenticated` → `111111-system:authenticated`,一个**没有任何成员**的组。
+`system:serviceaccounts:<ns>` 那一种保持原有特判(租户合法要用的就这一种,实测仍可用且读回原样)。
+
+**选前缀化而不是拒绝**,和 kubezoo 改写其它一切引用一致:chart 照样装得上,
+它要的那笔授权落在一个空组上而不是落在所有人身上。**"悄悄失效"对一笔授权是安全方向。**
+
+## AP. ClusterRole 第二半 ✅ 已实现(一半),⛔ 另一半仍在
+
+§AC 的判断成立:`events`/`secrets` 都是**命名空间级**的,租户在自己所有 namespace 里
+本来就全有;失败是因为提权检查问的是"你在**集群级**持有吗"。
+
+### 修法:把 `escalate` 挂在一个**路径绑定**的组上
+
+沿用 §AN 的机制:kubezoo **只在写 clusterroles 时**额外断言 `kubezoo:role-author`,
+该组对应的 ClusterRole **只有一条规则**:`escalate` on `clusterroles`。
+
+⭐ **写对象的动词(create/update/patch)不在这个组里**,仍来自租户自己的角色。所以:
+
+- 这个组**单独一文不值**(escalate 是"免检"不是"能写")
+- 被停机的租户**不会因此获得任何东西**(它的 create 被收走了)
+
+### 实测:cert-manager v1.16.2 的 RBAC 全量过一遍
+
+| | 改前 | 改后 |
+|---|---|---|
+| ClusterRole ×13 | **全部拒绝** | ✅ **13/13 建成** |
+| Role ×5 / RoleBinding ×5 | ✅ | ✅ |
+| **ClusterRoleBinding ×10** | ⛔ | ⛔ **9 条仍被拒** |
+
+⇒ **别高兴太早:cert-manager 仍然装不上。** 角色能写了,但它的控制器是**集群级绑定**的。
+
+### 而"集群级绑定仍被拒"正是承重件,不是遗漏
+
+一个 ClusterRole **不绑就什么也不是**。三条路都堵住了(逐条实测):
+
+| 绑法 | 结果 |
+|---|---|
+| 自己 namespace 里的 RoleBinding | ✅ 允许 —— 有效范围就是那个 namespace,**租户本来就有** |
+| ClusterRoleBinding | ⛔ 提权检查照拒(这个组**故意不覆盖**它) |
+| 先给自己在自己 ns 里授 `bind`+`escalate` on clusterrolebindings,再来一次 | ⛔ 仍拒 —— **RoleBinding 永远授不了集群级资源** |
+
+实测确认:被绑的 SA 在**自己 ns** 拿到 secrets = yes,在 **kube-system** = no。
+
+### §AC 那条逃逸:两个写入口都得堵
+
+租户把角色命名成 `cluster-admin` → 前缀化成 `111111-cluster-admin` = 控制器给它建的、
+**已集群级绑定**的那个。有了 escalate,覆盖它就是拿 cluster-admin。
+`refuseReservedName` 对 **apply 和 patch 两条路**都拒(守卫两条,红测验证过)。
+
+### ⛔ 剩下的一半:ClusterRoleBinding
+
+租户说"集群级",在 kubezoo 的模型里意思是"**我所有的 namespace**"。
+忠实的翻译是把租户的 ClusterRoleBinding **投影成每个 namespace 一条 RoleBinding**。
+⚠️ 不能直接放行成真的 ClusterRoleBinding —— 那是**跨所有租户的 namespace**,是灾难。
+
+三个待解(§AC 已列):**读回**(helm 建完会 get 它)、**新 namespace 补投影**、**更新/删除传播**。
+好消息是投影后的"集群级 LIST/WATCH"正好落在已经做好的
+按 namespace 扇出(`fanout.go`)和 watch 多路复用(`watchmux.go`)上。
+**未做,单独一件事。**
+
+### ⚠️ 顺带记一条:拒绝消息把内部组名透给租户了
+
+```
+user "admin" (groups=["kubezoo:proxied:111111" "system:authenticated"]) is attempting to grant ...
+```
+
+租户拿不到这个组(kubezoo 前门会剥、上游也不信它的证书),所以**不是漏洞**,
+但它把内部机制的名字直接告诉了对手。未处理。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

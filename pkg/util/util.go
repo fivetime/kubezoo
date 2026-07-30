@@ -550,9 +550,41 @@ func RemoveString(sli []string, s string) (ret []string) {
 	return
 }
 
-// proxiedGroupPrefix begins the name of the group kubezoo asserts, and only
-// kubezoo asserts, when it forwards a tenant's request upstream.
-const proxiedGroupPrefix = "kubezoo:proxied:"
+const (
+	// proxiedGroupPrefix begins the name of the group kubezoo asserts, and only
+	// kubezoo asserts, when it forwards a tenant's request upstream.
+	proxiedGroupPrefix = "kubezoo:proxied:"
+
+	// kubezooGroupPrefix is the group namespace kubezoo owns. Nothing arriving
+	// at the front door may carry a group under it, whoever issued the
+	// credential, because these names are how kubezoo tells upstream that it
+	// forwarded a request itself.
+	kubezooGroupPrefix = "kubezoo:"
+
+	// RoleAuthorGroup carries the one permission a tenant cannot be given
+	// directly: escalate on clusterroles.
+	//
+	// A tenant holds its namespaced permissions per namespace, so RBAC's
+	// escalation check -- "do you hold, at cluster scope, everything this role
+	// grants?" -- refuses every ClusterRole an operator chart ships, even though
+	// the answer to the question that means something here, "do you hold it in
+	// all of your namespaces?", is yes. Measured: a ClusterRole over pods,
+	// secrets, configmaps and events is refused outright.
+	//
+	// escalate is the documented exemption from that check, and it is all this
+	// group grants. The verbs that write the object still come from the tenant's
+	// own role, so a suspended tenant gains nothing here, and the group on its
+	// own is worth nothing to anybody.
+	//
+	// It is asserted only on writes to clusterroles. Not on clusterrolebindings,
+	// and that is what keeps it contained: a ClusterRole grants nothing until it
+	// is bound, a RoleBinding in the tenant's own namespace binds it to that
+	// namespace alone -- which the tenant could already do -- and binding it
+	// cluster-wide still faces the escalation check with no exemption, because
+	// this group does not cover it and the tenant holds neither bind nor
+	// escalate on clusterrolebindings.
+	RoleAuthorGroup = "kubezoo:role-author"
+)
 
 // TenantAdminUser is the upstream identity kubezoo impersonates for a tenant's
 // own credential. pkg/dynamic sets the impersonation headers on every forwarded
@@ -605,20 +637,45 @@ func ProxiedGroup(tenantID string) string {
 // themselves and hold only what the tenant granted them per namespace; adding
 // the group for them would quietly turn every workload into a cluster-scoped
 // one.
-func ImpersonationGroups(tenantID, userName string, groups []string) []string {
-	forwarded := make([]string, 0, len(groups)+1)
+func ImpersonationGroups(ctx context.Context, userName string, groups []string) []string {
+	tenantID := TenantIDFrom(ctx)
+	forwarded := make([]string, 0, len(groups)+2)
 	for _, group := range groups {
-		if strings.HasPrefix(group, proxiedGroupPrefix) {
-			klog.Warningf("dropping group %q from incoming identity %q: kubezoo issues that name "+
-				"itself, so a credential carrying it was mis-issued", group, userName)
+		if strings.HasPrefix(group, kubezooGroupPrefix) {
+			klog.Warningf("dropping group %q from incoming identity %q: kubezoo issues names under "+
+				"%q itself, so a credential carrying one was mis-issued", group, userName, kubezooGroupPrefix)
 			continue
 		}
 		forwarded = append(forwarded, group)
 	}
-	if tenantID != "" && userName == TenantAdminUser(tenantID) {
-		forwarded = append(forwarded, ProxiedGroup(tenantID))
+	if tenantID == "" || userName != TenantAdminUser(tenantID) {
+		return forwarded
+	}
+	forwarded = append(forwarded, ProxiedGroup(tenantID))
+	if writesAClusterRole(ctx) {
+		forwarded = append(forwarded, RoleAuthorGroup)
 	}
 	return forwarded
+}
+
+// writesAClusterRole reports whether this request is a tenant writing a
+// ClusterRole, which is the only place the escalate exemption is asserted.
+//
+// Deliberately not clusterrolebindings: see RoleAuthorGroup. Reads do not need
+// it either -- the check runs on the way in, not on the way out.
+func writesAClusterRole(ctx context.Context) bool {
+	info, ok := request.RequestInfoFrom(ctx)
+	if !ok || !info.IsResourceRequest {
+		return false
+	}
+	if info.APIGroup != "rbac.authorization.k8s.io" || info.Resource != "clusterroles" {
+		return false
+	}
+	switch info.Verb {
+	case "create", "update", "patch":
+		return true
+	}
+	return false
 }
 
 // ReservedClusterRoleNames are the upstream names kubezoo keeps for itself, per
