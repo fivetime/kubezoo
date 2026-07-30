@@ -2662,17 +2662,49 @@ apiserver 照旧在本地把 apply 解析成完整对象   ← 现有转换链�
 
 守卫 8 条,**红测恰好红 4 条**(改已有字段冲突 / 结果不对 / 重复 apply 冲突 / 上游记成 Update)。
 
-### ⛔ 自定义资源上仍然不行,但**不是这次引入的**
+### ⚠️⚠️ 我上一轮对自定义资源的定性**是错的**,已修正并修好
+
+上一轮写的是"CR 上的 apply 失败是转换层的老问题,不是这次引入的"。
+**不对。** 干净环境里重测,CR 的第二次 apply 报的是:
 
 ```
-CR apply(对象已存在)→ example.com/v1, Kind=Widget is unstructured and is not
-                        suitable for converting to "111111-example.com/v1"
+conflict with "before-first-apply" using example.com/v1: .spec.size
 ```
 
-**把 CR 的转发关掉之后照样报同样的错**,而且普通 `patch` / `replace` / `get` 都正常
-⇒ 是转换层里更早就有的问题,创建能过、第二次 apply 挂。已把 CR 排除在转发之外
-(保持原样),修掉那条之后**这里是下一个要回来看的地方** —— CR 在这儿没有 schema,
-转发会走 schemaless 读取,列表按整体合并而不是按 key。
+—— 和原生那条**是同一个问题**(记成 update ⇒ 下一次 apply 撞自己)。
+之前那个 `is unstructured and is not suitable for converting to "111111-example.com/v1"`
+是**我自己的转发在上一轮制造出来的对象状态**,不是原有 bug。
+当时我"关掉 CR 转发后仍然复现"就下了结论 —— 但复现用的是**上一轮留下的坏对象**,
+不是干净重建的。**教训:判"不是我引入的"之前,状态必须是干净重建的。**
+
+### 真正的根因:managedFields 里的 apiVersion 没被改写
+
+每条 managedFields 记录了它写入时所依据的 apiVersion。对 CR 来说,
+**那个版本在上游带租户前缀,在租户视角不能带**。之前没人读它,所以一直没事;
+一旦 apply 被真正转发上游,上游就会记下一条写着 `111111-example.com/v1` 的条目,
+下一次 apply 把这条目交给该 CR 自己的转换器 —— 它拒绝,于是
+**对象建出来了、第二次 apply 挂掉**,这是最难查的一种失败形态。
+
+修法:CR 转换器同时改写 `metadata.managedFields[].apiVersion`(上行加前缀、下行去前缀);
+无法归属的条目原样返回,而不是让整个读取失败。
+
+### 顺带:CR 用的是**它自己 CRD 的**类型转换器
+
+crdHandler 本来就为每个 CRD 建了一个(有 schema 用 schema,没有就 deduced),
+现在把它传给该 CR 的存储 ⇒ 抽取字段集时用的是这个资源真正的形状,
+而不是原生类型那一套,也不是无脑 deduced(那会把列表整体合并而不是按 key)。
+
+### 实测
+
+```
+CR apply 建对象 / 改字段 / 幂等再来一次      → 三次全过
+租户看到的记账: kubectl/Apply/example.com/v1
+上游记账:       kubectl/Apply/111111-example.com/v1
+```
+
+守卫 3 条,**红测恰好红 2 条**(第二次 apply 撞 `before-first-apply`、记的版本是空/带前缀)。
+⚠️ 守卫的固件也踩了一次:CRD 的结构化 schema 不声明 `spec` 就会拒绝所有字段 ——
+那是固件问题,不是被测行为。
 
 ## 尚未覆盖
 

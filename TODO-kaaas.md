@@ -168,10 +168,16 @@
       三个细节:`force` 是查询参数需 filter 带进 context / **创建那条路也得转发**
       (否则下次 apply 和自己的第一次冲突)/ 类型转换器要按**已装资源**构建。
       实测:重复 apply 幂等、去掉字段会被移除、两个 manager 共同拥有;守卫 8 条,红测红 4 条
-- [ ] ⛔ **自定义资源上的 apply(对象已存在)仍然失败**,但**不是这次引入的**:
-      `Kind=Widget is unstructured and is not suitable for converting to "111111-example.com/v1"`;
-      把 CR 转发关掉照样报同样的错,而普通 patch/replace/get 都正常 ⇒ 转换层老问题。
-      已把 CR 排除在转发之外保持原样;修掉那条之后这里是下一个要回来看的地方
+- [x] ✅ **自定义资源上的 apply 也修好了 —— 并更正我上一轮的错误定性**(审计 §AW 末)
+      上一轮写的"是转换层老问题、不是这次引入的"**是错的**:那次复现用的是**上一轮转发留下的
+      坏对象**,不是干净重建的状态。干净环境里 CR 报的是 `conflict with "before-first-apply"`,
+      和原生那条同一个问题。
+      ⭐ 真正根因:**managedFields 里的 apiVersion 没被改写** —— 对 CR 来说那个版本上游带前缀、
+      租户视角不能带;一旦 apply 真的转发上去,下一次 apply 会把这条目交给 CR 自己的转换器,
+      它拒绝 ⇒ **对象建出来了、第二次 apply 挂**。
+      修法:CR 转换器同时改写 `metadata.managedFields[].apiVersion`;
+      并把 crdHandler 本来就为每个 CRD 建好的类型转换器传给该 CR 的存储。
+      守卫 3 条,红测红 2 条。**教训:判"不是我引入的"之前,状态必须干净重建**
 
 - [ ] ⛔ **Pod 从 downward API 拿到的是上游 namespace 名 ⇒ 经 kubezoo 被二次前缀**(§AV)
       `POD_NAMESPACE` 是 `111111-default`,过 kubezoo 变成 `111111-111111-default`。

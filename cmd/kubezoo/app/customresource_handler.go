@@ -158,6 +158,12 @@ type crdInfo struct {
 	// Status scope per version
 	statusRequestScopes map[string]*handlers.RequestScope
 
+	// typeConverter reads this custom resource against its own schema. The
+	// proxy needs it to forward a server-side apply as an apply: the fields the
+	// apply owns are lifted back out of the converted object, and that cannot be
+	// done with the converter built for the native types.
+	typeConverter managedfields.TypeConverter
+
 	// storageVersion is the CRD version used when storing the object in etcd.
 	storageVersion string
 
@@ -363,6 +369,8 @@ func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, req
 		NewListFunc:      storage.NewListFunc,
 	}
 	r.upstreamConfig.ApplyToStorage(config)
+	// The native converter knows nothing of this resource; its own does.
+	config.TypeConverter = crdInfo.typeConverter
 	proxy, err := proxy.NewTenantProxy(*config)
 	if err != nil {
 		responsewriters.ErrorNegotiated(apierrors.NewInternalError(err),
@@ -425,6 +433,7 @@ func (r *crdHandler) serveStatus(w http.ResponseWriter, req *http.Request, reque
 		NewFunc:          storage.New,
 	}
 	r.upstreamConfig.ApplyToStorage(config)
+	config.TypeConverter = crdInfo.typeConverter
 	proxyStorage, err := proxy.NewTenantProxy(*config)
 	if err != nil {
 		responsewriters.ErrorNegotiated(apierrors.NewInternalError(err),
@@ -461,6 +470,7 @@ func (r *crdHandler) serveScale(w http.ResponseWriter, req *http.Request, reques
 		NewFunc:          storage.New,
 	}
 	r.upstreamConfig.ApplyToStorage(config)
+	config.TypeConverter = crdInfo.typeConverter
 	proxyStorage, err := proxy.NewTenantProxy(*config)
 	if err != nil {
 		responsewriters.ErrorNegotiated(apierrors.NewInternalError(err),
@@ -1070,6 +1080,7 @@ func (r *crdHandler) getOrCreateServingInfoFor(ctx context.Context, uid types.UI
 		statusRequestScopes: statusScopes,
 		deprecated:          deprecated,
 		warnings:            warnings,
+		typeConverter:       typeConverter,
 		storageVersion:      storageVersion,
 		waitGroup:           &utilwaitgroup.SafeWaitGroup{},
 	}

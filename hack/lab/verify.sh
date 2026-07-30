@@ -877,6 +877,67 @@ else
   bad "a field left out of a later apply is removed" "b is still there, so the apply was recorded as an update"
 fi
 
+# A custom resource has to converge too, and it has a trap the native types do
+# not: every managed-fields entry records the apiVersion it was written against,
+# and for a custom resource that version carries the tenant prefix upstream. Left
+# unrewritten it reaches the resource's own converter, which refuses it -- so the
+# object is created and the second apply is the one that fails.
+# Its own CRD, with spec declared: a structural schema that declares nothing
+# refuses every field, which would fail this for a reason that has nothing to do
+# with what is being measured.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: ssawidgets.verify.example}
+spec:
+  group: verify.example
+  names: {plural: ssawidgets, singular: ssawidget, kind: SsaWidget}
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                size: {type: string}
+EOF
+cr_ready=no
+for _ in $(seq 30); do
+  $T -n default get ssawidgets >/dev/null 2>&1 && { cr_ready=yes; break; }
+  sleep 2
+done
+cr_apply() {
+  $T -n default apply --server-side -f - <<EOF
+apiVersion: verify.example/v1
+kind: SsaWidget
+metadata: {name: ssa-widget}
+spec: {size: "$1"}
+EOF
+}
+if [ "$cr_ready" = yes ]; then
+  expect_allowed "applying a custom resource" cr_apply L
+  cr_second=$(cr_apply XL 2>&1)
+  if [ $? -eq 0 ]; then
+    ok "and applying it again, changing a field it owns, which is where the prefix leaks"
+  else
+    bad "applying a custom resource again, changing a field it owns" \
+        "$(tr '\n' ' ' <<<"$cr_second" | cut -c1-160)"
+  fi
+  cr_version=$($T -n default get ssawidget ssa-widget \
+    -o jsonpath='{.metadata.managedFields[0].apiVersion}' 2>/dev/null)
+  if [ "$cr_version" = "verify.example/v1" ]; then
+    ok "and the version it records is the one the tenant wrote, not the prefixed one"
+  else
+    bad "the version it records is the one the tenant wrote" \
+        "it says '$cr_version', which is kubezoo's name for the group and not the tenant's"
+  fi
+fi
+
 # A patch that may not create must still refuse to, or a typo would silently
 # become a new object.
 patch_out=$($T -n default patch configmap ssa-absent --type=merge -p '{"data":{"x":"1"}}' 2>&1)

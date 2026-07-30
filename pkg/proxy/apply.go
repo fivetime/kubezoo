@@ -60,20 +60,6 @@ var deducedTypeConverter = managedfields.NewDeducedTypeConverter()
 func (tp *tenantProxy) forwardApply(ctx context.Context, upstream *unstructured.Unstructured,
 	fieldManager string, options *metav1.UpdateOptions) (*unstructured.Unstructured, error) {
 
-	if tp.isCustomResource {
-		// Not forwarded, and not because forwarding fails. Applying to a custom
-		// resource that already exists is broken further up, in the conversion
-		// layer -- "example.com/v1, Kind=Widget is unstructured and is not
-		// suitable for converting to 111111-example.com/v1" -- and it is broken
-		// with this turned off too, so it predates any of this. Creating one
-		// works; the second apply is what fails.
-		//
-		// Leaving custom resources alone keeps them exactly as they were until
-		// that is fixed, and this is the next thing to revisit when it is: there
-		// is no model for a custom resource here, so forwarding one would read
-		// it schemalessly, which merges lists as wholes rather than by key.
-		return nil, nil
-	}
 	entry, found := applyEntry(upstream, fieldManager)
 	if !found {
 		return nil, nil
@@ -96,10 +82,9 @@ func (tp *tenantProxy) forwardApply(ctx context.Context, upstream *unstructured.
 
 	typedObj, err := tp.typeConverter.ObjectToTyped(stripped)
 	if err != nil {
-		// A custom resource has no model here -- kubezoo builds the converter
-		// from the native types it serves. Upstream falls back to the same
-		// schemaless reading for a custom resource without a structural schema,
-		// where every list is treated as a whole rather than merged by key.
+		// A custom resource whose CRD carries no usable schema. Upstream reads
+		// one the same way, treating every list as a whole rather than merging
+		// it by key.
 		typedObj, err = deducedTypeConverter.ObjectToTyped(stripped)
 		if err != nil {
 			klog.V(4).Infof("not forwarding this apply as an apply, its shape could not be read: %v", err)
