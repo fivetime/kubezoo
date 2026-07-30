@@ -160,11 +160,19 @@
       修法照上游 registry:传 `tp.New()` 零值对象;`forceAllowCreate` 传进这条路
       (普通 patch 打空对象仍返回 NotFound);对象不在时走 **Create 而非 Update**
       (多数资源 `AllowCreateOnUpdate=false`)。守卫 5 条,红测恰好红 4 条
-- [ ] ⚠️ **SSA 还差一半:managedFields 记成 `Update` 而不是 `Apply`**(§AU 后半)
-      kubezoo 在本地解析完 apply 再用 PUT/POST 发上游 ⇒ **第二次 apply 自己跟自己冲突**,
-      不带 `--force-conflicts` 不收敛。而"重复 apply 收敛"正是 SSA 的全部意义。
-      正解:把 apply 当 apply 转发(`application/apply-patch+yaml` + 原 fieldManager + force)。
-      ⚠️ 难点:REST 存储层拿到的已是解析后的 `UpdatedObjectInfo`,**原始 patch 体没了**
+- [x] ✅ **SSA 后半也做完了:apply 当 apply 转发**(审计 §AW)
+      难点是"部分对象"——apply 的 body 只含租户写的字段,而转换器是为完整对象写的,
+      走 typed 往返会把默认值实体化 ⇒ apply 会声称拥有租户没写的字段。
+      修法:**照旧在本地解析成完整对象**(现有转换链路不动),再**按 managedFields 的字段集
+      从已转换好的对象里把片段取回来**,以 `application/apply-patch+yaml` 发上游。
+      三个细节:`force` 是查询参数需 filter 带进 context / **创建那条路也得转发**
+      (否则下次 apply 和自己的第一次冲突)/ 类型转换器要按**已装资源**构建。
+      实测:重复 apply 幂等、去掉字段会被移除、两个 manager 共同拥有;守卫 8 条,红测红 4 条
+- [ ] ⛔ **自定义资源上的 apply(对象已存在)仍然失败**,但**不是这次引入的**:
+      `Kind=Widget is unstructured and is not suitable for converting to "111111-example.com/v1"`;
+      把 CR 转发关掉照样报同样的错,而普通 patch/replace/get 都正常 ⇒ 转换层老问题。
+      已把 CR 排除在转发之外保持原样;修掉那条之后这里是下一个要回来看的地方
+
 - [ ] ⛔ **Pod 从 downward API 拿到的是上游 namespace 名 ⇒ 经 kubezoo 被二次前缀**(§AV)
       `POD_NAMESPACE` 是 `111111-default`,过 kubezoo 变成 `111111-111111-default`。
       §Z 的端点注入没覆盖;**任何用 downward API 取自身 namespace 的 operator 都会撞上**。

@@ -17,6 +17,7 @@ limitations under the License.
 package common
 
 import (
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"net/http"
 	"net/url"
 
@@ -44,6 +45,12 @@ type StorageConfig struct {
 	IsCustomResource bool
 
 	IsConnecter bool
+
+	// TypeConverter reads an object against its schema, which is what lets a
+	// server-side apply be forwarded upstream as an apply rather than resolved
+	// here and written as an update. Nil disables that, and applies fall back to
+	// being written as updates.
+	TypeConverter managedfields.TypeConverter
 
 	// NewFunc returns a new instance of the type this registry returns for a
 	// GET of a single object, e.g.:

@@ -23,6 +23,9 @@ import (
 	"context"
 	stdx509 "crypto/x509"
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/managedfields"
+	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
+	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"net"
 	"net/http"
 	"net/url"
@@ -178,6 +181,60 @@ func openAPIDefinitions(ref openapicommon.ReferenceCallback) map[string]openapic
 		defs[name] = def
 	}
 	return defs
+}
+
+// applyTypeConverter reads objects against the schemas kubezoo serves, so that
+// the fields a server-side apply owns can be lifted back out of a converted
+// object and forwarded upstream as an apply. See pkg/proxy/apply.go.
+//
+// Built from the same definitions the OpenAPI config uses, so a resource kubezoo
+// serves is a resource this knows the shape of.
+func applyTypeConverter() (managedfields.TypeConverter, error) {
+	namer := openapinamer.NewDefinitionNamer(legacyscheme.Scheme, extensionsapiserver.Scheme, aggregatorscheme.Scheme)
+	config := genericapiserver.DefaultOpenAPIV3Config(openAPIDefinitions, namer)
+
+	// The generated definitions on their own are not enough: the converter finds
+	// a type by its group, version and kind, and that mapping lives in an
+	// extension the builder adds rather than in the generated code. Handing it
+	// the raw definitions produced "no corresponding type for /v1, Kind=ConfigMap"
+	// for every apply.
+	//
+	// The names are the canonical Go type names of the versioned objects, and
+	// they come from what kubezoo serves rather than from everything the scheme
+	// knows: the scheme carries types no resource is installed for, such as
+	// AdmissionReview, and the builder fails on the first one it has no
+	// definition for.
+	seen := map[string]bool{}
+	names := make([]string, 0)
+	collect := func(group common.APIGroupConfig) {
+		for _, resources := range group.StorageConfigs {
+			for _, config := range resources {
+				if config == nil || config.IsConnecter || config.Kind.Empty() {
+					continue
+				}
+				object, err := legacyscheme.Scheme.New(config.Kind)
+				if err != nil {
+					continue
+				}
+				name := openapiutil.GetCanonicalTypeName(object)
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	collect(legacyGroup)
+	for i := range nonLegacyGroups {
+		collect(nonLegacyGroups[i])
+	}
+
+	schemas, err := openapibuilder3.BuildOpenAPIDefinitionsForResources(config, names...)
+	if err != nil {
+		return nil, err
+	}
+	return managedfields.NewTypeConverter(schemas, false)
 }
 
 // Run runs the specified APIServer.  This should never exit.
@@ -489,6 +546,8 @@ type ProxyConfig struct {
 	nativeConvertor common.ObjectConvertor
 	customConvertor common.ObjectConvertor
 
+	typeConverter managedfields.TypeConverter
+
 	proxyTransport http.RoundTripper
 	upstreamMaster *url.URL
 
@@ -509,6 +568,7 @@ func (c *ProxyConfig) ApplyToGroup(group *common.APIGroupConfig) {
 
 func (c *ProxyConfig) ApplyToStorage(config *common.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
+	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport
 	config.UpstreamMaster = c.upstreamMaster
 	if config.IsCustomResource {
@@ -596,7 +656,13 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		return nil, err
 	}
 
+	typeConverter, err := applyTypeConverter()
+	if err != nil {
+		return nil, fmt.Errorf("building the type converter server-side apply needs: %w", err)
+	}
+
 	return &ProxyConfig{
+		typeConverter:    typeConverter,
 		dynamicClient:    dynamicClient,
 		discoveryClient:  discoveryClient,
 		crdClient:        crdClient,
@@ -1008,6 +1074,9 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		// which is what puts the tenant on the context.
 		handler = tenantfilters.WithTenantSuspension(handler, tenants)
 		handler = tenantfilters.WithTenantInfo(handler)
+		// Carries the apply force flag, which is a query parameter the storage
+		// layer never sees. See tenantfilters.WithApplyForce.
+		handler = tenantfilters.WithApplyForce(handler)
 		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences, c.Authentication.RequestHeaderConfig)
 		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
 		// Records the warnings the request path emits -- without it AddWarning is

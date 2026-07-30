@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
@@ -76,6 +77,10 @@ type tenantProxy struct {
 	// TableConvertor is an optional interface for transforming items or lists
 	// of items into tabular output. If unset, the default will be used.
 	tableConvertor rest.TableConvertor
+
+	// typeConverter reads an object against its schema, so that the fields a
+	// server-side apply owns can be lifted back out of the converted object.
+	typeConverter managedfields.TypeConverter
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -160,6 +165,7 @@ func NewTenantProxy(config common.StorageConfig) (rest.Storage, error) {
 		shortNames:           config.ShortNames,
 		newFunc:              config.NewFunc,
 		newListFunc:          config.NewListFunc,
+		typeConverter:        config.TypeConverter,
 		dynamicClient:        config.DynamicClient,
 		convertor:            config.Convertor,
 		groupVersionKindFunc: config.GroupVersionKindFunc,
@@ -430,6 +436,19 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
 		return nil, false, err
 	}
+	// A server-side apply goes up as an apply, so that upstream records who
+	// applied what and the next apply from the same manager converges instead of
+	// conflicting with this one. Everything above has already run, so the object
+	// is fully converted; forwardApply only decides which verb carries it.
+	if tp.subresource == "" && options != nil {
+		applied, err := tp.forwardApply(ctx, utd, options.FieldManager, options)
+		if err != nil {
+			return nil, false, util.TrimTenantIDFromError(err, tenantID)
+		}
+		if applied != nil {
+			return tp.finishWrite(applied, tenantID, false)
+		}
+	}
 	if subresource := tp.subresource; subresource == "" {
 		got, created, err = client.Update(ctx, utd, *options)
 	} else if subresource == "status" {
@@ -501,6 +520,23 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
 		return nil, err
+	}
+
+	// An apply that has to create the object is still an apply, and this is the
+	// path it takes -- most resources refuse to be created by an update. Sending
+	// it as a create would have upstream record it as one, and then the tenant's
+	// next apply would conflict with its own first one.
+	if tp.subresource == "" && options != nil && options.FieldManager != "" {
+		applied, applyErr := tp.forwardApply(ctx, utd, options.FieldManager, &metav1.UpdateOptions{
+			DryRun: options.DryRun, FieldManager: options.FieldManager,
+		})
+		if applyErr != nil {
+			return nil, util.TrimTenantIDFromError(applyErr, tenantID)
+		}
+		if applied != nil {
+			out, _, err := tp.finishWrite(applied, tenantID, true)
+			return out, err
+		}
 	}
 
 	// 3. call create api
@@ -728,6 +764,19 @@ func (tp *tenantProxy) refuseProjectedName(name string) error {
 		schema.GroupResource{Group: tp.kind.Group, Resource: tp.resource}, name,
 		fmt.Errorf("this name belongs to a binding kubezoo keeps for your tenant; "+
 			"write the ClusterRoleBinding itself, or choose another name"))
+}
+
+// finishWrite turns what upstream returned into what the tenant should see.
+func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID string,
+	created bool) (runtime.Object, bool, error) {
+	output := tp.New()
+	if err := tp.convertUnstructuredToOutput(got, output); err != nil {
+		return nil, false, err
+	}
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+		return nil, false, err
+	}
+	return output, created, nil
 }
 
 // refuseReservedName stops a tenant addressing the cluster-scoped RBAC objects

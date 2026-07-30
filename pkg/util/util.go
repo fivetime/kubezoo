@@ -745,3 +745,22 @@ func IsProjectedBindingName(roleBindingName string) bool {
 func IsManagedBindingName(roleBindingName string) bool {
 	return strings.HasPrefix(roleBindingName, kubezooGroupPrefix)
 }
+
+// applyForceKey marks a server-side apply that asked to take fields from other
+// managers.
+type applyForceKey struct{}
+
+// WithApplyForce records the force flag of an apply request.
+//
+// It is a query parameter, and the storage layer is handed metav1.UpdateOptions,
+// which has no field for it -- so without carrying it here an apply forwarded
+// upstream would lose the one thing that decides whether a conflict stops it.
+func WithApplyForce(ctx context.Context, force bool) context.Context {
+	return context.WithValue(ctx, applyForceKey{}, force)
+}
+
+// ApplyForceFrom reports whether this apply asked to force.
+func ApplyForceFrom(ctx context.Context) bool {
+	force, ok := ctx.Value(applyForceKey{}).(bool)
+	return ok && force
+}

@@ -820,18 +820,63 @@ else
   bad "the object it wrote is the object that was asked for" \
       "got '$($T -n default get configmap ssa-probe -o jsonpath='{.data}' 2>&1 | cut -c1-80)'"
 fi
-expect_allowed "applying over an object that does exist" \
-  $T -n default apply --server-side --force-conflicts -f - <<EOF
+# No --force-conflicts, and a changed value: this is where resolving the apply
+# here and writing the result as an update shows up, because the field is then
+# owned by an update from the same manager and the apply collides with it.
+expect_allowed "applying over an object that does exist, changing a field it already owns" \
+  $T -n default apply --server-side -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: ssa-probe}
-data: {a: "1", b: "2"}
+data: {a: "changed", b: "2"}
 EOF
-if [ "$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>/dev/null)" = 2 ]; then
+if [ "$($T -n default get configmap ssa-probe -o jsonpath='{.data.a}' 2>/dev/null)" = changed ] &&
+   [ "$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>/dev/null)" = 2 ]; then
   ok "and the second apply is visible in the object"
 else
-  bad "the second apply is visible in the object" "b is '$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>&1)'"
+  bad "the second apply is visible in the object" \
+      "a='$($T -n default get configmap ssa-probe -o jsonpath='{.data.a}' 2>&1)' b='$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>&1)'"
 fi
+# Applying the same thing again has to be a no-op. It was not: kubezoo resolved
+# the apply and wrote the result with a PUT, so upstream recorded an update, and
+# the next apply from the same manager conflicted with its own last one.
+again=$($T -n default apply --server-side -f - 2>&1 <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ssa-probe}
+data: {a: "changed-again", b: "2"}
+EOF
+)
+if grep -qi conflict <<<"$again"; then
+  bad "applying the same thing twice converges" \
+      "the second apply conflicts with the first: $(tr '\n' ' ' <<<"$again" | cut -c1-140)"
+else
+  ok "applying the same thing twice converges, which is the whole point of applying"
+fi
+# The manager that applied has to be recorded as having applied. Another entry
+# saying Apply proves nothing -- it is this manager's next apply that collides.
+op=$($K -n "$NS" get configmap ssa-probe \
+  -o jsonpath='{range .metadata.managedFields[?(@.manager=="kubectl")]}{.operation} {end}' 2>/dev/null)
+if grep -q Apply <<<"$op"; then
+  ok "and upstream records it as an apply, not as an update"
+else
+  bad "upstream records it as an apply, not as an update" \
+      "operations upstream are '$op' -- the next apply will conflict with this one"
+fi
+# Dropping a field from the manifest has to drop it from the object, which is
+# what separates applying from patching.
+$T -n default apply --server-side -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ssa-probe}
+data: {a: "changed-again"}
+EOF
+if [ -z "$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>/dev/null)" ]; then
+  ok "a field left out of a later apply is removed from the object"
+else
+  bad "a field left out of a later apply is removed" "b is still there, so the apply was recorded as an update"
+fi
+
 # A patch that may not create must still refuse to, or a typo would silently
 # become a new object.
 patch_out=$($T -n default patch configmap ssa-absent --type=merge -p '{"data":{"x":"1"}}' 2>&1)

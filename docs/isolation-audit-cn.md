@@ -2576,7 +2576,9 @@ if errors.IsNotFound(err) {
 守卫 5 条(新建 / 内容正确 / 覆盖已有 / 第二次可见 / 普通 patch 仍 NotFound),
 **红测:摘掉修复恰好红 4 条**,而"普通 patch 仍 NotFound"那条对照保持绿。
 
-### ⚠️ 还没做完:managedFields 记的是 `Update`,不是 `Apply`
+### ✅ 后半也做完了 —— 见 §AW。以下是当时的问题记录
+
+### ⚠️(已修)managedFields 记的是 `Update`,不是 `Apply`
 
 kubezoo 是**在本地把 apply 解析完**,再用 PUT/POST 发上游 ⇒ 上游按"更新"记账:
 
@@ -2614,6 +2616,63 @@ kubectl apply --server-side  →  managedFields: kubectl / Update      ← 应�
 给它换了一张上游 CA 签的证书 —— 结果 **kubezoo 自己的租户控制器连不上自己**
 (它用的是 kubezoo 自己的 CA),最后整个停止监听。
 ⇒ 真部署里 kubezoo 的服务证书与它自身客户端的信任根**必须一起换**。
+
+## AW. ✅ apply 当 apply 转发 —— 重复 apply 现在收敛
+
+§AU 后半的问题:kubezoo 在本地把 apply 解析完再用 PUT/POST 发上游,上游按"更新"记账,
+于是**第二次 apply 和第一次自己冲突**。
+
+### 难点不是转发,是"部分对象"
+
+apply 的 body 只含租户写的那几个字段,而 kubezoo 的转换器是为**完整对象**写的。
+把片段丢进去走一遍 typed 往返,**会把该类型所有默认值实体化** ——
+那样 apply 就会声称拥有租户根本没写的字段。所以**片段不能转换**。
+
+### 修法:让片段"从完整对象里再长出来"
+
+```
+apiserver 照旧在本地把 apply 解析成完整对象   ← 现有转换链路原封不动地跑
+  ↓ 顺带记下:这个 manager 现在拥有哪些字段(managedFields 的 fieldsV1)
+按这份字段集,把这些字段从**已转换好的**对象里重新抽出来
+  ↓ 得到的就是租户原本那个片段,只是每个引用都已改写
+以 application/apply-patch+yaml 发上游,带原本的 fieldManager 和 force
+```
+
+⭐ 好处:**所有转换都仍然发生在完整对象上**,是已有的、被测过的那条路;
+新增的只有"按字段集把片段取回来"这一步。
+
+### 三个必须处理的细节
+
+| | |
+|---|---|
+| `force` 是**查询参数** | 存储层拿到的是 `UpdateOptions`,里面没有这个字段 ⇒ 加了一个 filter 把它带进 context。丢了它,每个 `--force-conflicts` 都会变成"遇冲突就放弃" |
+| **创建那条路也得转发** | 多数资源不允许 PUT 创建,apply 建对象走的是 Create;发成 create 的话上游记成 create,租户**下一次 apply 就会和自己的第一次冲突** |
+| 类型转换器要**按 kubezoo 实际提供的资源**构建 | 照着 scheme 全量来会在第一个没有 openapi 定义的类型上失败(`AdmissionReview`);而只喂生成的定义又缺 GVK 扩展 ⇒ 每个 apply 报 `no corresponding type for /v1, Kind=ConfigMap`。正解是 `BuildOpenAPIDefinitionsForResources` + 只列已装资源 |
+
+### 实测
+
+```
+第一次 apply {a:1}          → created
+第二次 apply {a:changed,b:2}→ 无冲突(改的是自己上次拥有的字段)
+第三次 apply(同内容)        → 幂等
+第四次 apply 去掉 b          → b 被移除          ← apply 与 patch 的分水岭
+记账:tenant 与 upstream 都是 kubectl/Apply
+两个不同 manager 各写各的字段  → 共同拥有,互不冲突
+```
+
+守卫 8 条,**红测恰好红 4 条**(改已有字段冲突 / 结果不对 / 重复 apply 冲突 / 上游记成 Update)。
+
+### ⛔ 自定义资源上仍然不行,但**不是这次引入的**
+
+```
+CR apply(对象已存在)→ example.com/v1, Kind=Widget is unstructured and is not
+                        suitable for converting to "111111-example.com/v1"
+```
+
+**把 CR 的转发关掉之后照样报同样的错**,而且普通 `patch` / `replace` / `get` 都正常
+⇒ 是转换层里更早就有的问题,创建能过、第二次 apply 挂。已把 CR 排除在转发之外
+(保持原样),修掉那条之后**这里是下一个要回来看的地方** —— CR 在这儿没有 schema,
+转发会走 schemaless 读取,列表按整体合并而不是按 key。
 
 ## 尚未覆盖
 
