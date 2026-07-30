@@ -1,0 +1,61 @@
+# 租户只能声明自己子域下的主机名。
+#
+# ⛔ 不加这条会怎样(审计 §AH,实测):`spec.rules[].host` 是一个自由的 DNS 名,
+# kubezoo 表达不了它(前缀化一个域名就毁了它的用途)。于是**任何租户可以声明任何主机名**,
+# 由 ingress 控制器按**创建顺序**裁决 —— 先到先得,**落败的一方零报错**:
+# 对象在、class 在、status 也有地址,就是永远不服务流量。
+#
+# 抢不走已被占用的,但可以**抢先占用**别人还没声明的 —— 那就是拒绝服务 +
+# 把本该属于别人的流量接到自己这里。
+#
+# ⇒ 判据:纯写路径、不需要看响应、且"换个平台会变"(域名方案是平台自己的)
+#    ⇒ 策略层。用原生 VAP 而不是 Kyverno:一条 CEL 就够,而且进程内、无 webhook。
+#
+# ⚠️⚠️ 下面的域名后缀是**环境相关的**,部署时必须换成本平台给租户分配子域的那个后缀。
+# 租户 111111 于是只能声明 *.111111.<后缀>。
+#
+# ⚠️ **这只解决了"默认安全"的一半。** 真实客户会要用自己的域名(shop.customer.com),
+# 那需要一份**每租户的自定义域名白名单** + 域名归属校验(DNS TXT 之类),
+# 而且白名单必须放在**租户改不动**的地方(租户能给自己的 namespace 打任意标签/注解,
+# 放那里就是"判定条件建立在租户可控输入上"那个老坑)。
+# 那一半是产品决策,未做 —— 见 TODO。
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-ingress-hostnames
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+        scope: Namespaced
+  variables:
+    # namespace 上游形如 <租户ID>-<租户视角的名字>,而租户伪造不了这个前缀:
+    # kubezoo 在写入时强制加上,并拒绝租户把 kubezoo.io/tenant 标签改成别人的。
+    - name: tenantSuffix
+      expression: '"." + request.namespace.split("-")[0] + ".TENANT_DOMAIN_SUFFIX"'
+  validations:
+    # 空 host 表示"匹配所有主机名",那等于把整个入口占了,必须拒。
+    - expression: >-
+        object.spec.rules.all(rule,
+          has(rule.host) && rule.host != "" && rule.host.endsWith(variables.tenantSuffix))
+      messageExpression: >-
+        "an Ingress may only claim host names under this tenant's own subdomain (" +
+        variables.tenantSuffix + "); a bare or foreign host name would take traffic from
+        whoever else claims it, and the loser is told nothing"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-ingress-hostnames
+spec:
+  policyName: tenant-ingress-hostnames
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubezoo.io/tenant
+          operator: Exists

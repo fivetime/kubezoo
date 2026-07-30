@@ -756,7 +756,7 @@ metadata: {name: class-$name}
 spec:
   ingressClassName: $class
   rules:
-    - host: $name.verify.example
+    - host: $name.$TID.apps.example.com
       http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
 EOF
 done
@@ -787,6 +787,51 @@ for pair in "own:internal" "public:nginx" "borrowed:999999-nginx"; do
   [ "$(tenant_class "$name")" = "$class" ] || { bad "class round trip" "wrote $class, reads back $(tenant_class "$name")"; round_trip=no; }
 done
 [ "$round_trip" = yes ] && ok "every class reads back exactly as the tenant wrote it"
+
+echo
+echo "== a tenant can only claim host names under its own subdomain =="
+# spec.rules host is a free-form DNS name that kubezoo cannot rewrite -- prefixing
+# a domain destroys what it is for -- so without this any tenant could claim any
+# hostname and the ingress controller would settle it by creation order, telling
+# the loser nothing.
+ingress_with_host() {
+  cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: $1}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: $2
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+}
+expect_allowed "an Ingress under the tenant's own subdomain" \
+  $T -n default apply -f <(ingress_with_host host-own "shop.$TID.apps.example.com")
+expect_denied "one under another tenant's subdomain" "own subdomain" -- \
+  $T -n default apply -f <(ingress_with_host host-other "shop.999999.apps.example.com")
+expect_denied "an arbitrary external hostname" "own subdomain" -- \
+  $T -n default apply -f <(ingress_with_host host-external bank.example.com)
+# An empty host matches every hostname, which is the whole entry point rather
+# than one name, so it has to be refused too.
+expect_denied "an Ingress with no host at all" "own subdomain" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: host-bare}
+spec:
+  ingressClassName: nginx
+  rules:
+    - http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+# Updates as well as creates: otherwise a tenant claims a legal name and edits it.
+expect_denied "editing an accepted Ingress onto a foreign hostname" "own subdomain" -- \
+  $T -n default patch ingress host-own --type=json \
+    -p '[{"op":"replace","path":"/spec/rules/0/host","value":"evil.example.com"}]'
+# The platform's own namespaces are not tenants and are not constrained.
+expect_allowed "the platform may still use any hostname it likes" \
+  $K -n kube-public create ingress verify-plat --rule='anything.example.com/*=s:80'
+$K -n kube-public delete ingress verify-plat >/dev/null 2>&1
 
 echo
 echo "== node pools must not overlap =="

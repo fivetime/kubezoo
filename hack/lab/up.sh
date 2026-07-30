@@ -159,7 +159,13 @@ if ! kubectl --context "kind-$CLUSTER" get ns kyverno >/dev/null 2>&1; then
     --version "${KYVERNO_CHART_VERSION:-3.8.2}" \
     --kube-context "kind-$CLUSTER" --wait --timeout 8m >/dev/null
 fi
-kubectl --context "kind-$CLUSTER" apply -f "$ZOO/config/policy/" 2>&1 | grep -v '^Warning' || true
+# The hostname policy carries a domain suffix that only means something in a real
+# deployment, so the lab substitutes its own rather than shipping a placeholder
+# that would refuse every Ingress.
+mkdir -p "$LAB/policy"
+cp "$ZOO"/config/policy/*.yaml "$LAB/policy/"
+sed -i "s/TENANT_DOMAIN_SUFFIX/${TENANT_DOMAIN_SUFFIX:-apps.example.com}/" "$LAB/policy/tenant-ingress-hostnames.yaml"
+kubectl --context "kind-$CLUSTER" apply -f "$LAB/policy/" 2>&1 | grep -v '^Warning' || true
 # config/policy/ holds one native ValidatingAdmissionPolicy alongside the Kyverno
 # ones -- Kyverno cannot match the pods/binding subresource, see that file.
 kubectl --context "kind-$CLUSTER" get validatingadmissionpolicy -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | sed 's/^/vap: /' 
