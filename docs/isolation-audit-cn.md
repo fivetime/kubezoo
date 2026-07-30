@@ -899,10 +899,42 @@ msg    = Pod was rejected: Predicate NodeAffinity failed:
 1. **池子标签每租户专属**(见上,负向对照已证)
 2. **注入型策略上线时清掉同字段的验证型策略**(见 ②)
 
-⚠️ **残余(已知,未处理)**:binding 在 **API 层是成功的** —— 租户能把 Pod 对象
-绑到别的租户节点上,只是 kubelet 不让它跑(`Failed`)。这是**节点侧的遏制,不是 API 侧的阻止**。
-真要在 API 侧堵,Kyverno 需要匹配 `pods/binding` 子资源(`kinds: [Pod/binding]`)——
-**没测过**,列为下一步。
+### ⑤ ⛔ Kyverno 堵不住 binding,原生 VAP 可以
+
+想在 **API 层**堵掉 binding,先试 Kyverno 的子资源匹配 `kinds: [Pod/binding]`:
+
+| 观察 | |
+|---|---|
+| 策略状态 | `Ready=True`,`rulecount.validate=1` |
+| webhook 注册 | ✅ `validate.kyverno.svc-fail  res=['pods/binding', ...]  ops=['CREATE']` |
+| 实际效果 | ⛔ **binding 照样成功** |
+| Kyverno 日志 | **连这次请求都没有** |
+
+经 kubezoo、直连上游两条路都试过,去掉 `namespaceSelector` 也一样 ——
+**这是本轮第四次"Ready 但什么都不做"**。
+
+换成 **k8s 1.36 原生的 `ValidatingAdmissionPolicy`**(进程内、无 webhook、无单点,
+正是 §8.5 一直偏好的形态):
+
+```
+租户 POST binding →
+  ValidatingAdmissionPolicy 'tenant-deny-binding' denied request:
+  binding a pod to a node is the scheduler's job; tenants hold no scheduling authority
+  nodeName = ''            # 一点都没绑上
+```
+
+⚠️ **表达式必须写成"只放行调度器"**(`request.userInfo.username == 'system:kube-scheduler'`),
+不能写成无条件拒绝 —— 调度器绑定走的是**同一条子资源**,写死拒绝会让所有 Pod 永远 Pending。
+**负向对照已验**:uncordon 后调度器正常把 Pod 绑上并 Running;新建 Pod 走完整路径正常;
+平台自己 namespace 的 Pod 不受影响。
+
+配置在 `config/policy/tenant-deny-binding.yaml`。
+
+⭐ **另一条路是 RBAC**:租户的 `*` on `*`(`controller/rbac.go:270`)才是准入口 ——
+`kubectl auth can-i create pods/binding` 对租户主体返回 **yes**。
+按 §8.0 判据收窄它属于 **kubezoo**。但那个通配是**有意的**(为覆盖租户 CRD),
+而 RBAC **没有 deny 语义**,收窄就得改成枚举 —— 会丢掉 CRD 覆盖。
+⇒ **VAP 是更合适的形态**,RBAC 这条列为备选。
 
 ## 尚未覆盖
 

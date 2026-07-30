@@ -560,9 +560,12 @@ kubelet 报 `Predicate NodeAffinity failed`,容器一个都没起;
 就让 Pod **Running 在了另一个池子的节点上**。
 ⇒ **「池子标签每租户专属」是承重前提,不是优化项。**
 
-⚠️ **残余**:binding 在 **API 层是成功的** —— Pod 对象真被绑到了别的租户节点上,
-只是 kubelet 不让它跑。这是**节点侧的遏制,不是 API 侧的阻止**。
-要在 API 侧堵,Kyverno 需匹配 `pods/binding` 子资源(`kinds: [Pod/binding]`),**未测**。
+✅ **API 层也已堵住,但只能用原生 VAP**:Kyverno 3.8.2 的 `kinds: [Pod/binding]`
+子资源匹配**实测不生效**(策略 Ready、webhook 注册了、日志里连请求都没有)。
+改用 `ValidatingAdmissionPolicy`(进程内、无 webhook —— 正是 §8.5 偏好的形态)后
+租户 binding 被拒且 `nodeName` 保持为空;⚠️ 表达式要写成**只放行 `system:kube-scheduler`**,
+无条件拒绝会让所有 Pod 永远 Pending(负向对照已验调度器不受影响)。
+配置 `config/policy/tenant-deny-binding.yaml`,详见审计 §R⑤。
 
 ##### ⚠️ 两个实现坑
 

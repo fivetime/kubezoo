@@ -149,6 +149,9 @@ if ! kubectl --context "kind-$CLUSTER" get ns kyverno >/dev/null 2>&1; then
     --kube-context "kind-$CLUSTER" --wait --timeout 8m >/dev/null
 fi
 kubectl --context "kind-$CLUSTER" apply -f "$ZOO/config/policy/" 2>&1 | grep -v '^Warning' || true
+# config/policy/ holds one native ValidatingAdmissionPolicy alongside the Kyverno
+# ones -- Kyverno cannot match the pods/binding subresource, see that file.
+kubectl --context "kind-$CLUSTER" get validatingadmissionpolicy -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | sed 's/^/vap: /' 
 kubectl --context "kind-$CLUSTER" get clusterpolicy -o custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status --no-headers
 
 echo "lab up: upstream ctx = kind-kz-audit3, zoo admin ctx = zoo"

@@ -318,9 +318,11 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
               `not-ready`/`unreachable` 两条(注入的那份已带上);
               **`restrict-tolerations` 与注入冲突已复现并删除该规则** ——
               通用教训:注入型策略上线时必须清掉同字段的验证型策略
-            - [ ] **残余**:binding 在 **API 层仍然成功**(Pod 真被绑到别租户节点,
-              只是 kubelet 不让跑)。要在 API 侧堵需 Kyverno 匹配 `pods/binding`
-              子资源(`kinds: [Pod/binding]`)—— **未测**,下一步
+            - [x] ✅ **binding 在 API 层也堵住了 —— 但只能用原生 VAP**:
+              Kyverno 3.8.2 的 `kinds: [Pod/binding]` 子资源匹配**实测不生效**
+              (Ready + webhook 注册了 + 日志里连请求都没有,第四次"Ready 但什么都不做")。
+              `config/policy/tenant-deny-binding.yaml` 用 `ValidatingAdmissionPolicy`。
+              ⚠️ 表达式写"只放行 system:kube-scheduler",无条件拒绝会让所有 Pod 永远 Pending
             - ⛔ **打散不要用 required podAntiAffinity**:每评估一个节点扫一遍已有 Pod,
               是调度吞吐杀手,按北极星(规模优先)大集群上会先撞这堵墙 ⇒ 用 `topologySpreadConstraints`
             - ⛔ **跨租户共驻 affinity 表达不了**(笛卡尔积)⇒ 只能靠节点池:污点 + 注入
