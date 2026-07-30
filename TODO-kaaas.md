@@ -113,9 +113,12 @@
       游标坏掉是**翻不完**而不是少返回 ⇒ 守卫必须带超时;自己的 token 必须与上游区分,
       不认识的一律拒而**不是透传**。
       守卫 `verify.sh` 三条,已验证弄坏游标会红
-- [ ] **下一步:WATCH 多路复用**(`-A` 的 watch 扇成 N 条流,对客户端合成一条)。
-      现在能干净地从 LIST 返回的 R 起步。⭐ **租户自装 operator 的必需件**
-      (cluster-wide informer 走的就是这条路)
+- [x] ✅ **WATCH 多路复用已实现**(`pkg/proxy/watchmux.go`)。每条子流从客户端给的 rv
+      (即 LIST 的 R)起步 ⇒ informer 契约兑现。⭐ 租户自装 operator 的必需件。
+      两个实测坑:**watch 期间新建的 namespace 必须动态加入**(不加就是静默漏,
+      informer 缓存错了却不报);**新 namespace 的第一次 watch 必然 Forbidden**
+      (namespace 事件比 RoleBinding 授权早到 ~310ms)⇒ 独立 goroutine + 有界重试,
+      重试用尽必须记日志。守卫 `verify.sh` 两条,已验证关掉会红
 - [ ] **DaemonSet 未在代理层拒绝** —— FAQ 称限制,但 `apigroups.go` 正常注册代理。由 Kyverno 策略补(见 3.2)
 - [x] ✅ **kubezoo 现在能认 in-cluster ServiceAccount token**(审计 §Y,已实测)
       原因是从未设置 `ServiceAccountTokenGetter`(1.24 fork 时代的遗留:那时非绑定 token 还在)。
@@ -463,8 +466,7 @@ kubezoo 管控制面多租户,kubetron 管数据面/网络多租户,kata 管计�
 
 - [x] ✅ **`-A` 的 LIST 已从全集群改为逐 namespace 扇出**(见 1.2),
       代价从 O(全集群) 降到 O(租户),DoS 面随之消失
-- [ ] **`-A` 的 WATCH 仍是全集群** —— informer 与 `kubectl get -w -A` 走的是这条。
-      下一步就是它(多路复用),现在能从 LIST 返回的 R 干净起步
+- [x] ✅ **`-A` 的 WATCH 已改为多路复用**(见 1.2)
 - [ ] **准入 webhook 同步开销** —— 高频短任务创建 Pod,每次同步过 Kyverno,须压测
 - [ ] **策略引擎的集群状态缓存** —— 与第一条同类,能不用就不用
 - [ ] **上游 etcd 单一键空间(#84)** —— N 租户全部对象共用一套 keyspace,

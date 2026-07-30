@@ -330,9 +330,9 @@ list 空 / get NotFound / raw GET 404 / watch 静默 / 平台自己不受影响�
 | `kubectl get pods`(带 ns) | 限定 `111111-default` | ✅ 查询范围够不着别人 |
 | `kubectl get pods -A` | **该租户的每个 namespace,逐个 scoped LIST** | ✅ 查询范围够不着别人 |
 | cluster 级资源 | **全集群** | ⚠️ 拉回全部再内存过滤(**未改**) |
-| watch | 带 ns 的已 scoped;`-A` 的 watch **仍是旧路径** | `pkg/proxy/watch.go` 逐事件过滤 |
+| watch | 带 ns 的已 scoped;**`-A` 的 watch 已改为多路复用**(`pkg/proxy/watchmux.go`) | ✅ 查询范围够不着别人 |
 
-⚠️ **只改了 LIST。** `-A` 的 **watch** 与 **cluster 级资源**仍走老路。
+⚠️ **cluster 级资源仍走老路**(全集群 + 内存过滤)—— 它没有 namespace 可扇,是另一个问题。
 
 两个后果:
 
@@ -926,7 +926,7 @@ kubelet 的 **liveness 探针会开始失败**(exec 挂住 / HTTP 超时),
 
 | # | 墙 | 触发条件 | 关联 |
 |---|---|---|---|
-| 1 | ~~**`-A` 全量 LIST 无 cache**~~ **LIST 已修**(§7.2)。⚠️ 剩 `-A` 的 **watch** 仍是全集群 | 任一租户 `kubectl get pods -A -w` 或 informer | §7.2;打在 KubeBrain 上即 #41/#43 类问题 |
+| 1 | ~~**`-A` 全量 LIST 无 cache**~~ ✅ **LIST 与 WATCH 都已改为按 namespace 扇出**(§7.2)。⚠️ 剩 **cluster 级资源**仍是全集群 | 租户列举集群级资源 | §7.2 |
 | 2 | **准入 webhook 同步开销** | 高频短任务创建 Pod,每次同步过 Kyverno | §8.5 |
 | 3 | **策略引擎的集群状态缓存** | Kyverno `context` lookup / Gatekeeper referential constraint 需 cache 全集群对象 → 全量 watch | 与 #1 同类。**能不用就不用** |
 | 4 | **上游 etcd 单一键空间** | N 租户全部对象共用一套 keyspace | 任务 #84;这是 KubeBrain 的主场,也是产品天花板 |

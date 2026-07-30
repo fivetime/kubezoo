@@ -429,6 +429,37 @@ else
 fi
 
 echo
+echo "== a cross-namespace watch is merged from the tenant's namespaces =="
+# The other half of the list. What matters is not that events arrive but that
+# none are missing: a stream that quietly stops covering a namespace leaves an
+# informer's cache wrong while it believes it is current.
+watch_log=$LAB/verify-watch.log
+timeout 60 $T get configmaps -A -w --no-headers >"$watch_log" 2>&1 &
+watch_pid=$!
+sleep 6
+$T -n fanout-a create configmap watched-existing --from-literal=a=b >/dev/null 2>&1
+# A namespace created while the watch is open has to join it. The tenant cannot
+# read it for a moment after it appears -- the RoleBinding has to reach the
+# authorizer -- so this is also a test that the join waits that out.
+$T create namespace watch-late >/dev/null 2>&1
+sleep 10
+$T -n watch-late create configmap watched-new --from-literal=a=b >/dev/null 2>&1
+sleep 12
+kill "$watch_pid" >/dev/null 2>&1
+wait "$watch_pid" 2>/dev/null
+
+if grep -q watched-existing "$watch_log"; then
+  ok "an event from an existing namespace reaches the merged stream"
+else
+  bad "merged watch" "nothing about watched-existing arrived: $(tr '\n' ' ' <"$watch_log" | cut -c1-140)"
+fi
+if grep -q watched-new "$watch_log"; then
+  ok "a namespace created during the watch joins it"
+else
+  bad "merged watch, late namespace" "nothing about watched-new arrived, so a namespace created mid-watch is invisible until the client re-lists"
+fi
+
+echo
 echo "== node pools must not overlap =="
 # The injected nodeSelector is the only thing standing between one tenant and
 # another tenant's node on the binding path -- the kubelet checks it and ignores

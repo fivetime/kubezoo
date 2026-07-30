@@ -121,10 +121,31 @@ resourceVersionMatch is forbidden when continue is provided
 守卫在 `hack/lab/verify.sh`(跨 namespace 计数 / 各 chunk-size 分页一致 / 结果里无前缀残留),
 **已验证弄坏游标会红**(三档分页全部超时失败,而不是悄悄少返回)。
 
-**第二步(后续):WATCH 多路复用。** `-A` 的 watch 同样要扇出成 N 条流,
-对客户端合成一条。它现在能**干净地从 R 起步** —— 这正是第一步给出的东西。
-informer 的契约(LIST 拿到 rv,再从该 rv WATCH)因此可以兑现。
-⭐ 这是**租户自装 operator 的必需件**:operator 的 cluster-wide informer 走的就是这条路。
+**第二步(已完成):WATCH 多路复用。** `pkg/proxy/watchmux.go`。
+`-A` 的 watch 扇成 N 条流、对客户端合成一条,每条都从客户端给的 rv(即第一步的 R)起步,
+所以 informer 的契约(LIST 拿到 rv,再从该 rv WATCH)是兑现的。
+⭐ 这是**租户自装 operator 的必需件**:cluster-wide informer 走的就是这条路。
+
+### ⚠️ watch 侧撞到的两件事
+
+**① watch 期间新建的 namespace 必须动态加入,否则是"静默漏"。**
+不加的话,租户在 watch 开着时建的 namespace 里的对象**永远不出现**,
+而 informer 会一直以为自己是最新的 —— **缓存错了却什么都不说**,是最坏的一类失败。
+所以 mux 另开一条 namespace watch,见到 `ADDED` 就给它加一条流。
+
+**② 新 namespace 的第一次 watch 必然被拒,要重试。** 实测:
+
+```
+configmaps is forbidden: User "111111-admin" cannot watch resource "configmaps"
+in the namespace "111111-wc"
+```
+
+namespace 事件比授权先到 —— RoleBinding 由控制器写(~170ms),再要到达授权器缓存(~310ms)。
+所以加入动作走独立 goroutine + 有界重试(只对 Forbidden 重试),
+重试用尽仍失败**必须记日志说清楚**:否则客户端会保有一条看着健康、却永远不提那个 namespace 的流。
+
+守卫:`verify.sh` 两条(已有 namespace 的事件到达 / watch 期间新建的 namespace 能加入),
+**已验证关掉 mux 会红**(恰好这两条,其余 28 条不受影响)。
 
 ## 5. 与其它方案的对比(为什么不选)
 

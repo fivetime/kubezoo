@@ -728,13 +728,25 @@ func (tp *tenantProxy) Watch(ctx context.Context, options *metainternalversion.L
 	if err != nil {
 		return nil, err
 	}
-	client, err := tp.getClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	w, err := client.Watch(ctx, *proxyOpt)
-	if err != nil {
-		return nil, util.TrimTenantIDFromError(err, tenantID)
+	var w watch.Interface
+	if tp.shouldFanOut(ctx) {
+		// One stream per namespace, merged. See watchmux.go -- the tenant has
+		// no cluster to watch, so its cross-namespace watch is its namespaces.
+		namespaces, _, nsErr := tp.tenantNamespaces(ctx, tenantID, "")
+		if nsErr != nil {
+			return nil, util.TrimTenantIDFromError(nsErr, tenantID)
+		}
+		if w, err = newWatchMux(ctx, tp, tenantID, *proxyOpt, namespaces); err != nil {
+			return nil, util.TrimTenantIDFromError(err, tenantID)
+		}
+	} else {
+		client, err := tp.getClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if w, err = client.Watch(ctx, *proxyOpt); err != nil {
+			return nil, util.TrimTenantIDFromError(err, tenantID)
+		}
 	}
 	return newProxyWatch(w, tp, tenantID)
 }
