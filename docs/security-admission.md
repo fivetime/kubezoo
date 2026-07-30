@@ -38,6 +38,11 @@
 
 完整推导见 `kaaas-platform-architecture-cn.md` §8.0,结论:
 
+⭐ **另一条同样重要的结构性事实(实测,审计 §S)**:租户的 **Pod 直连上游 apiserver**,
+**完全不经过 kubezoo**(kubezoo 用上游 SA 密钥签 token)。
+⇒ **写路径的强制不能放在 kubezoo**,只能放上游(VAP/MAP/RBAC)。
+kubezoo 侧拦截只约束租户本人的 `kubectl`。
+
 **准入(webhook / VAP / MAP)只见 AdmissionRequest,碰不到响应。**
 所以需要租户**看到**翻译后视图的事 —— list/get/watch 返回、discovery、OpenAPI、
 错误文案里的前缀擦除 —— 策略层**结构上做不了**。而前缀化天生双向(写时能加、读时无法去),
@@ -130,6 +135,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 | 取证快照 | 快照要能说清"哪个时间点/哪个 revision 的视图",停机机制给不了这个保证 |
 | 节点级硬冻(`cgroup freezer`) | 节点级带外操作,kubezoo 碰不到 cgroup |
 | 节点名从 `spec.nodeName` 漏给租户 | ✅ **定案接受**:落点字段全被平台替换 ⇒ 名字兑现不了;藏掉则 `-o wide`/`describe` 失真,代价确定收益为零。⚠️ 前提是替换覆盖到 `pods/binding`,而兜住它的是**每租户专属**的注入 nodeSelector(架构 §8.2.3) |
+| `Frozen` 中和租户预置的 ServiceAccount | ⛔ **实测坐实,比原先说法更严重**(审计 §T):冻结撤销的是 kubezoo 下发的 RoleBinding,租户**自建**的原样保留 ⇒ 它的 Pod 拿着 SA token **直连上游照常读写**(`GET` 200 / `CREATE` 201)。**冻的是 kubectl,不是租户。**有修法(冻结打标签 + VAP),未实现 |
 | `Frozen` 中和租户自建的 RoleBinding | 控制面冻结管不到容器里已在跑的代码;租户可预埋 dead-man switch,换 VM/kata 也堵不住。⚠️ **所以 `Frozen` 不能单独当取证冻结用** |
 
 ## 7. 核对清单

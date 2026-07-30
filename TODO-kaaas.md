@@ -351,6 +351,18 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       而兜住它的是 kubelet 核对的那个注入 nodeSelector ⇒
       **"注入标签每租户专属"是本定案的前提,不是优化项**。详见审计 §P
 
+- [ ] ⛔ **#90 `Frozen` 拦不住租户预置的 ServiceAccount(实测坐实,审计 §T)**
+      冻结撤销的是 kubezoo 下发的 RoleBinding,租户**自建**的原样保留 ⇒
+      它的 Pod 拿 SA token **直连上游照常读写**(实测 `GET` 200 / `CREATE` 201,对象真写进去)。
+      **冻的是 kubectl,不是租户** —— 比原先"管不到已在跑的代码"的说法硬得多。
+      修法(未实现、未测):冻结时给租户 namespace 打 `kubezoo.io/frozen=true`,
+      加一条 VAP 拒绝该标签下一切非平台身份的写。比"删掉租户自建 RoleBinding"合适 ——
+      冻结的设计前提是什么都不删
+
+- [x] ✅ **"让 kubezoo 拦 Kyverno 拦不住的" —— 已否决(实测,审计 §S)**
+      租户 Pod 用 SA token **直连上游,完全不经过 kubezoo**(实测 binding HTTP 201 成功)。
+      ⇒ **写路径的强制不能放在 kubezoo**,退路是 VAP/MAP 或 RBAC。判据已补进架构 §8.0
+
 - [ ] 用 `generate` + `synchronize: true` 承接 namespace 配套对象(租户删了自动重建):
       per-namespace RoleBinding(1.1)、`kubetron-network` ConfigMap(3.2)、PSA 标签、
       ResourceQuota/LimitRange

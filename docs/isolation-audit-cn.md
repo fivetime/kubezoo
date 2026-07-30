@@ -936,6 +936,101 @@ msg    = Pod was rejected: Predicate NodeAffinity failed:
 而 RBAC **没有 deny 语义**,收窄就得改成枚举 —— 会丢掉 CRD 覆盖。
 ⇒ **VAP 是更合适的形态**,RBAC 这条列为备选。
 
+## S. ⭐ kubezoo 侧的写路径拦截不成立 —— 租户 Pod 直连上游 ⛔ 实测坐实
+
+**起因**:Kyverno 拦不住 `pods/binding`(§R⑤),那"让 kubezoo 来拦"行不行?
+**答案:不行,而且原因是结构性的。**
+
+### 租户有两类客户端,只有一类经过 kubezoo
+
+| 客户端 | 路径 | kubezoo 拦得住 |
+|---|---|---|
+| 租户本人的 `kubectl` | 证书由 kubezoo CA 签,只能打 kubezoo | ✅ |
+| 租户的 **Pod**(ServiceAccount token) | 直连上游 apiserver | ⛔ **完全不经过** |
+
+kubezoo 自己的启动参数就是硬证据 —— 它**用上游的 SA 密钥签发 token**:
+
+```
+--service-account-key-file=$PKI/upstream/sa.pub
+--service-account-signing-key-file=$PKI/upstream/sa.key
+```
+
+### 实测
+
+**① 租户能给自己的 SA 授全权。** 租户在自己 namespace 是 `*` on `*`,
+按 RBAC"不能授出自己没有的权限"这条,他**满足**条件:
+
+```
+租户建 Role sa-all (*/*/*) + RoleBinding 给 default SA   → 都成功
+上游判定 system:serviceaccount:111111-default:default
+  create pods/binding → yes
+```
+
+**② Pod 里看到的 API 端点是上游,不是 kubezoo。**
+
+```
+KUBERNETES_SERVICE_HOST=10.96.0.1     # 上游 kubernetes service 的 ClusterIP
+上游 SelfSubjectReview 认出的身份 = system:serviceaccount:111111-default:default
+```
+
+**③ 从 Pod 内直连上游 POST binding —— 成功。**
+
+```
+HTTP 201
+victim: node=kz-audit3-worker2        # 绑到了另一个租户的节点
+```
+
+**kubezoo 一行代码都没被执行。**
+
+**④ 装上 VAP 后,同一条路被拒。**
+
+```
+HTTP 422
+ValidatingAdmissionPolicy 'tenant-deny-binding' denied request
+victim2: node=''
+```
+
+### ⭐ 由此补全 §8.0 判据缺的那一半
+
+判据原来只说"读路径 ⇒ kubezoo"。这次证明它缺了对称的一半:
+
+> **写路径的强制不能放在 kubezoo** —— 租户的工作负载直连上游,绕开它。
+> Kyverno 做不到的写路径约束,退路是 **VAP/MAP 或 RBAC**(都在上游),**不是 kubezoo**。
+
+⚠️ 这**不否定** kubezoo 在写路径上做的改写(前缀化等):那些保护的是**寻址**,
+而直连上游的 SA 本来就只能在自己那个已加前缀的 namespace 里活动,由上游 RBAC 兜着。
+两回事。
+
+⇒ kubezoo 侧再加一道 binding 拦截,只是给 `kubectl` 用户的**减速带**,不是边界。**不做。**
+
+## T. `Frozen` 停机拦不住租户预置的 ServiceAccount ⛔ 实测坐实(#90)
+
+#90 里我特意没标完成的那条,现在量出来了 —— 而且**比原先说的更严重**。
+
+原先的说法是"控制面冻结管不到容器里已在跑的代码"。实测发现的不是这个:
+**租户保留了一份完整可用的 API 凭据。**
+
+冻结租户 111111 之后:
+
+| | 结果 |
+|---|---|
+| 租户本人 `kubectl`(经 kubezoo) | ✅ **Forbidden** —— `tenant 111111 is suspended and is frozen` |
+| 上游 `kubezoo:tenant-admin` RoleBinding | ✅ **已撤销** |
+| 租户**自建**的 `sa-all` RoleBinding | ⛔ **原样还在** |
+| 租户 Pod 用 SA 直连上游 `GET pods` | ⛔ **HTTP 200** |
+| 租户 Pod 用 SA 直连上游 `CREATE configmap` | ⛔ **HTTP 201**,对象真的写进去了 |
+
+⇒ **`Frozen` 冻的是租户的 kubectl,不是租户。** 预置一个 Pod 不需要多聪明 ——
+它只要有个 token。⚠️ **所以 `Frozen` 更不能单独当取证冻结用**,这条比原先的表述硬得多。
+
+### 一条可行的修法(未实现、未测)
+
+冻结时给租户的每个 namespace 打一个标签(如 `kubezoo.io/frozen=true`),
+再加一条 VAP:**该标签存在时,拒绝一切非平台身份的写**。
+VAP 在上游 apiserver 进程内,**两条路都盖得住** —— 正是 §S 得出的那条判据。
+
+比起"删掉租户自建的 RoleBinding"更合适:冻结的设计前提是**什么都不删**。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
