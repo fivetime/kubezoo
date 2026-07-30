@@ -385,6 +385,14 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       kubezoo 表达不了这个维度(host 是自由 DNS 名,前缀化就毁了它的用途)。
       可选形态(均未实现):按租户分配子域并用策略校验 / 每租户独立 ingress 控制器 /
       准入层维护"主机名→租户"登记表
+- [ ] ⛔ **集群级对象在"直连上游"路径上全租户可见**(审计 §AK,已实测)
+      租户身份直连上游 LIST `ingressclasses` / `clusterroles` **返回别的租户的对象**;
+      而命名空间级的同样操作是 Forbidden。根因是**集群级资源没有 RBAC 兜底**
+      (`resourceNames` 精确匹配,表达不了前缀),kubezoo 的过滤只在**经过它**时有效。
+      面:clusterroles / clusterrolebindings / CRD / ingressclasses / namespaces /
+      nodes / PV / runtimeclasses / 两种 webhookconfiguration。
+      **不是流量劫持**(对象本体仍受 RBAC 保护),但**能枚举别的租户 ID 与装了什么**。
+      ⇒ **端点注入(§Z)从便利变成必需**:租户负载必须经 kubezoo,不能默认直连上游
 - [ ] ⭐ **`ingressClassName` 应由 kubezoo 前缀化改写,而不是策略层擦除**(审计 §AJ,已实测)
       实测:IngressClass **对象**名加前缀(`111111-internal`),而 Ingress 里的**引用**不加 ——
       ⇒ ①租户自建控制器**永远选不到自己的 Ingress**;②租户写 `nginx` 直接命中**平台公网控制器**。

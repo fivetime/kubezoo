@@ -1957,6 +1957,71 @@ webhook 只能匹配命名空间级对象,**匹配不到定义它自己的那个
 ⚠️ 仍然要平台裁决的:**主机名抢占**(§AH)不受此影响 ——
 两个租户都用平台 class 抢同一个 host,仍是先到先得。
 
+## AK. 每租户一套 ingress 控制器:名字不撞车,但**直连上游会看到别人的集群级对象**
+
+**场景**:每个租户在自己 namespace 里装一套 nginx/haproxy 控制器做内部 LB。
+`IngressClass` 是**集群级**的(实测 `namespaced=false`),所以 N 个租户的 class
+挤在同一个全局名字空间里。
+
+### ✅ 撞车问题本来就解决了
+
+两个租户装同一个 chart、class 都叫 `nginx`:
+
+```
+上游对象:  111111-nginx   controller=k8s.io/ingress-nginx
+           222222-nginx   controller=k8s.io/ingress-nginx      ← 不撞车
+经 kubezoo: 各自都只看到一个叫 nginx 的                          ← 各看各的
+```
+
+⇒ 和"两个租户装同一个 operator 的不同版本"是同一个机制(组名/对象名前缀)。
+
+### ⛔ 但控制器**直连上游**时,看得到所有租户的集群级对象
+
+```
+以租户身份直接向上游 LIST ingressclasses:
+  111111-nginx
+  222222-nginx        ← 别的租户的
+
+同样身份 LIST 别的租户的 Ingress:
+  Forbidden           ← 命名空间级的有 RBAC 兜底
+```
+
+**根因是审计里反复记过的那条**:**集群级资源没有 RBAC 兜底** ——
+`resourceNames` 是精确匹配,表达不了"名字以 `111111-` 开头"。
+kubezoo 在**读路径**按名字前缀过滤,但那只在**经过 kubezoo** 时有效。
+
+### ⚠️ 这个面比 IngressClass 大得多
+
+租户在集群级被授予 list 的资源(**直连上游都能看到全部租户的**):
+
+```
+clusterrolebindings, clusterroles, componentstatuses,
+customresourcedefinitions, ingressclasses, mutatingwebhookconfigurations,
+namespaces, nodes, persistentvolumes, runtimeclasses,
+validatingwebhookconfigurations
+```
+
+抽查确认:租户身份直连上游 LIST `clusterroles`,**返回了 2 个属于 222222 的**。
+
+### 影响面要说准,别夸大
+
+对 ingress 这个场景:
+
+- ⛔ **信息泄露成立**:能枚举出别的租户 ID、他们装了什么(class 名、CRD 组名、webhook 名)
+- ✅ **不是流量劫持**:控制器就算认领了 `222222-nginx`,那些 Ingress 在
+  `222222-*` namespace 里,它**读不到**(Forbidden)⇒ 只会报错,拿不到数据
+
+### ⇒ 端点注入从"便利"变成"必需"
+
+把租户负载指向 kubezoo(§Z 的 `KUBERNETES_SERVICE_HOST` 注入)之后,
+控制器看到的是**去前缀、只含自己**的视图 —— 实测两个租户的 `-A` 各看各的、零串扰。
+
+**所以"每租户一套 ingress 控制器"这个形态,前提是控制器必须经过 kubezoo,
+不能用默认的直连上游。** 这条要写进给租户的部署约定里。
+
+⚠️ 仍未解决的两条不受影响:`ingressClassName` 引用不前缀化(§AJ)、
+主机名先到先得(§AH)。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
