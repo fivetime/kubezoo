@@ -1500,6 +1500,57 @@ helm 照样输。⇒ **这个竞态关不掉**,代码已撤回。
 `kubectl apply -f 目录`),而且**不是 kubezoo 独有** —— 任何依赖 per-namespace
 RoleBinding 的多租户模型都撞同一堵墙。
 
+## AB. 租户可以给自己的 CRD 授权了(ClusterRole P0 的第一半)
+
+**问题**(审计 §X②):租户建不了任何 ClusterRole。RBAC 的提权防护要求
+"不能授出你没有的",而租户的权限是**逐 namespace 授的、集群级零持有** ——
+连引用它**自己刚建的 CRD** 都不行。cert-manager 一次报 21 个错。
+
+⚠️ 不能靠给 `escalate`/`bind` 解决:`rbac.go` 里有实测记录,给了之后
+租户能建 `*` on `*` 的 ClusterRole 绑给自己,**摸到别的租户的 secret 和 kube-system**。
+
+### ✅ 已修:把租户自己的 CRD 组授给它(集群级)
+
+`pkg/controller/rbac.go` 的 `ownCustomResourceRules`:租户的 ClusterRole 里,
+按它自己的 CRD 组逐条加 `apiGroups: [<tid>-<组>], resources: ["*"], verbs: ["*"]`。
+
+**为什么安全**:组名本身带租户前缀。`111111-cert-manager.io` 里**只可能有租户 111111 的对象**
+(kubezoo 在写入时给 CRD 组加前缀),所以"集群级"在这里等于"我自己的全部"。
+
+**为什么要枚举**:RBAC 没有前缀 —— apiGroup 只能是字面量或 `*`,`111111-*` 两者都不是。
+所以每轮从租户的 CRD 重新构造。
+
+### ⚠️ 顺带补上的:CRD 变化要能触发同步
+
+第一版只在租户事件上同步 ⇒ **租户建完 CRD 后,得等到下一次 resync(最坏 10 分钟)
+才能给它写 ClusterRole**,实测确认(戳一下租户才成功)。
+加了 CRD informer,按**组名前缀**推出租户并入队(平台自己的 CRD 没有前缀,不归任何人)。
+复测:**2 秒内自动生效,不用戳**。
+
+### 边界复测(都实测)
+
+| 尝试 | 结果 |
+|---|---|
+| 引用自己的 CRD 组 | ✅ created |
+| 引用 `secrets`(共享资源) | ⛔ Forbidden |
+| 引用 `pods`(核心资源) | ⛔ Forbidden |
+| 222222 引用 111111 的组(租户视角名) | ⛔ Forbidden |
+| 222222 直接写 `111111-two.example`(上游真名) | ⛔ Forbidden,**上游零残留** |
+
+守卫 `verify.sh` 三条,**已验证摘掉授权会红**(恰好那一条)。
+
+### ⛔ 还剩第二半:共享资源
+
+cert-manager 这类 operator 的 ClusterRole 还要 `events` / `secrets` 等**共享资源**的集群级权限。
+那个**不能给** —— 给了就是跨租户。
+
+正确的模型是:**租户的"集群"就是它那组 namespace** ⇒
+租户建的 ClusterRole/ClusterRoleBinding 应当被**投影**成每个租户 namespace 里的 Role/RoleBinding。
+⭐ 关键观察:**ClusterRole 对象本身不危险,不绑定就什么都不授** —— 危险的是 ClusterRoleBinding。
+所以约束点应该放在**绑定**上,而不是禁止建角色。
+
+三个待解问题(未做):读回(helm 建完会 `get` 它)、新 namespace 的补投影、更新/删除的传播。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

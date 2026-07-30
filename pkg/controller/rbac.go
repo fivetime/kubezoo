@@ -31,6 +31,10 @@ import (
 	rbacclient "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/component-helpers/auth/rbac/reconciliation"
+	"sort"
+	"strings"
+
+	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
@@ -232,8 +236,58 @@ var notGrantedToTenants = map[string][]string{
 //
 // Non-resource URLs are no longer granted at all. Discovery still works because
 // Kubernetes binds system:discovery to system:authenticated out of the box.
+// ownCustomResourceRules grants the tenant, cluster-wide, everything in the API
+// groups that are its own.
+//
+// Without this a tenant cannot create a ClusterRole mentioning its own custom
+// resources. RBAC refuses to let anyone write a role carrying permissions they
+// do not hold, and a tenant holds its rights per namespace, so the check fails
+// even for a group only it can have anything in. That is what stops an operator
+// chart from installing: measured with cert-manager, twenty-one refusals.
+//
+// Safe because the group name carries the tenant. A group called
+// 111111-cert-manager.io can only ever contain tenant 111111's objects, since
+// kubezoo prefixes a tenant's CRD groups on the way in, so cluster-wide here
+// means "all of mine" rather than "everyone's".
+//
+// Enumerated rather than matched by prefix because RBAC has no prefix: an
+// apiGroup is a literal or "*", and "111111-*" is neither. So the rules are
+// rebuilt from the tenant's CRDs on every pass, and a CRD added or removed
+// shows up on the next resync.
+func ownCustomResourceRules(tenantID string, crdClient *apiextensions.Clientset) []rbacv1.PolicyRule {
+	if crdClient == nil {
+		return nil
+	}
+	crds, err := crdClient.ApiextensionsV1().CustomResourceDefinitions().List(
+		context.TODO(), metav1.ListOptions{ResourceVersion: "0"})
+	if err != nil {
+		klog.Warningf("could not read tenant %s's CRDs, so its ClusterRoles naming its own "+
+			"custom resources will be refused until the next resync: %v", tenantID, err)
+		return nil
+	}
+	prefix := tenantID + "-"
+	seen := map[string]bool{}
+	groups := make([]string, 0, len(crds.Items))
+	for i := range crds.Items {
+		group := crds.Items[i].Spec.Group
+		if !strings.HasPrefix(group, prefix) || seen[group] {
+			continue
+		}
+		seen[group] = true
+		groups = append(groups, group)
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	sort.Strings(groups)
+	return []rbacv1.PolicyRule{
+		rbacv1helpers.NewRule("*").Groups(groups...).Resources("*").RuleOrDie(),
+	}
+}
+
 func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV1Interface, tenantID string,
-	mode tenantv1alpha1.TenantSuspensionMode) error {
+	mode tenantv1alpha1.TenantSuspensionMode,
+	crdClient *apiextensions.Clientset) error {
 	if _, err := rbacClient.ClusterRoles().List(context.TODO(), metav1.ListOptions{ResourceVersion: "0"}); err != nil {
 		klog.Warningf("Failed to list the clusterroles %s with error %v", tenantID, err)
 		return err
@@ -242,7 +296,7 @@ func syncClusterRoles(coreClient v1.CoreV1Interface, rbacClient rbacclient.RbacV
 	// A read-only suspension narrows the cluster-scoped half too. Reconciling
 	// with RemoveExtraPermissions rewrites the role in place, so lifting the
 	// suspension restores it on the next pass.
-	tenantRules := clusterScopedRules()
+	tenantRules := append(clusterScopedRules(), ownCustomResourceRules(tenantID, crdClient)...)
 	if mode == tenantv1alpha1.SuspensionReadOnly {
 		tenantRules = narrowToReadOnly(tenantRules)
 	}

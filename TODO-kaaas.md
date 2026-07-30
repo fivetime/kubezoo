@@ -142,7 +142,16 @@
 - [ ] `config/policy/tenant-api-endpoint.yaml` 里的地址是**占位符**,部署时必须换成
       kubezoo 在集群内的可达地址(Service ClusterIP / DNS 名)
 
-- [ ] ⛔ **P0 剩余:租户自装 operator 还差 ClusterRole 这一关**(审计 §X②,§Z 已解掉另外两条)
+- [x] ✅ **ClusterRole 第一半已解:租户可以给自己的 CRD 组授权**(审计 §AB)
+      `ownCustomResourceRules` 按租户自己的 CRD 组逐条加集群级授权(组名带前缀 ⇒ 只可能是它自己的);
+      RBAC 没有前缀通配所以只能枚举。顺带加了 **CRD informer**,否则建完 CRD 要等 resync
+      才能授权(实测:2 秒 vs 最坏 10 分钟)。边界五条复测全过,守卫已验证会红
+- [ ] ⛔ **P0 剩余:ClusterRole 的第二半 —— 共享资源**(审计 §AB 末)
+      operator 还要 `events`/`secrets` 的集群级权限,**不能给**。
+      正确模型:租户的"集群"= 它那组 namespace ⇒ ClusterRole/ClusterRoleBinding
+      **投影**成每 namespace 的 Role/RoleBinding。⭐ 关键:ClusterRole 不绑定就不授权,
+      **约束点在绑定,不在建角色**。三个待解:读回(helm 会 get)、新 ns 补投影、更新/删除传播
+- [ ] **P0 剩余(承接):租户自装 operator**(审计 §X②,另两条已由 §Z/§AA 解掉)
       `helm --create-namespace` 不工作 —— **根因已查明**(审计 §AA):helm 先检查资源
       再建 ns,而租户在不存在的 ns 里 `GET` 得到 **Forbidden**(上游 admin 得到 NotFound),
       helm 当致命错误中止;**根本没发出建 namespace 的请求**。

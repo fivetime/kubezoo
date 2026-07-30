@@ -375,6 +375,56 @@ PROBE
 fi
 
 echo
+echo "== a tenant can grant rights over its own custom resources =="
+# Without this a tenant cannot write a ClusterRole naming its own CRDs: RBAC
+# refuses to let anyone grant what they do not hold, and a tenant holds its
+# rights per namespace. That is what stops an operator chart installing. The
+# grant is safe because the group name carries the tenant -- 909090-something
+# can only ever hold this tenant's objects.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: rbacwidgets.rbac.example}
+spec:
+  group: rbac.example
+  names: {plural: rbacwidgets, singular: rbacwidget, kind: RbacWidget}
+  scope: Namespaced
+  versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object}}}]
+EOF
+# No nudge of the tenant here, deliberately: a CRD event has to reach the
+# controller on its own, or a tenant that has just created a CRD is refused
+# until the next resync.
+own_ok=no
+for _ in $(seq 30); do
+  if $T create clusterrole own-crd --verb=get,list,watch --resource=rbacwidgets.rbac.example >/dev/null 2>&1; then
+    own_ok=yes
+    break
+  fi
+  sleep 2
+done
+if [ "$own_ok" = yes ]; then
+  ok "a ClusterRole over the tenant's own custom resource is accepted, without touching the tenant"
+else
+  bad "own custom resource grant" "still refused after 60s -- the CRD event is not reaching the controller, or the group is not in the tenant's cluster role"
+fi
+
+expect_denied "a ClusterRole over shared resources" "attempting to grant RBAC permissions not currently held" -- \
+  $T create clusterrole shared-secrets --verb=get --resource=secrets
+
+# Naming another tenant's group by its upstream name, which is the way round
+# that would actually be worth trying.
+expect_denied "a ClusterRole over another tenant's group" "attempting to grant RBAC permissions not currently held" -- \
+  $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: someone-elses}
+rules:
+  - apiGroups: ["999999-elsewhere.example"]
+    resources: ["things"]
+    verbs: ["get"]
+EOF
+
+echo
 echo "== a cross-namespace list is assembled from the tenant's namespaces =="
 # Replaces listing every object of the kind in the cluster and discarding other
 # tenants'. Correctness rests on the pinned revision: paging has to give the same

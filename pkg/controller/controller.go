@@ -25,6 +25,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	externalinformer "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	"time"
 
 	"github.com/pkg/errors"
@@ -178,6 +181,22 @@ func Run(stopCh <-chan struct{}, ti cache.SharedIndexInformer, tenantCli tenantc
 	}
 	nsFactory.Start(stopCh)
 
+	// The tenant's cluster-scoped role lists the API groups of its own CRDs, so
+	// that it can write a ClusterRole naming its own custom resources. Those
+	// groups change when the tenant adds or removes a CRD, and waiting for the
+	// tenant resync leaves it unable to grant rights over a CRD it has just
+	// created -- measured: the create is Forbidden until the tenant is touched.
+	crdFactory := externalinformer.NewSharedInformerFactory(tc.upstreamCRDClient, namespaceResyncPeriod)
+	crdInformer := crdFactory.Apiextensions().V1().CustomResourceDefinitions().Informer()
+	if _, err := crdInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { tc.enqueueCRDOwner(obj) },
+		DeleteFunc: func(obj interface{}) { tc.enqueueCRDOwner(obj) },
+	}); err != nil {
+		utilruntime.HandleError(fmt.Errorf("adding the CRD event handler: %w", err))
+		return
+	}
+	crdFactory.Start(stopCh)
+
 	if !cache.WaitForCacheSync(stopCh, tc.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
@@ -204,6 +223,27 @@ func (tc *TenantController) enqueueNamespaceOwner(obj interface{}) {
 	// emitting updates for as long as it is stuck. Queueing those drove a
 	// permanent retry loop against a tenant that no longer exists.
 	if ns.DeletionTimestamp != nil {
+		return
+	}
+	tc.queue.Add(Event{tenantId: tenantID, eventType: Update})
+}
+
+// enqueueCRDOwner queues the tenant whose CRD this is.
+//
+// The tenant is read off the group rather than any label: kubezoo prefixes a
+// tenant's CRD groups on the way in, so 111111-cert-manager.io belongs to
+// 111111 by construction, and a CRD the platform installed has no prefix and is
+// nobody's.
+func (tc *TenantController) enqueueCRDOwner(obj interface{}) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	crd, ok := obj.(*apiextensionsv1.CustomResourceDefinition)
+	if !ok {
+		return
+	}
+	tenantID, _, found := strings.Cut(crd.Spec.Group, "-")
+	if !found || tenantID == "" {
 		return
 	}
 	tc.queue.Add(Event{tenantId: tenantID, eventType: Update})
@@ -570,7 +610,7 @@ func (tc *TenantController) syncResources(tenantId string) error {
 	if err := syncNamespaces(tc.upstreamCoreClient, tenantId); err != nil {
 		return err
 	}
-	if err := syncClusterRoles(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
+	if err := syncClusterRoles(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode, tc.upstreamCRDClient); err != nil {
 		return err
 	}
 	if err := syncClusterRoleBindings(tc.upstreamCoreClient, tc.upstreamRbacClient, tenantId, mode); err != nil {
