@@ -146,11 +146,21 @@
       `ownCustomResourceRules` 按租户自己的 CRD 组逐条加集群级授权(组名带前缀 ⇒ 只可能是它自己的);
       RBAC 没有前缀通配所以只能枚举。顺带加了 **CRD informer**,否则建完 CRD 要等 resync
       才能授权(实测:2 秒 vs 最坏 10 分钟)。边界五条复测全过,守卫已验证会红
-- [ ] ⛔ **P0 剩余:ClusterRole 的第二半 —— 共享资源**(审计 §AB 末)
-      operator 还要 `events`/`secrets` 的集群级权限,**不能给**。
-      正确模型:租户的"集群"= 它那组 namespace ⇒ ClusterRole/ClusterRoleBinding
-      **投影**成每 namespace 的 Role/RoleBinding。⭐ 关键:ClusterRole 不绑定就不授权,
-      **约束点在绑定,不在建角色**。三个待解:读回(helm 会 get)、新 ns 补投影、更新/删除传播
+- [ ] ⛔ **P0 剩余:ClusterRole 的第二半 —— 共享资源**(审计 §AC,前提已实测)
+      ⭐ 重新框定:`events`/`secrets` 都是**命名空间级**的,租户在自己 ns 里本来就全有 ——
+      失败是因为提权检查问"你在集群级持有吗",而该问"你在你所有 namespace 里持有吗"。
+      **两个前提已实测成立**:租户在自己 ns 用 RoleBinding 引用 `*on*` 的 ClusterRole ✅ 允许;
+      建 ClusterRoleBinding ⛔ 上游独立拒绝。⇒ 缺的只是**建角色对象**。
+      ⛔ **"只给 escalate 不给 bind"是完全逃逸,已实测**:租户把自己的 ClusterRole 命名为
+      `cluster-admin` → 前缀化成 `111111-cluster-admin` → **正是控制器给它建的、已集群级绑定的那个** →
+      覆盖成 `*on*` → 拿到 kube-system 与别的租户的 secret。
+      **根因是命名撞车:kubezoo 的控制对象和租户对象共用一个名字空间。**
+      ⇒ 设计:kubezoo 以自己身份代写 ClusterRole,**必须守卫保留名字**;
+      部署要求(kubezoo 上游身份需能写任意 ClusterRole)是**真实的信任扩大,要显式记录**。
+      三个待解:读回、新 ns 补投影、更新/删除传播
+- [ ] ⚠️ **命名撞车本身值得单独修**:`<tid>-cluster-admin` 等保留对象落在租户可寻址的名字空间里。
+      今天只是自伤(租户能删掉自己那个角色,控制器 4s 补回),
+      但**任何给这条路加权限的改动都会踩上它**
 - [ ] **P0 剩余(承接):租户自装 operator**(审计 §X②,另两条已由 §Z/§AA 解掉)
       `helm --create-namespace` 不工作 —— **根因已查明**(审计 §AA):helm 先检查资源
       再建 ns,而租户在不存在的 ns 里 `GET` 得到 **Forbidden**(上游 admin 得到 NotFound),

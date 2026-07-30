@@ -1551,6 +1551,78 @@ cert-manager 这类 operator 的 ClusterRole 还要 `events` / `secrets` 等**�
 
 三个待解问题(未做):读回(helm 建完会 `get` 它)、新 namespace 的补投影、更新/删除的传播。
 
+## AC. ClusterRole 第二半:两个前提成立,一条捷径是陷阱(实测)
+
+**起因**:`events` / `secrets` 都是**命名空间级**资源,租户在自己的 namespace 里
+本来就有它们的全部权限。所以第二半失败的原因不是"这些资源不该给",而是
+**提权检查问错了问题** —— 它问"你在**集群级**持有吗",而在 kubezoo 的模型里
+有意义的问题是"你在**你所有的 namespace** 里持有吗",后者答案是**是**。
+
+### ✅ 两个前提,都实测成立
+
+| | 结果 |
+|---|---|
+| 租户在自己 ns 里用 **RoleBinding** 引用一个 `*` on `*` 的 ClusterRole | ✅ **created** —— 检查是按"在该 ns 里持有什么"做的,而租户在那里就是 `*` |
+| 租户建 **ClusterRoleBinding** 把它绑成集群级 | ⛔ **Forbidden** —— 而且是**上游 RBAC 独立拦的,不依赖 kubezoo** |
+
+⇒ 所以缺的只是**建 ClusterRole 对象本身**;下游的约束**已经是对的**,
+而且第二道是独立于 kubezoo 的。
+
+### ⛔ 但"只给 escalate 不给 bind"这条捷径是**完全逃逸**
+
+看起来很诱人:`bind` 才是危险的那个动词,只给 `escalate` 应该只能建角色、绑不了。
+**实测:租户直接拿到 cluster-admin。**
+
+机制很具体:
+
+```
+租户 apply 一个叫 cluster-admin 的 ClusterRole
+  → kubezoo 前缀化成 111111-cluster-admin
+  → 而那正是控制器给它建的、已经用 ClusterRoleBinding 集群级绑定的那个角色
+  → escalate 让它可以写入自己不持有的规则
+  → 覆盖成 ['*'] ['*'] ['*']
+```
+
+上游对租户主体的判定,攻击后:
+
+```
+can-i get secrets -n kube-system      → yes
+can-i list nodes                      → yes
+can-i get secrets -n 222222-default   → yes    ← 别的租户
+can-i create clusterrolebindings      → yes
+```
+
+**根因不是 escalate 本身,是命名撞车**:kubezoo 给租户的保留对象叫 `<tid>-cluster-admin`,
+而**租户只要把自己的 ClusterRole 命名为 `cluster-admin` 就能按名字够到它**。
+⭐ **kubezoo 自己的控制对象和租户的对象活在同一个名字空间里。**
+
+### 不给 escalate 时,这条撞车还剩什么
+
+- 租户**可以删掉** `111111-cluster-admin`(它有 `delete` 动词)—— 实测删成功。
+  这是**自伤**(它自己失去集群级权限),控制器 **4 秒补回**
+- 租户可以覆盖它,但只能写入自己已持有的规则 ⇒ 只能收窄,同样是自伤
+
+⇒ 今天不是漏洞,但是**任何将来给这条路加权限的改动都会踩上它**。
+
+⚠️ 顺带核实过一件容易误报的事:攻击后 `can-i list nodes → yes`,
+收敛之后**仍然是 yes** —— 那是**设计本来就有的**(kubezoo 在读路径上藏 Node,
+上游 RBAC 仍授 list),不是攻击残留。
+
+### 第二半的设计(未实现)
+
+kubezoo 用**自己的身份**替租户写 ClusterRole(上游 RBAC 表达不了"在我所有 namespace 里持有"),
+下游靠已经验证过的两条约束兜住。
+
+**必须带的守卫**(由上面那条撞车直接推出):
+
+1. ⭐ **拒绝以特权身份写 kubezoo 自己的保留名字** —— 首先是 `<tid>-cluster-admin`。
+   否则就是上面那条逃逸,只是换了个触发方式
+2. 保留 ClusterRoleBinding 的拒绝(上游已拦,kubezoo 不要另开后门)
+3. 部署要求要写清:kubezoo 的上游身份需要能写任意 ClusterRole(`escalate` 或 cluster-admin)——
+   **这是一项真实的信任扩大**,必须显式记录而不是顺带获得
+
+**三个待解**:读回(helm 建完会 `get` 它)、新 namespace 的补投影、更新/删除传播。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
