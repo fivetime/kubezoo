@@ -179,10 +179,19 @@
       并把 crdHandler 本来就为每个 CRD 建好的类型转换器传给该 CR 的存储。
       守卫 3 条,红测红 2 条。**教训:判"不是我引入的"之前,状态必须干净重建**
 
-- [ ] ⛔ **Pod 从 downward API 拿到的是上游 namespace 名 ⇒ 经 kubezoo 被二次前缀**(§AV)
-      `POD_NAMESPACE` 是 `111111-default`,过 kubezoo 变成 `111111-111111-default`。
-      §Z 的端点注入没覆盖;**任何用 downward API 取自身 namespace 的 operator 都会撞上**。
-      可能修法:前缀化幂等(安全性封闭,但 namespace 名字会有两种写法)
+- [x] ✅ **downward API 的 namespace 二次前缀已修**(审计 §AX)
+      两半:**策略**把容器里**取值来源为 `metadata.namespace`** 的 env 改写成租户视角的名字
+      (按来源匹配不按名字匹配,覆盖 `POD_NAMESPACE`/`WATCH_NAMESPACE`/… 各家叫法);
+      **kubezoo** 把"带自己前缀的名字"视为已是上游名(`util.UpstreamNamespace`),
+      兜住策略够不到的客户端。
+      ⚠️ **两边都要**:只做后者的话对象回来仍写租户视角名字,
+      controller-runtime **按对象 namespace 建索引、按 env 那个查** ⇒ 请求通了却读不到。
+      ⚠️ 副作用:租户 namespace 名字里 `<租户ID>-` 成了保留字(否则存成双前缀后再也够不到),
+      写入口直接拒并说明原因。守卫 8 条,红测红 5 条
+- [ ] ⛔ **仍剩一条**:`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 里还是上游名
+      (kubelet 写的,策略改不动;client-go 的 in-cluster 探测读它)。
+      靠 kubezoo 请求侧兜底 ⇒ 请求能通,但对象里的 namespace 与它认为的不一致。
+      彻底解决要给每个 namespace 生成 ConfigMap 挂到那个路径
 
 - [ ] ⛔ **P0:集群级授权分发给租户的 SA**(审计 §AS,三条都实测过)
       ✅ **能且干净**:租户自己前缀的 **CR 组**(ClusterIssuer 这类)—— 真 ClusterRoleBinding 限定在

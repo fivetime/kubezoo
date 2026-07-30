@@ -206,7 +206,7 @@ func (tp *tenantProxy) getClient(ctx context.Context) (dynamic.ResourceInterface
 	}
 	client = tp.dynamicClient.Resource(gv.WithResource(tp.resource))
 	if tp.namespaceScoped && len(requestInfo.Namespace) != 0 {
-		namespace := util.AddTenantIDPrefix(tenantID, requestInfo.Namespace)
+		namespace := util.UpstreamNamespace(tenantID, requestInfo.Namespace)
 		client = tp.dynamicClient.Resource(gv.WithResource(tp.resource)).Namespace(namespace)
 	}
 	return client, nil
@@ -242,7 +242,7 @@ func (tp *tenantProxy) shapeError(ctx context.Context, err error, tenantID strin
 	if !ok || requestInfo.Namespace == "" {
 		return util.TrimTenantIDFromError(err, tenantID)
 	}
-	upstreamNamespace := util.AddTenantIDPrefix(tenantID, requestInfo.Namespace)
+	upstreamNamespace := util.UpstreamNamespace(tenantID, requestInfo.Namespace)
 	_, nsErr := tp.dynamicClient.Resource(namespaceGVR).Get(ctx, upstreamNamespace, metav1.GetOptions{})
 	if !apierrors.IsNotFound(nsErr) {
 		return util.TrimTenantIDFromError(err, tenantID)

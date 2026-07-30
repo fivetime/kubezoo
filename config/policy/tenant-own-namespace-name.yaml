@@ -1,0 +1,89 @@
+# 让租户的 Pod 看到**自己那套名字**的 namespace,而不是上游的。
+#
+# ⛔ 不加这条会怎样(审计 §AX,实测):Pod 的 namespace 是 kubelet 从**上游真实**
+# namespace 填的,也就是 `111111-default`;而 kubezoo 对外呈现的名字是 `default`。
+# operator 从 downward API 读到自己的 namespace 之后去请求:
+#
+#   GET /api/v1/namespaces/111111-default/secrets      ← 它以为这是自己的 namespace
+#
+# kubezoo 会**再前缀一次** → `111111-111111-default` → 找不到。
+# 实测 cert-manager 的 webhook 就死在这里。
+#
+# kubezoo 侧已经把**请求**那一半兜住了(带自己前缀的名字视为"已是上游名",不再重复前缀)。
+# ⚠️ 但**回来的对象仍写着租户视角的名字** `default` —— 把对象的 namespace 和自己
+# env 里那个相比较的客户端还是对不上,而 controller-runtime 的缓存正是
+# **按对象的 namespace 建索引、按 env 里那个去查**,不一致就是查不到。
+#
+# ⇒ 真正的解法是**从源头给它租户视角的名字**,这条策略做的就是这件事。
+#
+# 覆盖面:任何**取值来源是 `metadata.namespace`** 的容器环境变量,不管它叫什么
+# (`POD_NAMESPACE` / `WATCH_NAMESPACE` / `NAMESPACE` …)—— **按来源匹配,不按名字匹配**。
+#
+# ⚠️ 没覆盖到:`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 那个投影文件
+# (client-go 的 in-cluster namespace 探测读它)。它由 kubelet 写,策略改不动。
+# 读那个文件的客户端仍拿到上游名字,靠 kubezoo 请求侧兜底 —— 请求能通,
+# 但对象里的 namespace 与它认为的不一致。彻底解决要给每个 namespace 生成一个
+# ConfigMap 挂到那个路径上,**未做**。
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tenant-own-namespace-name
+  annotations:
+    policies.kyverno.io/title: 租户 Pod 看到自己那套 namespace 名字
+spec:
+  background: false
+  rules:
+    - name: rewrite-downward-api-namespace
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE]
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubezoo.io/tenant
+                    operator: Exists
+      context:
+        # 租户视角的名字。必须在**规则**这一层算 —— foreach 的文档是 `element`,
+        # 那里根本没有 `request`。用正则去掉第一个 `-` 之前的租户 ID,
+        # 而不是按长度截断:namespace 名字里本来就可能有 `-`。
+        - name: tenantNamespace
+          variable:
+            jmesPath: "regex_replace_all('^[^-]+-', request.namespace, '')"
+      # 没有这样的变量就什么都不改 —— 否则每个 Pod 都会被加上它没要的 env。
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.containers[].env[].valueFrom.fieldRef.fieldPath || '' }}"
+            operator: AnyIn
+            value: ["metadata.namespace"]
+      mutate:
+        foreach:
+          - list: "request.object.spec.containers"
+            preconditions:
+              all:
+                - key: "{{ element.env[].valueFrom.fieldRef.fieldPath || '' }}"
+                  operator: AnyIn
+                  value: ["metadata.namespace"]
+            # 整个新 env 数组在 **context 变量**里算好,再整体替换进去。
+            #
+            # ⚠️ 这里踩了两次,都值得记:
+            # ① 先算 `tenantNamespace` 再在下面的表达式里引用 —— **不行**。
+            #    JMESPath 里的裸标识符查的是**当前文档的字段**,引用不到 Kyverno 变量,
+            #    结果是**静默替换成空字符串**(Pod 起来了,env 是空的)。
+            # ② 改成把 `request.namespace` 直接写进 foreach 的表达式里 —— **也不行**,
+            #    foreach 的文档是 `element`,那里没有 `request`,于是 nil。
+            # ⇒ 名字在**规则**这一层算好,再作为 `'{{ }}'` **文本替换**进这个表达式:
+            #   替换发生在 JMESPath 求值**之前**,所以它是个字符串字面量,不是标识符。
+            context:
+              - name: rewrittenEnv
+                variable:
+                  jmesPath: >-
+                    element.env[].merge(@, @.valueFrom.fieldRef.fieldPath == 'metadata.namespace'
+                      && {value: '{{ tenantNamespace }}', valueFrom: `null`}
+                      || `{}`)
+            # JSON6902 而不是 strategic merge:同名 env 合并会同时留下 value 和
+            # valueFrom,那是非法的;而把 valueFrom 置 null 会被 Kyverno 剪掉。
+            patchesJson6902: |-
+              - path: /spec/containers/{{ elementIndex }}/env
+                op: replace
+                value: {{ rewrittenEnv }}

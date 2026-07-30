@@ -801,6 +801,88 @@ expect_allowed "writes work again once it is gone" \
 $K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
 
 echo
+echo "== a workload addresses its own namespace by the name it was given =="
+# A pod learns its namespace from kubelet, which knows the upstream name. Kubezoo
+# presents the tenant's name. So an operator reading its own namespace from the
+# downward API asked for 111111-default, kubezoo prefixed it again, and every
+# request into its own namespace was NotFound -- measured with cert-manager's
+# webhook. Two halves: the policy hands pods the tenant's name, and kubezoo
+# accepts the upstream one for the clients the policy cannot reach.
+$T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: ns-probe}
+spec:
+  securityContext: {runAsNonRoot: true, runAsUser: 1000, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: busybox
+      command: ["sleep", "3600"]
+      env:
+        - name: POD_NAMESPACE
+          valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+        - name: WATCH_NAMESPACE
+          valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        - name: PLAIN
+          value: untouched
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+EOF
+probe_env() {
+  $K -n "$NS" get pod ns-probe -o jsonpath="{.spec.containers[0].env[?(@.name=='$1')].value}" 2>/dev/null
+}
+if [ -n "$($K -n "$NS" get pod ns-probe -o name 2>/dev/null)" ]; then
+  if [ "$(probe_env POD_NAMESPACE)" = default ]; then
+    ok "a pod is told the tenant's name for its namespace, not the upstream one"
+  else
+    bad "a pod is told the tenant's name for its namespace" \
+        "it says '$(probe_env POD_NAMESPACE)', so every request it makes into its own namespace is prefixed twice"
+  fi
+  # Matched by where the value comes from, not by what it is called: an operator
+  # may call it anything.
+  if [ "$(probe_env WATCH_NAMESPACE)" = default ]; then
+    ok "and so is any other variable taking its value from metadata.namespace"
+  else
+    bad "any other variable taking its value from metadata.namespace" \
+        "WATCH_NAMESPACE says '$(probe_env WATCH_NAMESPACE)'"
+  fi
+  # Everything else has to survive: this rewrites one container's whole env list.
+  node_from=$($K -n "$NS" get pod ns-probe \
+    -o jsonpath="{.spec.containers[0].env[?(@.name=='NODE_NAME')].valueFrom.fieldRef.fieldPath}" 2>/dev/null)
+  if [ "$node_from" = spec.nodeName ] && [ "$(probe_env PLAIN)" = untouched ]; then
+    ok "while the container's other variables are left exactly as they were"
+  else
+    bad "the container's other variables are left as they were" \
+        "NODE_NAME reads from '$node_from', PLAIN='$(probe_env PLAIN)'"
+  fi
+fi
+
+# The other half, for the clients the policy cannot reach -- client-go reads the
+# namespace out of the projected service account files, which kubelet writes.
+expect_allowed "a request naming the upstream namespace reaches the same namespace" \
+  $T -n "$NS" get configmaps
+if [ "$($T -n "$NS" get configmaps --no-headers 2>/dev/null | wc -l)" = \
+     "$($T -n default get configmaps --no-headers 2>/dev/null | wc -l)" ]; then
+  ok "and reaches the same objects as the tenant's own name for it"
+else
+  bad "the two names reach the same objects" \
+      "upstream name gave $($T -n "$NS" get configmaps --no-headers 2>/dev/null | wc -l), tenant name gave $($T -n default get configmaps --no-headers 2>/dev/null | wc -l)"
+fi
+other_ns=$($T -n 999999-default get configmaps 2>&1)
+if [ $? -ne 0 ]; then
+  ok "while another tenant's namespace is still out of reach by either name"
+else
+  bad "another tenant's namespace is out of reach by either name" "it was listed: $(tr '\n' ' ' <<<"$other_ns" | cut -c1-120)"
+fi
+# The tenant's own prefix is reserved, or a namespace called <tid>-foo would be
+# stored as <tid>-<tid>-foo and then be unreachable by either name.
+expect_denied "a namespace whose name begins with the tenant's own prefix" "could not be reached" -- \
+  $T create namespace "$TID-trap"
+expect_allowed "while an ordinary namespace name is unaffected" \
+  $T create namespace ns-probe-ok
+
+echo
 echo "== server-side apply works, which is how modern controllers write =="
 # Every apply was refused before this: Get answers a missing object with a nil
 # alongside NotFound, and the nil reached runtime.SetZeroValue, which returns

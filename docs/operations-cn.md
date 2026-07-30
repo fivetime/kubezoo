@@ -80,6 +80,7 @@ hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的�
 | `tenant-deny-binding.yaml` | **原生 VAP** | 租户可把 Pod 直接绑到别的租户节点 |
 | `tenant-frozen-deny-writes.yaml` | **原生 VAP** | **冻结只冻住租户的 kubectl**,它的 Pod 照常读写 |
 | `tenant-ingress-hostnames.yaml` | **原生 VAP** | 任何租户可抢任何主机名,**先到先得、落败方零报错** |
+| `tenant-own-namespace-name.yaml` | Kyverno | Pod 从 downward API 拿到**上游** namespace 名 ⇒ 经 kubezoo 二次前缀,**operator 读自己的 namespace 全部 NotFound** |
 | `tenant-api-endpoint.yaml` | Kyverno | 租户负载直连上游 ⇒ 冻结绕过、binding 绕过、operator 看不见自己的 CRD 组 |
 
 ### 1.1 ⚠️ 装完必须做一次存量修正

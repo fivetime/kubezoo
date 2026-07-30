@@ -2706,6 +2706,84 @@ CR apply 建对象 / 改字段 / 幂等再来一次      → 三次全过
 ⚠️ 守卫的固件也踩了一次:CRD 的结构化 schema 不声明 `spec` 就会拒绝所有字段 ——
 那是固件问题,不是被测行为。
 
+## AX. ✅ 工作负载按"发给它的那个名字"寻址自己的 namespace
+
+§AV 记的第三条:Pod 的 namespace 由 kubelet 按**上游真实**名字填(`111111-default`),
+而 kubezoo 对外呈现的是 `default`。于是 operator 从 downward API 读到自己的 namespace 再去请求:
+
+```
+GET /api/v1/namespaces/111111-default/secrets
+      → kubezoo 再前缀一次 → 111111-111111-default → 找不到
+```
+
+**任何用 downward API 取自身 namespace 的 operator 都会撞上**,这在生态里非常普遍。
+实测 cert-manager 的 webhook 死在这里。
+
+### 两半各修一边
+
+**① 策略层:从源头给它租户视角的名字**(`config/policy/tenant-own-namespace-name.yaml`)
+
+把容器里**取值来源是 `metadata.namespace`** 的环境变量,值改写成租户视角的名字。
+⭐ **按来源匹配,不按名字匹配** —— `POD_NAMESPACE` / `WATCH_NAMESPACE` / `NAMESPACE`
+各家 operator 叫法不同,盯 `fieldRef.fieldPath` 才全。
+
+**② kubezoo 侧:带自己前缀的名字视为"已是上游名"**(`util.UpstreamNamespace`)
+
+策略够不到的客户端仍会送上游名字上来(见下),这条兜住它们。
+
+### ⚠️ 为什么两边都要,不能只做一边
+
+只做 ②(幂等前缀)看着就够了 —— **不够**:**回来的对象仍写着租户视角的名字** `default`。
+controller-runtime 的缓存**按对象的 namespace 建索引、按 env 里那个去查**,
+两边不一致就是查不到 —— 请求通了,却什么都读不到,比报错更难查。
+所以必须有 ① 把源头统一掉。
+
+只做 ① 也不够:`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 那个投影文件
+由 **kubelet 写**,策略改不动,而 client-go 的 in-cluster 探测读的正是它。② 兜的就是这批。
+
+### ⚠️ 随之而来:租户的 namespace 名字里,自己的前缀成了保留字
+
+② 把"带 `<租户ID>-` 前缀"解释成"已经是上游名"。那么租户若把 namespace 取名
+`111111-trap`,会被存成 `111111-111111-trap`,**之后两种名字都够不到它**。
+⇒ `NamespaceNameForTenant` 在写入口直接拒,并说清原因。**拒绝比存进去再也找不到好。**
+
+### 安全性:没有放宽任何东西
+
+`111111-default` 和 `default` 是**同一个 namespace**,而租户前缀是保留的
+⇒ 这条路径够不到任何不属于该租户的 namespace。实测:租户用 `-n 222222-default`
+请求仍然 Forbidden(会被前缀成 `111111-222222-default`,不存在)。
+
+### 实测
+
+| | |
+|---|---|
+| `POD_NAMESPACE` / `WATCH_NAMESPACE` | ✅ 都是 `default`(租户视角) |
+| 同容器里 `spec.nodeName` 的变量、普通 `value` 变量 | ✅ 原样不动 |
+| 用上游名字 `-n 111111-default` 请求 | ✅ 与 `-n default` 返回**同一批对象** |
+| `-n 999999-default` | ⛔ 仍然够不到 |
+| 建 namespace `111111-trap` | ⛔ 拒绝并说明原因 |
+
+守卫 8 条,**红测恰好红 5 条**(两个 env / 上游名不通 / 两名字结果不一致 / 保留名可建)。
+
+### ⚠️ Kyverno 的变量作用域,连踩两次(值得记)
+
+```
+① 先算 tenantNamespace,再在 foreach 表达式里裸写它    → 静默变成空字符串
+   JMESPath 里的裸标识符查的是**当前文档的字段**,引用不到 Kyverno 变量
+② 改成把 request.namespace 直接写进 foreach 表达式    → nil
+   foreach 的文档是 element,那里没有 request
+⇒ 正解:在**规则**层算好,再作为 '{{ }}' **文本替换**进表达式
+   —— 替换发生在 JMESPath 求值**之前**,所以它是字符串字面量,不是标识符
+```
+
+⭐ ① 那次最危险:**Pod 正常启动,env 是空的**,没有任何报错。
+
+### ⛔ 还剩一条没做
+
+`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 里仍是上游名字。
+读它的客户端靠 ② 兜底 —— **请求能通**,但对象里的 namespace 与它认为的不一致。
+彻底解决要给每个 namespace 生成一个 ConfigMap 并挂到那个路径上。**未做。**
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

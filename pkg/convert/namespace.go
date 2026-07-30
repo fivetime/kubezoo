@@ -21,6 +21,7 @@ import (
 	internal "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 type NamespaceTransformer struct {
@@ -36,6 +37,15 @@ func (t *NamespaceTransformer) Forward(obj runtime.Object, tenantID string) (run
 	ns, ok := obj.(*internal.Namespace)
 	if !ok {
 		return nil, errors.Errorf("fail to assert the runtime object to the internal version of namesapce")
+	}
+	// The default convertor has already put the tenant's prefix on the name, so
+	// trimming one gets back to what the tenant asked for. A tenant-chosen name
+	// that itself begins with the prefix is refused: an in-cluster workload
+	// addresses its namespace by the upstream name, kubezoo reads a name
+	// carrying the prefix as one already resolved, and a namespace stored under
+	// the doubled prefix could never be reached again.
+	if err := util.NamespaceNameForTenant(tenantID, util.TrimTenantIDPrefix(tenantID, ns.Name)); err != nil {
+		return nil, err
 	}
 	if ns.Labels == nil {
 		ns.Labels = map[string]string{}

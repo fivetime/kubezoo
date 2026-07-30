@@ -48,7 +48,7 @@ func (c *DefaultConvertor) ConvertTenantObjectToUpstreamObject(obj runtime.Objec
 		return err
 	}
 	if isNamespaceScoped && accessor.GetNamespace() != "" {
-		prefixed := util.AddTenantIDPrefix(tenantID, accessor.GetNamespace())
+		prefixed := util.UpstreamNamespace(tenantID, accessor.GetNamespace())
 		accessor.SetNamespace(prefixed)
 	} else if !isNamespaceScoped && accessor.GetName() != "" {
 		prefixed := util.AddTenantIDPrefix(tenantID, accessor.GetName())

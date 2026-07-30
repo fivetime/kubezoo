@@ -53,6 +53,50 @@ func AddTenantIDPrefix(tenantID, input string) string {
 	return tenantID + TenantIDSeparator + input
 }
 
+// UpstreamNamespace is the namespace a tenant's request is really addressing.
+//
+// Normally the tenant's view of a namespace is the upstream name without the
+// prefix, and this puts it back. The exception is a request that already carries
+// the prefix, which is what an in-cluster workload sends: a pod learns its own
+// namespace from the environment kubelet gave it, and that is the upstream name.
+// Prefixing it again produced <tid>-<tid>-default, and every operator that
+// addresses its own namespace -- which is most of them -- got NotFound.
+// Measured with cert-manager's webhook.
+//
+// The two spellings are the same namespace, and the tenant's prefix is reserved
+// in the names a tenant may choose (see NamespaceNameForTenant), so there is no
+// namespace this could reach that the tenant does not own.
+//
+// ⚠️ What this does not fix is the spelling of the answer: objects come back
+// saying the tenant's name for the namespace, so a client that compares an
+// object's namespace against the one it read from its environment still sees a
+// mismatch. The policy layer removes that by handing pods the tenant's name in
+// the first place; this is what keeps the ones it cannot reach working.
+func UpstreamNamespace(tenantID, namespace string) string {
+	if namespace == "" {
+		return namespace
+	}
+	if strings.HasPrefix(namespace, tenantID+TenantIDSeparator) {
+		return namespace
+	}
+	return AddTenantIDPrefix(tenantID, namespace)
+}
+
+// NamespaceNameForTenant reports whether a tenant may call a namespace this.
+//
+// The tenant's own prefix is reserved, because UpstreamNamespace reads a name
+// carrying it as one already resolved. Without this a namespace a tenant called
+// <tid>-foo would be stored as <tid>-<tid>-foo and then be unreachable, which is
+// worse than being refused.
+func NamespaceNameForTenant(tenantID, name string) error {
+	if !strings.HasPrefix(name, tenantID+TenantIDSeparator) {
+		return nil
+	}
+	return fmt.Errorf("a namespace may not be called %q: names beginning with %q are how your "+
+		"workloads address these namespaces from inside the cluster, and one stored under that "+
+		"name could not be reached", name, tenantID+TenantIDSeparator)
+}
+
 // TrimTenantIDPrefix removes tenantId prefix.
 func TrimTenantIDPrefix(tenantID, input string) string {
 	return strings.TrimPrefix(input, tenantID+TenantIDSeparator)
