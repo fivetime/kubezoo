@@ -372,15 +372,21 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 		return nil, false, fmt.Errorf("missing requestInfo")
 	}
 	if requestInfo.Verb == "patch" {
-		return tp.guaranteedUpdate(ctx, name, objInfo, options)
+		return tp.guaranteedUpdate(ctx, name, objInfo, forceAllowCreate, options)
 	}
 
 	original, err := tp.Get(ctx, name, &metav1.GetOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return nil, false, err
 	}
-	if errors.IsNotFound(err) && !forceAllowCreate {
-		return nil, false, err
+	if errors.IsNotFound(err) {
+		if !forceAllowCreate {
+			return nil, false, err
+		}
+		// Get returns nil alongside NotFound, and the transformer is entitled to
+		// a real object. The generic registry hands it a zero value of the right
+		// type here; so does this.
+		original = tp.New()
 	}
 
 	obj, err := objInfo.UpdatedObject(ctx, original)
@@ -889,18 +895,36 @@ func (tp *tenantProxy) convertUpstreamObjectToTenantObject(obj runtime.Object, t
 }
 
 // guaranteedUpdate ensures a guaranteed updating.
+// guaranteedUpdate serves a patch, retrying if another writer got in first.
+//
+// A patch may have to create the object. An apply always may -- server-side
+// apply is a patch, and applying something for the first time is how it is
+// normally used -- and that path was broken for every resource: Get answers a
+// missing object with a nil and a NotFound, and the nil went to
+// runtime.SetZeroValue, which returned "expected pointer, but got invalid kind".
+// Measured with `kubectl apply --server-side` on a plain ConfigMap, which the
+// same request straight to the API server accepts. It matters well beyond
+// kubectl, because controller-runtime applies objects server-side as a matter of
+// course: cert-manager's controller writes certificate secrets that way and its
+// webhook signs its own CA that way, and both sat there retrying forever.
 func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
-	objInfo rest.UpdatedObjectInfo, options *metav1.UpdateOptions,
+	objInfo rest.UpdatedObjectInfo, forceAllowCreate bool, options *metav1.UpdateOptions,
 ) (runtime.Object, bool, error) {
 	for {
 		original, err := tp.Get(ctx, name, &metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return nil, false, err
 		}
-		if errors.IsNotFound(err) {
-			if err := runtime.SetZeroValue(original); err != nil {
+		missing := errors.IsNotFound(err)
+		if missing {
+			if !forceAllowCreate {
+				// An ordinary patch of something that is not there is a
+				// NotFound, and saying so is the whole answer.
 				return nil, false, err
 			}
+			// What the generic registry passes the transformer when the key is
+			// empty: a zero value of the right type, never a nil.
+			original = tp.New()
 		}
 
 		if err := checkPreconditions(objInfo.Preconditions(), original); err != nil {
@@ -909,6 +933,25 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		updated, err := objInfo.UpdatedObject(ctx, original)
 		if err != nil {
 			return nil, false, err
+		}
+
+		if missing {
+			// Create, not update. Most resources refuse to be created by a PUT
+			// -- AllowCreateOnUpdate is false for almost everything -- so
+			// sending this as an update would come back NotFound after the
+			// patch had already been resolved.
+			created, err := tp.Create(ctx, updated, nil, &metav1.CreateOptions{
+				DryRun: options.DryRun, FieldManager: options.FieldManager,
+			})
+			if errors.IsAlreadyExists(err) {
+				// Someone created it while we were deciding. Go round again and
+				// treat it as the update it now is.
+				continue
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			return created, true, nil
 		}
 
 		got, created, err := tp.update(ctx, updated, options)

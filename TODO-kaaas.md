@@ -153,11 +153,23 @@
       三条绑定路径全堵(自己 ns 的 RoleBinding 允许且只在该 ns 生效 / ClusterRoleBinding 照拒 /
       先自授 bind 再试仍拒 —— RoleBinding 授不了集群级资源)。
       `refuseReservedName` 覆盖 **apply + patch 两条**写入口。守卫红测恰好红 8 条
-- [ ] ⛔⛔ **P0(最高):Server-Side Apply 经 kubezoo 整个是坏的**(审计 §AT,最小复现)
-      `kubectl apply --server-side` 一个**普通 ConfigMap** 就失败:`expected pointer, but got invalid kind`;
-      同样请求直连上游正常。**与租户、资源类型无关,是纯功能缺口**。
-      ⚠️ 挡住绝大多数现代 operator(controller-runtime 普遍用 SSA);
-      cert-manager 的 controller 写证书 Secret、webhook 自签 CA 都卡在这
+- [x] ✅ **Server-Side Apply 的"整个坏掉"已修**(审计 §AU)
+      根因一行:对象不存在时 `Get` 返回 nil,却被喂给 `runtime.SetZeroValue` ⇒
+      `EnforcePtr(nil)` = `expected pointer, but got invalid kind`。
+      **任何 patch 打不存在的对象都会炸,而 apply 就是 patch。**
+      修法照上游 registry:传 `tp.New()` 零值对象;`forceAllowCreate` 传进这条路
+      (普通 patch 打空对象仍返回 NotFound);对象不在时走 **Create 而非 Update**
+      (多数资源 `AllowCreateOnUpdate=false`)。守卫 5 条,红测恰好红 4 条
+- [ ] ⚠️ **SSA 还差一半:managedFields 记成 `Update` 而不是 `Apply`**(§AU 后半)
+      kubezoo 在本地解析完 apply 再用 PUT/POST 发上游 ⇒ **第二次 apply 自己跟自己冲突**,
+      不带 `--force-conflicts` 不收敛。而"重复 apply 收敛"正是 SSA 的全部意义。
+      正解:把 apply 当 apply 转发(`application/apply-patch+yaml` + 原 fieldManager + force)。
+      ⚠️ 难点:REST 存储层拿到的已是解析后的 `UpdatedObjectInfo`,**原始 patch 体没了**
+- [ ] ⛔ **Pod 从 downward API 拿到的是上游 namespace 名 ⇒ 经 kubezoo 被二次前缀**(§AV)
+      `POD_NAMESPACE` 是 `111111-default`,过 kubezoo 变成 `111111-111111-default`。
+      §Z 的端点注入没覆盖;**任何用 downward API 取自身 namespace 的 operator 都会撞上**。
+      可能修法:前缀化幂等(安全性封闭,但 namespace 名字会有两种写法)
+
 - [ ] ⛔ **P0:集群级授权分发给租户的 SA**(审计 §AS,三条都实测过)
       ✅ **能且干净**:租户自己前缀的 **CR 组**(ClusterIssuer 这类)—— 真 ClusterRoleBinding 限定在
       `111111-cert-manager.io` 上即可,**组名带租户 ⇒ 结构封闭、零信任扩大**(实测别人的组 = no)。

@@ -2547,6 +2547,74 @@ cert-manager 的 webhook 自签 CA、controller 写证书 Secret 走的都是这
 3. ⛔ 集群级授权分发给 SA(§AS:CR 组那半干净,原生 list/watch 需路径绑定组)
 4. ⛔ **Server-Side Apply**(§AT)—— **优先级最高,因为它跟多租户无关,是纯粹的功能缺口**
 
+## AU. Server-Side Apply ✅ 已修(创建那条),⚠️ 还差"apply 记成 apply"
+
+§AT 的最小复现:`kubectl apply --server-side` 一个**普通 ConfigMap** 就报
+`expected pointer, but got invalid kind`。
+
+### 根因:一行
+
+```go
+original, err := tp.Get(ctx, name, &metav1.GetOptions{})   // 不存在 → original 是 nil
+if errors.IsNotFound(err) {
+    if err := runtime.SetZeroValue(original); err != nil { // ← EnforcePtr(nil)
+```
+
+`conversion.EnforcePtr(nil)` 返回的就是那句 `expected pointer, but got invalid kind`。
+⇒ **任何 patch 打到一个不存在的对象上都会炸**,而 **apply 就是 patch**,
+且"第一次 apply"正是它最常见的用法 ⇒ **SSA 全线不可用**。
+
+### 修法:照上游 registry 的做法
+
+- 对象不在 ⇒ 传给 transformer 的是 **`tp.New()` 的零值对象**,不是 nil
+  (上游 `genericregistry.Store.Update` 传的就是 `e.NewFunc()`)
+- **不允许创建的 patch 仍然返回 NotFound** —— `forceAllowCreate` 之前根本没传进这条路,
+  普通 `kubectl patch` 打空对象会走进创建逻辑
+- ⭐ 对象不在时走 **Create 而不是 Update**:绝大多数资源 `AllowCreateOnUpdate=false`,
+  patch 解析完再用 PUT 发上去会得到 NotFound
+
+守卫 5 条(新建 / 内容正确 / 覆盖已有 / 第二次可见 / 普通 patch 仍 NotFound),
+**红测:摘掉修复恰好红 4 条**,而"普通 patch 仍 NotFound"那条对照保持绿。
+
+### ⚠️ 还没做完:managedFields 记的是 `Update`,不是 `Apply`
+
+kubezoo 是**在本地把 apply 解析完**,再用 PUT/POST 发上游 ⇒ 上游按"更新"记账:
+
+```
+kubectl apply --server-side  →  managedFields: kubectl / Update      ← 应该是 Apply
+第二次 apply                  →  conflict with "kubectl" using v1: .data.a
+                                 (自己跟自己冲突)
+```
+
+⇒ **重复 apply 不收敛**,除非带 `--force-conflicts`。而"重复 apply 收敛"正是 SSA 的全部意义,
+控制器每个 reconcile 循环都要 apply 一次。
+
+**正确做法是把 apply 当 apply 转发**(上游发 `application/apply-patch+yaml`,
+带上原本的 fieldManager 与 force),而不是在 kubezoo 里终结它。
+⚠️ 难点:REST 存储拿到的是已经解析过的 `UpdatedObjectInfo`,**原始 patch 体在那一层已经没有了** ——
+要么在 HTTP 过滤器层拦 apply 请求、改写 body 后整体转发,要么让存储层能拿到原始 patch。**未做。**
+
+## AV. cert-manager 端到端的剩余障碍(实测记录)
+
+修完 SSA 之后再跑一遍,cert-manager **仍然没起来**,但卡的地方又变了 —— 记下来免得重复排查:
+
+1. ⛔ **集群级授权还没分发给 SA**(§AS)—— 手工补上之后 cainjector/controller 能起
+2. ⛔ **SSA 的 `Apply` 记账**(§AU 后半)—— 控制器每轮 apply 都会冲突
+3. ⛔ **Pod 从 downward API 拿到的是上游 namespace 名**:
+   ```
+   webhook 请求:/api/v1/namespaces/111111-default/secrets?fieldSelector=...
+   ```
+   `POD_NAMESPACE` / SA 投影里的 namespace 是**上游名字** `111111-default`,
+   经 kubezoo 会**再前缀一次** ⇒ `111111-111111-default`。
+   §Z 的端点注入没覆盖这条,**任何用 downward API 取自身 namespace 的 operator 都会撞上**(很常见)。
+   可能的修法:前缀化做成幂等(租户自己的前缀不重复加)—— 安全性上是封闭的
+   (`222222-x` 仍会变成 `111111-222222-x`),但会让 namespace 名字出现两种写法。**未做。**
+
+⚠️ 另记一条**实验室**教训(不是产品问题):为了让 Pod 能校验 kubezoo 的服务证书,
+给它换了一张上游 CA 签的证书 —— 结果 **kubezoo 自己的租户控制器连不上自己**
+(它用的是 kubezoo 自己的 CA),最后整个停止监听。
+⇒ 真部署里 kubezoo 的服务证书与它自身客户端的信任根**必须一起换**。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

@@ -801,6 +801,47 @@ expect_allowed "writes work again once it is gone" \
 $K -n kube-public delete configmap webhook-unaffected >/dev/null 2>&1
 
 echo
+echo "== server-side apply works, which is how modern controllers write =="
+# Every apply was refused before this: Get answers a missing object with a nil
+# alongside NotFound, and the nil reached runtime.SetZeroValue, which returns
+# "expected pointer, but got invalid kind". It is not a tenancy problem -- a
+# plain ConfigMap was enough to reproduce it -- and it matters because
+# controller-runtime applies objects server-side as a matter of course.
+expect_allowed "applying an object that does not exist yet, which is the usual way to apply" \
+  $T -n default apply --server-side -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ssa-probe}
+data: {a: "1"}
+EOF
+if [ "$($T -n default get configmap ssa-probe -o jsonpath='{.data.a}' 2>/dev/null)" = 1 ]; then
+  ok "and the object it wrote is the object that was asked for"
+else
+  bad "the object it wrote is the object that was asked for" \
+      "got '$($T -n default get configmap ssa-probe -o jsonpath='{.data}' 2>&1 | cut -c1-80)'"
+fi
+expect_allowed "applying over an object that does exist" \
+  $T -n default apply --server-side --force-conflicts -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ssa-probe}
+data: {a: "1", b: "2"}
+EOF
+if [ "$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>/dev/null)" = 2 ]; then
+  ok "and the second apply is visible in the object"
+else
+  bad "the second apply is visible in the object" "b is '$($T -n default get configmap ssa-probe -o jsonpath='{.data.b}' 2>&1)'"
+fi
+# A patch that may not create must still refuse to, or a typo would silently
+# become a new object.
+patch_out=$($T -n default patch configmap ssa-absent --type=merge -p '{"data":{"x":"1"}}' 2>&1)
+if grep -q "NotFound\|not found" <<<"$patch_out"; then
+  ok "while an ordinary patch of something absent is still NotFound, not a create"
+else
+  bad "an ordinary patch of something absent is still NotFound" "got: $(tr '\n' ' ' <<<"$patch_out" | cut -c1-120)"
+fi
+
+echo
 echo "== a tenant can write the ClusterRoles an operator chart ships, and no more =="
 # A tenant holds its namespaced permissions per namespace, so RBAC's escalation
 # check -- asked at cluster scope -- refuses every ClusterRole a chart ships,
