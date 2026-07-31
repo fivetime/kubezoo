@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,12 +30,10 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	master "k8s.io/kubernetes/pkg/controlplane/apiserver"
-
-	"github.com/kubewharf/kubezoo/pkg/common"
 )
 
 type RESTStorageProvider struct {
-	apiGroupConfig common.APIGroupConfig
+	apiGroupConfig apiconfig.APIGroupConfig
 }
 
 // NewRESTStorage returns a rest storage.
@@ -93,7 +92,7 @@ func removeFieldLabelConversionFunc(scheme *runtime.Scheme, kind schema.GroupVer
 }
 
 // NewStoragesForGV returns a rest storage for group version.
-func NewStoragesForGV(cfgs map[string]*common.StorageConfig) (
+func NewStoragesForGV(cfgs map[string]*apiconfig.StorageConfig) (
 	map[string]rest.Storage, error) {
 	storage := map[string]rest.Storage{}
 	for resource, config := range cfgs {
@@ -112,7 +111,7 @@ func (r RESTStorageProvider) GroupName() string {
 }
 
 // NewRESTStorageProviders returns providers of rest storage.
-func NewRESTStorageProviders(apiGroupConfigs ...common.APIGroupConfig) ([]master.RESTStorageProvider, error) {
+func NewRESTStorageProviders(apiGroupConfigs ...apiconfig.APIGroupConfig) ([]master.RESTStorageProvider, error) {
 	providers := make([]master.RESTStorageProvider, 0, len(apiGroupConfigs))
 	for _, config := range apiGroupConfigs {
 		providers = append(providers, RESTStorageProvider{config})

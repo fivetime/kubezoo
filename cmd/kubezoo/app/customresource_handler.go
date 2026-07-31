@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"net/http"
 	"sort"
 	"strings"
@@ -84,9 +85,8 @@ import (
 	"k8s.io/kube-openapi/pkg/spec3"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // crdHandler serves the `/apis` endpoint.
@@ -360,7 +360,7 @@ func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, req
 	requestScope := crdInfo.requestScopes[requestInfo.APIVersion]
 	storage := crdInfo.storages[requestInfo.APIVersion].CustomResource
 
-	config := &common.StorageConfig{
+	config := &apiconfig.StorageConfig{
 		Kind:             requestScope.Kind,
 		Resource:         requestScope.Resource.Resource,
 		NamespaceScoped:  crdInfo.spec.Scope == apiextensionsv1.NamespaceScoped,
@@ -424,7 +424,7 @@ func (r *crdHandler) serveStatus(w http.ResponseWriter, req *http.Request, reque
 	requestScope := crdInfo.statusRequestScopes[requestInfo.APIVersion]
 	storage := crdInfo.storages[requestInfo.APIVersion].Status
 
-	config := &common.StorageConfig{
+	config := &apiconfig.StorageConfig{
 		Kind:             requestScope.Kind,
 		Resource:         requestScope.Resource.Resource,
 		Subresource:      "status",
@@ -461,7 +461,7 @@ func (r *crdHandler) serveScale(w http.ResponseWriter, req *http.Request, reques
 	requestScope := crdInfo.scaleRequestScopes[requestInfo.APIVersion]
 	storage := crdInfo.storages[requestInfo.APIVersion].Scale
 
-	config := &common.StorageConfig{
+	config := &apiconfig.StorageConfig{
 		Kind:             requestScope.Kind,
 		Resource:         requestScope.Resource.Resource,
 		Subresource:      "scale",

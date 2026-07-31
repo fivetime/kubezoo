@@ -31,7 +31,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	api "k8s.io/kubernetes/pkg/apis/core"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 var upgradeableMethods = []string{"GET", "POST"}

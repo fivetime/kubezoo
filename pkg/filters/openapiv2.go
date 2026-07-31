@@ -22,7 +22,7 @@ import (
 
 	openapiv2 "github.com/google/gnostic-models/openapiv2"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // The OpenAPI v2 document is the upstream one, so it describes every tenant's

@@ -39,9 +39,9 @@ import (
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
 
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
-	"github.com/kubewharf/kubezoo/pkg/common"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // Names of the two shared RBAC objects. Unlike the per-tenant ClusterRole these

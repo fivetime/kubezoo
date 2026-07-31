@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"strings"
 
 	"github.com/kubewharf/kubezoo/pkg/proxy/pod"
@@ -43,9 +44,9 @@ import (
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/pkg/dynamic"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // tenantProxyWithLister implements StandardStorage
@@ -85,7 +86,7 @@ type tenantProxy struct {
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
 
-	groupVersionKindFunc common.GroupVersionKindFunc
+	groupVersionKindFunc apiconfig.GroupVersionKindFunc
 }
 
 // tenantProxyWithLister is a wrapper of tenantProxy, it exposes Lister interface to enable installation of List method
@@ -129,7 +130,7 @@ func (tc *tenantProxy) GetSingularName() string {
 }
 
 // NewTenantProxy returns the tenant proxy which implements the storage intefaces.
-func NewTenantProxy(config common.StorageConfig) (rest.Storage, error) {
+func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 	if config.IsConnecter {
 		return NewConnecterProxy(config.ProxyTransport, config.UpstreamMaster)
 	}

@@ -20,6 +20,7 @@ limitations under the License.
 package app
 
 import (
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"net/http"
 	"time"
 
@@ -40,7 +41,6 @@ import (
 	kubeexternalinformers "k8s.io/client-go/informers"
 
 	"github.com/kubewharf/kubezoo/cmd/kubezoo/app/options"
-	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
 )
 
@@ -69,7 +69,7 @@ func init() {
 	Scheme.AddUnversionedTypes(unversionedVersion, unversionedTypes...)
 }
 
-var v1StorageConfig = map[string]*common.StorageConfig{
+var v1StorageConfig = map[string]*apiconfig.StorageConfig{
 	"customresourcedefinitions": {
 		Kind: v1.SchemeGroupVersion.
 			WithKind("CustomResourceDefinition"),
@@ -97,7 +97,7 @@ var v1StorageConfig = map[string]*common.StorageConfig{
 	},
 }
 
-var v1beta1StorageConfig = map[string]*common.StorageConfig{
+var v1beta1StorageConfig = map[string]*apiconfig.StorageConfig{
 	"customresourcedefinitions": {
 		Kind: v1beta1.SchemeGroupVersion.
 			WithKind("CustomResourceDefinition"),

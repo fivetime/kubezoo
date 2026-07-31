@@ -20,13 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/pkg/dynamic"
-	"github.com/kubewharf/kubezoo/pkg/util"
 
 	"github.com/stretchr/testify/assert"
 
@@ -52,11 +52,11 @@ import (
 
 // TestNewTenantProxy tests the NewTenantProxy method.
 func TestNewTenantProxy(t *testing.T) {
-	invalidConfig := common.StorageConfig{}
+	invalidConfig := apiconfig.StorageConfig{}
 	_, err := NewTenantProxy(invalidConfig)
 	assert.Error(t, err)
 
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		NewFunc: func() runtime.Object {
 			return nil
 		},
@@ -133,7 +133,7 @@ func TestTenantProxy_Get(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -207,7 +207,7 @@ func TestTenantProxyWithListerList(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -273,7 +273,7 @@ func TestTenantProxyCreate(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -341,7 +341,7 @@ func TestTenantProxyUpdate(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -404,7 +404,7 @@ func TestTenantProxyDelete(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -494,7 +494,7 @@ func TestTenantProxyDeleteCollection(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 	client := dynamic.NewForConfigOrDie(&restclient.Config{Host: fakeUpstream.URL})
-	config := common.StorageConfig{
+	config := apiconfig.StorageConfig{
 		Kind:            appsapiv1.SchemeGroupVersion.WithKind("Deployment"),
 		Resource:        "deployments",
 		ShortNames:      []string{"deploy"},
@@ -635,7 +635,7 @@ func TestTenantProxyCreateSubresourceAddressesTheParent(t *testing.T) {
 			if !tc.namespaceScoped {
 				resource, subresource = "persistentvolumes", "status"
 			}
-			config := common.StorageConfig{
+			config := apiconfig.StorageConfig{
 				Kind:            coreapiv1.SchemeGroupVersion.WithKind("ServiceAccount"),
 				Resource:        resource,
 				Subresource:     subresource,

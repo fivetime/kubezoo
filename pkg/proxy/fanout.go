@@ -30,8 +30,8 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // maxFannedNamespaces bounds how many namespaces one tenant's cross-namespace

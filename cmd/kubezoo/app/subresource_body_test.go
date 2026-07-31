@@ -18,10 +18,10 @@ package app
 
 import (
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"reflect"
 	"testing"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
 )
 
 // subresourcesWithTheirOwnBody lists the subresources whose request body is not
@@ -48,8 +48,8 @@ var subresourcesWithTheirOwnBody = map[string]string{
 var scaleSubresources = "Scale"
 
 func TestSubresourcesDecodeTheirOwnBody(t *testing.T) {
-	all := map[string]*common.StorageConfig{}
-	collect := func(g common.APIGroupConfig) {
+	all := map[string]*apiconfig.StorageConfig{}
+	collect := func(g apiconfig.APIGroupConfig) {
 		for version, resources := range g.StorageConfigs {
 			for name, storageConfig := range resources {
 				all[fmt.Sprintf("%s/%s/%s", g.Group, version, name)] = storageConfig

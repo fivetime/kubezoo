@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsapiv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
@@ -37,13 +38,11 @@ import (
 	"k8s.io/kubernetes/pkg/apis/node"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-
-	"github.com/kubewharf/kubezoo/pkg/common"
 )
 
-var legacyGroup = common.APIGroupConfig{
+var legacyGroup = apiconfig.APIGroupConfig{
 	Group: coreapiv1.GroupName,
-	StorageConfigs: map[string]map[string]*common.StorageConfig{
+	StorageConfigs: map[string]map[string]*apiconfig.StorageConfig{
 		"v1": {
 			"pods": {
 				Kind: coreapiv1.
@@ -518,12 +517,12 @@ var legacyGroup = common.APIGroupConfig{
 	},
 }
 
-var nonLegacyGroups = []common.APIGroupConfig{
+var nonLegacyGroups = []apiconfig.APIGroupConfig{
 	{
 		// group: apps
 		// ref: k8s.io/kubernetes/pkg/registry/apps/rest/storage_apps.go
 		appsapiv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				// deployments
 				"deployments": {
@@ -632,7 +631,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		authenticationv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"tokenreviews": {
 					Kind:            authenticationv1.SchemeGroupVersion.WithKind("TokenReview"),
@@ -646,7 +645,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		batchapiv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"jobs": {
 					Kind:            batchapiv1.SchemeGroupVersion.WithKind("Job"),
@@ -682,7 +681,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		admissionregistrationv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"validatingwebhookconfigurations": {
 					Kind:            admissionregistrationv1.SchemeGroupVersion.WithKind("ValidatingWebhookConfiguration"),
@@ -704,7 +703,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		eventsv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"events": {
 					Kind:            eventsv1.SchemeGroupVersion.WithKind("Event"),
@@ -719,7 +718,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		rbacv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"roles": {
 					Kind:            rbacv1.SchemeGroupVersion.WithKind("Role"),
@@ -757,7 +756,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		policyv1beta1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"poddisruptionbudgets": {
 					Kind:            policyv1.SchemeGroupVersion.WithKind("PodDisruptionBudget"),
@@ -781,7 +780,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		networkingv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"networkpolicies": {
 					Kind:            networkingv1.SchemeGroupVersion.WithKind("NetworkPolicy"),
@@ -820,7 +819,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		discoveryv1beta1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"endpointslices": {
 					Kind:            discoveryv1.SchemeGroupVersion.WithKind("EndpointSlice"),
@@ -835,7 +834,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		coordinationv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"leases": {
 					Kind:            coordinationv1.SchemeGroupVersion.WithKind("Lease"),
@@ -850,7 +849,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		autoscalingv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"horizontalpodautoscalers": {
 					Kind:            autoscalingv1.SchemeGroupVersion.WithKind("HorizontalPodAutoscaler"),
@@ -894,7 +893,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		authorizationv1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"subjectaccessreviews": {
 					Kind:            authorizationv1.SchemeGroupVersion.WithKind("SubjectAccessReview"),
@@ -926,7 +925,7 @@ var nonLegacyGroups = []common.APIGroupConfig{
 
 	{
 		nodev1.GroupName,
-		map[string]map[string]*common.StorageConfig{
+		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
 				"runtimeclasses": {
 					Kind:            nodev1.SchemeGroupVersion.WithKind("RuntimeClass"),

@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package common
+package apiconfig
 
 import (
+	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"net/http"
 	"net/url"
@@ -67,7 +68,7 @@ type StorageConfig struct {
 	// dynamic client is used to communicate with upstream cluster
 	DynamicClient dynamic.Interface
 
-	Convertor ObjectConvertor
+	Convertor common.ObjectConvertor
 
 	TableConvertor rest.TableConvertor
 

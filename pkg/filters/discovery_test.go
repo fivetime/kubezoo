@@ -32,7 +32,7 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 type fakeDiscoveryProxy struct {

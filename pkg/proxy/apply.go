@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/klog"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // deducedTypeConverter reads an object with no schema to hand, which is what a

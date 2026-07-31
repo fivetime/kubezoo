@@ -27,9 +27,9 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/klog"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	kubezoodynamic "github.com/kubewharf/kubezoo/pkg/dynamic"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // watchMux presents one watch stream to the client while holding one upstream

@@ -17,10 +17,10 @@ limitations under the License.
 package app
 
 import (
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"sort"
 	"testing"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/controller"
 )
 
@@ -37,7 +37,7 @@ import (
 // permission for nothing, which is how "*" on "*" survives a refactor.
 func TestClusterScopedGrantsCoverWhatWeServe(t *testing.T) {
 	served := map[string]map[string]bool{}
-	collect := func(g common.APIGroupConfig) {
+	collect := func(g apiconfig.APIGroupConfig) {
 		for _, resources := range g.StorageConfigs {
 			for name, sc := range resources {
 				// Connecters carry no scope of their own -- pods/log and

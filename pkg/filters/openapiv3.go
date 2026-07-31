@@ -23,8 +23,8 @@ import (
 
 	"k8s.io/klog"
 
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 // OpenAPI v3 is served as an index at /openapi/v3 plus one document per group

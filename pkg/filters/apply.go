@@ -19,7 +19,7 @@ package filters
 import (
 	"net/http"
 
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // WithApplyForce carries the force flag of a server-side apply into the request.

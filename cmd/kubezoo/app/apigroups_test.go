@@ -17,19 +17,19 @@ limitations under the License.
 package app
 
 import (
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"sort"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	master "k8s.io/kubernetes/pkg/controlplane"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
 )
 
 // allDeclaredGroups is every group kubezoo exposes to tenants, legacy and not.
-func allDeclaredGroups() []common.APIGroupConfig {
-	return append([]common.APIGroupConfig{legacyGroup}, nonLegacyGroups...)
+func allDeclaredGroups() []apiconfig.APIGroupConfig {
+	return append([]apiconfig.APIGroupConfig{legacyGroup}, nonLegacyGroups...)
 }
 
 // TestDeclaredGroupVersionsAreServedUpstream guards apigroups.go against drifting

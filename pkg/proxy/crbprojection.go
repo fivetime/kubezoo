@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,8 +36,8 @@ import (
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/apis/rbac"
 
-	"github.com/kubewharf/kubezoo/pkg/common"
-	"github.com/kubewharf/kubezoo/pkg/util"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // clusterRoleBindingProjection serves ClusterRoleBindings for a tenant without
@@ -89,7 +90,7 @@ const canonicalNamespace = metav1.NamespaceSystem
 
 // newClusterRoleBindingProjection builds the storage from the same config the
 // generic proxy would have used, swapping the resource it actually talks to.
-func newClusterRoleBindingProjection(config common.StorageConfig) (rest.Storage, error) {
+func newClusterRoleBindingProjection(config apiconfig.StorageConfig) (rest.Storage, error) {
 	inner := config
 	inner.Kind = config.Kind.GroupVersion().WithKind("RoleBinding")
 	inner.Resource = "rolebindings"

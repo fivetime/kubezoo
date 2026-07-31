@@ -26,8 +26,8 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/klog"
 
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 const (

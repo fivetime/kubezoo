@@ -23,6 +23,7 @@ import (
 	"context"
 	stdx509 "crypto/x509"
 	"fmt"
+	"github.com/kubewharf/kubezoo/pkg/apiconfig"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
 	openapiutil "k8s.io/kube-openapi/pkg/util"
@@ -86,14 +87,15 @@ import (
 	"k8s.io/kubernetes/pkg/routes"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"github.com/fivetime/kubezoo-contract/pkg/convert"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/cmd/kubezoo/app/options"
 	ownedopenapi "github.com/kubewharf/kubezoo/pkg/apis/generated/openapi"
 	proxiedopenapi "github.com/kubewharf/kubezoo/pkg/apis/openapi"
 	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
 	_ "github.com/kubewharf/kubezoo/pkg/apis/tenant/install"
-	"github.com/kubewharf/kubezoo/pkg/common"
 	"github.com/kubewharf/kubezoo/pkg/controller"
-	"github.com/kubewharf/kubezoo/pkg/convert"
 	"github.com/kubewharf/kubezoo/pkg/dynamic"
 	tenantfilters "github.com/kubewharf/kubezoo/pkg/filters"
 	"github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
@@ -102,7 +104,6 @@ import (
 	tenantlister "github.com/kubewharf/kubezoo/pkg/generated/listers/tenant/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
 	tenantrest "github.com/kubewharf/kubezoo/pkg/rest"
-	"github.com/kubewharf/kubezoo/pkg/util"
 )
 
 const (
@@ -206,7 +207,7 @@ func applyTypeConverter() (managedfields.TypeConverter, error) {
 	// definition for.
 	seen := map[string]bool{}
 	names := make([]string, 0)
-	collect := func(group common.APIGroupConfig) {
+	collect := func(group apiconfig.APIGroupConfig) {
 		for _, resources := range group.StorageConfigs {
 			for _, config := range resources {
 				if config == nil || config.IsConnecter || config.Kind.Empty() {
@@ -283,7 +284,7 @@ func InstallLegacyAPI(m *master.Instance,
 	apiResourceConfigSource serverstorage.APIResourceConfigSource,
 	c *master.CompletedConfig,
 	restOptionsGetter generic.RESTOptionsGetter,
-	legacyConfig common.APIGroupConfig) error {
+	legacyConfig apiconfig.APIGroupConfig) error {
 	legacyProviders, err := proxy.NewRESTStorageProviders(legacyConfig)
 	if err != nil {
 		return err
@@ -558,7 +559,7 @@ type ProxyConfig struct {
 	clientCAKeyFile string
 }
 
-func (c *ProxyConfig) ApplyToGroup(group *common.APIGroupConfig) {
+func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
 	for version := range group.StorageConfigs {
 		for resource := range group.StorageConfigs[version] {
 			c.ApplyToStorage(group.StorageConfigs[version][resource])
@@ -566,7 +567,7 @@ func (c *ProxyConfig) ApplyToGroup(group *common.APIGroupConfig) {
 	}
 }
 
-func (c *ProxyConfig) ApplyToStorage(config *common.StorageConfig) {
+func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport

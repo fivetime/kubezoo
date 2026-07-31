@@ -7,10 +7,7 @@ toolchain go1.26.5
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/go-logr/logr v1.4.3
-	github.com/go-test/deep v1.0.8
-	github.com/gogo/protobuf v1.3.2
 	github.com/golang/protobuf v1.5.4
-	github.com/google/gnostic v0.5.7-v3refs
 	github.com/google/gnostic-models v0.7.0
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.39.1
@@ -35,6 +32,8 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.3
 )
 
+require github.com/gogo/protobuf v1.3.2 // indirect
+
 require (
 	cel.dev/expr v0.25.1 // indirect
 	cyphar.com/go-pathrs v0.2.2 // indirect
@@ -53,6 +52,7 @@ require (
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/fivetime/kubezoo-contract v0.0.0
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -136,7 +136,7 @@ require (
 	k8s.io/dynamic-resource-allocation v0.36.3 // indirect
 	k8s.io/endpointslice v0.0.0 // indirect
 	k8s.io/externaljwt v0.0.0 // indirect
-	k8s.io/klog/v2 v2.140.0 // indirect
+	k8s.io/klog/v2 v2.140.0
 	k8s.io/kms v0.36.3 // indirect
 	k8s.io/kube-scheduler v0.0.0 // indirect
 	k8s.io/kubelet v0.36.3 // indirect
@@ -190,3 +190,5 @@ replace (
 	k8s.io/system-validators => k8s.io/system-validators v1.7.0
 	k8s.io/utils => k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
 )
+
+replace github.com/fivetime/kubezoo-contract => ../kubezoo-contract
