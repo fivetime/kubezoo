@@ -155,6 +155,11 @@ echo "kubezoo healthz: $(curl -sk --cert $PKI/kubezoo/admin.pem --key $PKI/kubez
 #
 # How to start it lives over there, not here: a copy would drift from the flags
 # that repository actually supports.
+#
+# ⚠️ Unlike the policies, this cannot be pinned by version: the gateway does not
+# import kubezoo-controller and must not start, so there is no module graph to
+# resolve it through. A path is the only handle, and the version it lands on is
+# whatever is checked out.
 CTRL=${KUBEZOO_CONTROLLER_DIR:-$ZOO/../kubezoo-controller}
 if [ ! -x "$CTRL/hack/lab/up-controller.sh" ]; then
   echo "FATAL: kubezoo-controller not found at $CTRL; set KUBEZOO_CONTROLLER_DIR" >&2; exit 1
@@ -177,11 +182,31 @@ kubectl --context "kind-$CLUSTER" config view --minify --raw > "$LAB/ctrl-upstre
 #
 # It lives in kubezoo-contract, because the policies re-implement the same tenant
 # vocabulary the Go code uses -- see that repository's hack/lab/policies.sh.
+#
+# ⭐ Taken from the version go.mod pins, not from whatever is checked out next
+# door. The policies and the Go code are two expressions of the same rules, and
+# they only agree if they come from the same release -- a lab running v0.2.0's
+# code against a working copy's policies is testing a combination that will never
+# ship, and nothing would have said so.
+#
+# KUBEZOO_CONTRACT_DIR overrides it, which is what you want when editing both at
+# once. It prints which one it used, because "am I testing the tagged policies or
+# my edits" is precisely the question that goes wrong quietly.
 echo "== policies =="
-CONTRACT=${KUBEZOO_CONTRACT_DIR:-$ZOO/../kubezoo-contract}
-if [ ! -x "$CONTRACT/hack/lab/policies.sh" ]; then
-  echo "FATAL: kubezoo-contract not found at $CONTRACT; set KUBEZOO_CONTRACT_DIR" >&2; exit 1
+if [ -n "${KUBEZOO_CONTRACT_DIR:-}" ]; then
+  CONTRACT=$KUBEZOO_CONTRACT_DIR
+  echo "policies: $CONTRACT (KUBEZOO_CONTRACT_DIR — may differ from the pinned version)"
+else
+  CONTRACT=$(cd "$ZOO" && go list -m -f '{{.Dir}}' github.com/fivetime/kubezoo-contract 2>/dev/null)
+  CONTRACT_VERSION=$(cd "$ZOO" && go list -m -f '{{.Version}}' github.com/fivetime/kubezoo-contract 2>/dev/null)
+  echo "policies: kubezoo-contract ${CONTRACT_VERSION:-?} (pinned by go.mod)"
 fi
-"$CONTRACT/hack/lab/policies.sh" "kind-$CLUSTER" "${TENANT_DOMAIN_SUFFIX:-apps.example.com}"
+if [ -z "$CONTRACT" ] || [ ! -f "$CONTRACT/hack/lab/policies.sh" ]; then
+  echo "FATAL: could not find kubezoo-contract's policies.sh (looked in '$CONTRACT')." >&2
+  echo "       Run 'go mod download' or set KUBEZOO_CONTRACT_DIR." >&2
+  exit 1
+fi
+# bash, not exec: files in the module cache are read-only and not executable.
+bash "$CONTRACT/hack/lab/policies.sh" "kind-$CLUSTER" "${TENANT_DOMAIN_SUFFIX:-apps.example.com}"
 
 echo "lab up: upstream ctx = kind-kz-audit3, zoo admin ctx = zoo"

@@ -99,8 +99,19 @@ bash hack/lab/verify.sh      # 118 assertions about tenant isolation
 ```
 
 `up.sh` calls kubezoo-contract's `hack/lab/policies.sh` and kubezoo-controller's
-`hack/lab/up-controller.sh` rather than carrying its own copy of either — override
-with `KUBEZOO_CONTRACT_DIR` and `KUBEZOO_CONTROLLER_DIR`.
+`hack/lab/up-controller.sh` rather than carrying its own copy of either.
+
+⭐ The policies come from the kubezoo-contract version `go.mod` pins, not from
+whatever is checked out next door, and the run says which version it used. The
+policies and the Go code are two expressions of the same tenant vocabulary, so a
+lab running one release's code against another's policies would be testing a
+combination that never ships — quietly. `KUBEZOO_CONTRACT_DIR` overrides it for
+working on both at once, and the run says that too.
+
+⚠️ The controller cannot be pinned the same way: this repository does not import
+it and must not, so there is no module graph to resolve it through.
+`KUBEZOO_CONTROLLER_DIR` or the sibling directory is the only handle, and the
+version is whatever is checked out.
 
 ⭐ `verify.sh` does not split across the three repositories, and should not: every
 assertion begins by creating a tenant, which needs all three running. Isolation is
