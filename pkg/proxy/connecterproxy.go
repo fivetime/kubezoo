@@ -96,7 +96,12 @@ func (cp *ConnecterProxy) connect(req *http.Request, w http.ResponseWriter) {
 	paths := strings.Split(u.Path, "/")
 	for i, p := range paths {
 		if p == Namespace && i+1 < len(paths) {
-			paths[i+1] = util.AddTenantIDPrefix(tenant, paths[i+1])
+			// Idempotent, which AddTenantIDPrefix is not: an in-cluster workload
+			// addresses its own namespace by whatever its projected
+			// serviceaccount/namespace file says, and that carries the upstream
+			// name. Prefixing it a second time turned logs and exec into a
+			// NotFound for 111111-111111-default.
+			paths[i+1] = util.UpstreamNamespace(tenant, paths[i+1])
 			namespaceTransformed = true
 			break
 		}

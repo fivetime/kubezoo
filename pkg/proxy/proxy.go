@@ -411,6 +411,18 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 		return nil, false, fmt.Errorf("missing tenantID in context")
 	}
 
+	// A forwarded apply has to know which fields conversion introduced, and the
+	// only way to know is to keep the object as it stood before. Snapshotted only
+	// when the request really is an apply, so ordinary writes pay nothing.
+	var tenantForm *unstructured.Unstructured
+	if tp.subresource == "" && util.IsApplyPatch(ctx) {
+		snapshot, err := tp.convertInternalObjectToUnstructuredObject(obj.DeepCopyObject())
+		if err != nil {
+			return nil, false, err
+		}
+		tenantForm = snapshot
+	}
+
 	// 1. convert the internal version of tenant object to upstream object
 	if err := tp.convertTenantObjectToUpstreamObject(obj, tenantID); err != nil {
 		return nil, false, err
@@ -437,12 +449,15 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseProjectedLabel(utd); err != nil {
+		return nil, false, err
+	}
 	// A server-side apply goes up as an apply, so that upstream records who
 	// applied what and the next apply from the same manager converges instead of
 	// conflicting with this one. Everything above has already run, so the object
 	// is fully converted; forwardApply only decides which verb carries it.
 	if tp.subresource == "" && options != nil {
-		applied, err := tp.forwardApply(ctx, utd, options.FieldManager, options)
+		applied, err := tp.forwardApply(ctx, utd, tenantForm, options.FieldManager, options)
 		if err != nil {
 			return nil, false, util.TrimTenantIDFromError(err, tenantID)
 		}
@@ -506,6 +521,17 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, fmt.Errorf("tanentID doesn't exist in context")
 	}
 
+	// See update(): what conversion introduces is not owned by anybody, so the
+	// pre-conversion object is what tells a forwarded apply to carry it.
+	var tenantForm *unstructured.Unstructured
+	if tp.subresource == "" && util.IsApplyPatch(ctx) {
+		snapshot, err := tp.convertInternalObjectToUnstructuredObject(obj.DeepCopyObject())
+		if err != nil {
+			return nil, err
+		}
+		tenantForm = snapshot
+	}
+
 	// 1. convert the internal version of tenant object to upstream object
 	if err := tp.convertTenantObjectToUpstreamObject(obj, tenantID); err != nil {
 		return nil, err
@@ -522,13 +548,16 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseProjectedName(utd.GetName()); err != nil {
 		return nil, err
 	}
+	if err := tp.refuseProjectedLabel(utd); err != nil {
+		return nil, err
+	}
 
 	// An apply that has to create the object is still an apply, and this is the
 	// path it takes -- most resources refuse to be created by an update. Sending
 	// it as a create would have upstream record it as one, and then the tenant's
 	// next apply would conflict with its own first one.
 	if tp.subresource == "" && options != nil && options.FieldManager != "" {
-		applied, applyErr := tp.forwardApply(ctx, utd, options.FieldManager, &metav1.UpdateOptions{
+		applied, applyErr := tp.forwardApply(ctx, utd, tenantForm, options.FieldManager, &metav1.UpdateOptions{
 			DryRun: options.DryRun, FieldManager: options.FieldManager,
 		})
 		if applyErr != nil {
@@ -656,7 +685,7 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 		return nil, fmt.Errorf("tanentID doesn't exist in context %v", ctx)
 	}
 
-	proxyOptions, err := util.ConvertInternalListOptions(ctx, options, tenantID)
+	proxyOptions, err := util.ConvertInternalListOptions(ctx, options, tenantID, tp.listOptionScope())
 	if err != nil {
 		return nil, err
 	}
@@ -767,6 +796,33 @@ func (tp *tenantProxy) refuseProjectedName(name string) error {
 			"write the ClusterRoleBinding itself, or choose another name"))
 }
 
+// refuseProjectedLabel stops a tenant labelling one of its own RoleBindings as a
+// projection record.
+//
+// The label is how the controller finds the record set, and nothing but the name
+// was guarded. A tenant that set it on an ordinary binding in an ordinary
+// namespace had that binding deleted as an orphan within the second, repeatedly,
+// because it is in no record set; one set in the tenant's own kube-system became
+// a record, projected into every namespace the tenant owns and feeding the
+// derived cluster-scoped grants, without ever passing refuseProjectedName.
+//
+// Both outcomes are contained to the tenant -- the derived rules are still
+// filtered to its own API groups -- so this is a foot-gun rather than an escape.
+// Refused rather than rewritten, because it has no legitimate use: the way to
+// have a projection is to write the ClusterRoleBinding.
+func (tp *tenantProxy) refuseProjectedLabel(obj *unstructured.Unstructured) error {
+	if !tp.servesRoleBindings() {
+		return nil
+	}
+	if _, claimed := obj.GetLabels()[common.ProjectedClusterRoleBindingLabelKey]; !claimed {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: tp.kind.Group, Resource: tp.resource}, obj.GetName(),
+		fmt.Errorf("the label %s belongs to kubezoo; write the ClusterRoleBinding itself",
+			common.ProjectedClusterRoleBindingLabelKey))
+}
+
 // finishWrite turns what upstream returned into what the tenant should see.
 func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID string,
 	created bool) (runtime.Object, bool, error) {
@@ -813,6 +869,14 @@ func (tp *tenantProxy) refuseReservedName(tenantID, upstreamName string) error {
 // Only when the resource is namespaced and the request named no namespace --
 // `kubectl get pods -A` and the cluster-wide watches informers open. A request
 // that names a namespace is already scoped and goes upstream untouched.
+// listOptionScope tells the option convertor what kind of resource this is, which
+// is what decides how a field selector has to be rewritten -- metadata.name is
+// prefixed upstream for a cluster-scoped resource and not for a namespaced one,
+// and a CRD carries its prefix in the middle of its name rather than at the front.
+func (tp *tenantProxy) listOptionScope() util.ListOptionScope {
+	return util.ListOptionScope{NamespaceScoped: tp.namespaceScoped, Kind: tp.kind}
+}
+
 func (tp *tenantProxy) shouldFanOut(ctx context.Context) bool {
 	if !tp.namespaceScoped {
 		return false
@@ -832,7 +896,7 @@ func (tp *tenantProxy) DeleteCollection(ctx context.Context, _ rest.ValidateObje
 		return nil, fmt.Errorf("tanentID doesn't exist in context")
 	}
 
-	proxyListOptions, err := util.ConvertInternalListOptions(ctx, listOptions, tenantID)
+	proxyListOptions, err := util.ConvertInternalListOptions(ctx, listOptions, tenantID, tp.listOptionScope())
 	if err != nil {
 		return nil, err
 	}
@@ -845,8 +909,26 @@ func (tp *tenantProxy) DeleteCollection(ctx context.Context, _ rest.ValidateObje
 		return nil, util.TrimTenantIDFromError(err, tenantID)
 	}
 	utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
+	// ⚠️ The one verb that operates on a whole collection was also the one verb
+	// with no guard on the names kubezoo hides. Get returns NotFound for them and
+	// List drops them, so a tenant is told the projection records do not exist --
+	// and then a DeleteCollection deleted them anyway, upstream agreeing because
+	// the tenant really is admin in its own namespaces. Deleting a *record* is
+	// not repaired by anything: the controller sees an empty record set, deletes
+	// every surviving copy in every namespace as an orphan, and withdraws the
+	// derived cluster bindings, so the tenant's ClusterRoleBindings are silently
+	// gone for good.
+	utdList = tp.hideProjections(utdList)
 	for i := range utdList.Items {
 		name := utdList.Items[i].GetName()
+		if err := tp.refuseProjectedName(name); err != nil {
+			// Belt and braces: hideProjections already dropped these, and the
+			// reserved names it does not cover are not the tenant's to delete.
+			continue
+		}
+		if err := tp.refuseReservedName(tenantID, name); err != nil {
+			continue
+		}
 		_, _, err = client.Delete(ctx, name, *options)
 		if err != nil {
 			return nil, util.TrimTenantIDFromError(err, tenantID)
@@ -895,7 +977,7 @@ func (tp *tenantProxy) Watch(ctx context.Context, options *metainternalversion.L
 		return nil, fmt.Errorf("tanentID doesn't exist in context")
 	}
 
-	proxyOpt, err := util.ConvertInternalListOptions(ctx, options, tenantID)
+	proxyOpt, err := util.ConvertInternalListOptions(ctx, options, tenantID, tp.listOptionScope())
 	if err != nil {
 		return nil, err
 	}

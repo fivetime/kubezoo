@@ -359,3 +359,45 @@ func TestRoleBindingTransformerBackward(t *testing.T) {
 		})
 	}
 }
+
+// TestServiceAccountSubjectWithoutNamespaceRoundTrips guards a binding a tenant
+// can legally write against poisoning everything it can read.
+//
+// ⚠️ A ServiceAccount subject may omit its namespace in a namespaced RoleBinding:
+// upstream validation only requires one when the binding is cluster-scoped, and
+// the authorizer resolves an empty namespace to the binding's own. Forward
+// leaves it empty for exactly that reason, and Backward used to reject what
+// Forward had just written. Since a list returns on the first item that fails to
+// transform, one such object -- created with a plain kubectl apply -- failed the
+// whole of `kubectl get rolebindings`, terminated any rolebindings watch, and
+// could not be deleted without already knowing its name.
+func TestServiceAccountSubjectWithoutNamespaceRoundTrips(t *testing.T) {
+	const tenantID = "111111"
+	transformer := NewRoleBindingTransformer()
+
+	binding := &rbacinternal.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "mine", Namespace: "default"},
+		RoleRef:    rbacinternal.RoleRef{Kind: "Role", Name: "some-role"},
+		Subjects: []rbacinternal.Subject{{
+			Kind: rbacinternal.ServiceAccountKind,
+			Name: "builder",
+		}},
+	}
+
+	forward, err := transformer.Forward(binding.DeepCopyObject(), tenantID)
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	if got := forward.(*rbacinternal.RoleBinding).Subjects[0].Namespace; got != "" {
+		t.Fatalf("forward invented a subject namespace %q; the authorizer resolves an empty one "+
+			"to the binding's own namespace, which is already the right answer", got)
+	}
+
+	back, err := transformer.Backward(forward, tenantID)
+	if err != nil {
+		t.Fatalf("reading back a binding this transformer itself produced: %v", err)
+	}
+	if got := back.(*rbacinternal.RoleBinding).Subjects[0].Namespace; got != "" {
+		t.Errorf("subject namespace came back as %q, want it left empty", got)
+	}
+}

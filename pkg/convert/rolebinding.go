@@ -143,6 +143,20 @@ func transformSubjectToTenant(subject *rbacinternal.Subject, tenantID string) er
 		}
 		subject.Name = util.TrimTenantIDPrefix(tenantID, subject.Name)
 	case rbacinternal.ServiceAccountKind:
+		// ⚠️ An empty namespace is legal on a *namespaced* RoleBinding -- upstream
+		// validation only requires one when the binding is cluster-scoped, and the
+		// authorizer resolves it to the binding's own namespace. The forward
+		// transform leaves it empty for that reason, and this branch used to
+		// reject what the forward transform had just written. One such object,
+		// which a tenant can create with a plain kubectl apply, failed the whole
+		// of `kubectl get rolebindings` -- the list returns on the first item that
+		// fails to transform -- and terminated any rolebindings watch. It could
+		// not even be deleted without already knowing its name, since it could not
+		// be listed. Same shape as the roleRef case below it, which was fixed;
+		// this branch was left strict.
+		if subject.Namespace == "" {
+			break
+		}
 		if !strings.HasPrefix(subject.Namespace, tenantID) {
 			return errors.Errorf("invalid subject namespace %s, should have tenant id %s as prefix", subject.Namespace, tenantID)
 		}

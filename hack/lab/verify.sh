@@ -1632,6 +1632,149 @@ else
 fi
 
 echo
+echo "== a server-side apply carries what kubezoo injects, not only what the tenant owns =="
+# ⭐ The field set a forwarded apply is built from is computed before conversion,
+# so a field kubezoo *adds* is owned by nobody. Both victims are here: the
+# namespace label, which every cluster-wide list and the controller select on,
+# and the webhook's namespaceSelector, which is the confinement the contract's
+# cluster-wide grant on webhook configurations is justified by.
+$T apply --server-side --field-manager=verify -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ssa-ns
+  labels: {env: prod}
+EOF
+label=$($K get ns "$TID-ssa-ns" -o jsonpath='{.metadata.labels.kubezoo\.io/tenant}' 2>/dev/null)
+if [ "$label" = "$TID" ]; then
+  ok "an applied namespace is labelled, so it is visible to cluster-wide list and watch"
+else
+  bad "an applied namespace is labelled" "kubezoo.io/tenant = '${label:-<absent>}'"
+fi
+
+$T apply --server-side --field-manager=verify -f - >/dev/null 2>&1 <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ssa-hook
+webhooks:
+- name: w.example.com
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  clientConfig:
+    service: {name: svc, namespace: default, port: 443}
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    operations: ["CREATE"]
+    resources: ["pods"]
+EOF
+# ⚠️ Not `-n "$selector"`: with the selector dropped, upstream defaults the field
+# to {} -- which is a selector that matches *every* namespace, and which bash
+# reads as a non-empty string. The measurement has to name the label.
+selector=$($K get validatingwebhookconfiguration "$TID-ssa-hook" \
+  -o jsonpath='{.webhooks[0].namespaceSelector.matchLabels.kubezoo\.io/tenant}' 2>/dev/null)
+if [ "$selector" = "$TID" ]; then
+  ok "an applied webhook keeps the namespace selector that confines it to the tenant"
+else
+  bad "an applied webhook keeps its namespace selector" \
+      "selects on kubezoo.io/tenant='${selector:-<nothing>}': this webhook fires on every namespace in the cluster"
+fi
+$T delete validatingwebhookconfiguration ssa-hook >/dev/null 2>&1
+
+echo
+echo "== an ordinary update by a manager that has applied before stays an update =="
+# ⭐ The verb used to be inferred from the object's managedFields, so a PUT by a
+# manager with an Apply entry was rewritten into an apply of that stale entry --
+# dropping the rest of the write, and deleting upstream the field it changed.
+$T apply --server-side --field-manager=ctrl -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ssa-cm}
+data: {a: "1"}
+EOF
+$T get configmap ssa-cm -o json 2>/dev/null \
+  | python3 -c 'import json,sys; o=json.load(sys.stdin); o["data"]["b"]="2"; o["data"]["a"]="9"; print(json.dumps(o))' \
+  | $T replace --field-manager=ctrl -f - >/dev/null 2>&1
+got_a=$($K -n "$NS" get configmap ssa-cm -o jsonpath='{.data.a}' 2>/dev/null)
+got_b=$($K -n "$NS" get configmap ssa-cm -o jsonpath='{.data.b}' 2>/dev/null)
+if [ "$got_a" = 9 ] && [ "$got_b" = 2 ]; then
+  ok "the update wrote both fields, and neither was dropped nor deleted"
+else
+  bad "an update by a manager that has applied before" \
+      "data.a='${got_a:-<gone>}' want 9, data.b='${got_b:-<gone>}' want 2"
+fi
+$T delete configmap ssa-cm >/dev/null 2>&1
+
+echo
+echo "== one legal RoleBinding cannot make every RoleBinding unreadable =="
+# ⭐ A ServiceAccount subject may omit its namespace in a namespaced RoleBinding.
+# Reading it back used to be an error, and a list returns on the first item that
+# fails -- so one such object, which a plain apply creates, hid all the others.
+$T create -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: no-subject-ns}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects:
+- {kind: ServiceAccount, name: default}
+EOF
+if $T get rolebindings >/dev/null 2>&1 && $T get rolebinding no-subject-ns >/dev/null 2>&1; then
+  ok "the whole list still reads, and so does the binding itself"
+else
+  bad "a subject without a namespace" "$($T get rolebindings 2>&1 | tr '\n' ' ' | cut -c1-160)"
+fi
+$T delete rolebinding no-subject-ns >/dev/null 2>&1
+
+echo
+echo "== deletecollection cannot reach what every other verb hides =="
+# ⭐ Get returns NotFound for the projection records and List drops them, so the
+# tenant is told they do not exist -- and then a collection delete removed them
+# anyway. Deleting the *record* is not repaired: the controller reads an empty
+# record set and withdraws every copy and every derived cluster binding.
+$T create -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: survives-deletecollection}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects:
+- {kind: ServiceAccount, name: default, namespace: default}
+EOF
+sleep 2
+kubectl --kubeconfig "$TKC" -n kube-system delete rolebindings --all >/dev/null 2>&1
+curl -sk --cert "$LAB/verify-$TID.pem" --key "$LAB/verify-$TID-key.pem" --cacert $PKI/ca.pem \
+  -X DELETE "https://127.0.0.1:6443/apis/rbac.authorization.k8s.io/v1/namespaces/kube-system/rolebindings" \
+  >/dev/null 2>&1
+sleep 3
+if $T get clusterrolebinding survives-deletecollection >/dev/null 2>&1; then
+  ok "a collection delete left the tenant's ClusterRoleBindings standing"
+else
+  bad "a collection delete destroyed the projection records" \
+      "the tenant's ClusterRoleBinding is gone and nothing will bring it back"
+fi
+$T delete clusterrolebinding survives-deletecollection >/dev/null 2>&1
+
+echo
+echo "== a field selector is translated, so it finds the object rather than nothing =="
+# ⭐ metadata.name went upstream unprefixed against a cluster-scoped resource and
+# matched nothing -- which returns empty rather than erroring, so the standard
+# single-object informer watched an empty world forever.
+$T create -f - >/dev/null 2>&1 <<EOF
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata: {name: selected}
+spec: {controller: example.com/ingress}
+EOF
+found=$($T get ingressclass --field-selector metadata.name=selected --no-headers 2>/dev/null | wc -l)
+if [ "$found" = 1 ]; then
+  ok "a cluster-scoped object is found by metadata.name"
+else
+  bad "a cluster-scoped object is found by metadata.name" "matched $found objects, want 1"
+fi
+$T delete ingressclass selected >/dev/null 2>&1
+$T delete ns ssa-ns >/dev/null 2>&1
+
+echo
 echo "== cleanup =="
 if [ -n "${POOL_NODE:-}" ]; then
   if [ -n "${POOL_WAS:-}" ]; then

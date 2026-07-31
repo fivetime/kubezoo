@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"strings"
+	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/watch"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -409,6 +411,22 @@ func asRoleBinding(obj runtime.Object) (runtime.Object, error) {
 	if !ok {
 		return nil, fmt.Errorf("expected a ClusterRoleBinding, got %T", obj)
 	}
+	// Validated here because storing it as a RoleBinding is what lets it past
+	// validation at all: upstream requires a namespace on a ServiceAccount
+	// subject of a cluster-scoped binding, and does not for a namespaced one. An
+	// empty namespace has no single meaning here -- each projected copy would
+	// resolve it to its own namespace, which is not what a ClusterRoleBinding
+	// says -- and the cluster-scoped binding derived from the record is invalid
+	// outright, which failed the rest of that tenant's reconcile every pass.
+	for i := range crb.Subjects {
+		if crb.Subjects[i].Kind == rbac.ServiceAccountKind && crb.Subjects[i].Namespace == "" {
+			return nil, apierrors.NewInvalid(
+				rbac.Kind("ClusterRoleBinding"), crb.Name,
+				field.ErrorList{field.Required(
+					field.NewPath("subjects").Index(i).Child("namespace"),
+					"a ServiceAccount subject of a ClusterRoleBinding must name its namespace")})
+		}
+	}
 	record := &rbac.RoleBinding{
 		ObjectMeta: *crb.ObjectMeta.DeepCopy(),
 		RoleRef:    crb.RoleRef,
@@ -468,32 +486,60 @@ func (o *projectedUpdatedObject) UpdatedObject(ctx context.Context, oldObj runti
 
 // projectionWatch converts the record's events into the tenant's.
 type projectionWatch struct {
-	inner  watch.Interface
-	result chan watch.Event
+	inner    watch.Interface
+	result   chan watch.Event
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func newProjectionWatch(inner watch.Interface) watch.Interface {
-	w := &projectionWatch{inner: inner, result: make(chan watch.Event)}
+	w := &projectionWatch{
+		inner:  inner,
+		result: make(chan watch.Event),
+		stop:   make(chan struct{}),
+	}
 	go w.run()
 	return w
 }
 
 func (w *projectionWatch) run() {
 	defer close(w.result)
-	for event := range w.inner.ResultChan() {
-		if record, ok := event.Object.(*rbac.RoleBinding); ok {
-			converted, err := asClusterRoleBinding(record)
-			if err != nil {
-				continue
+	for {
+		select {
+		case <-w.stop:
+			return
+		case event, open := <-w.inner.ResultChan():
+			if !open {
+				return
 			}
-			event.Object = converted
+			if record, ok := event.Object.(*rbac.RoleBinding); ok {
+				converted, err := asClusterRoleBinding(record)
+				if err != nil {
+					continue
+				}
+				event.Object = converted
+			}
+			// ⚠️ This send used to have no escape. Stopping the inner watch does
+			// not unblock a send already in flight on an unbuffered channel whose
+			// reader has gone, so a ClusterRoleBinding watch stopped at the wrong
+			// instant leaked this goroutine for the life of the process. Every
+			// other pump in the package selects on a stop channel; this one did
+			// not.
+			select {
+			case w.result <- event:
+			case <-w.stop:
+				return
+			}
 		}
-		w.result <- event
 	}
 }
 
 func (w *projectionWatch) ResultChan() <-chan watch.Event { return w.result }
-func (w *projectionWatch) Stop()                          { w.inner.Stop() }
+
+func (w *projectionWatch) Stop() {
+	w.stopOnce.Do(func() { close(w.stop) })
+	w.inner.Stop()
+}
 
 // unusedUnstructured keeps the import list honest if the projection ever stops
 // touching unstructured objects directly.

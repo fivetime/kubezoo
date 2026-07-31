@@ -2852,6 +2852,70 @@ RBAC 里 `resourceNames` 对 list 不生效(**list 请求没有名字**),所以�
 
 ⇒ cert-manager 仍然起不来,但缺口现在很清楚:就是 ① 和 ②。
 
+## AZ. ✅ 第四轮复审:apply 转发的注入字段丢失(**跨租户**)与合流 watch 的静默
+
+前三轮查的是仓库拆分,收成递减;第四轮把重心移到**代码行为**,10 条存活里 8 条出自新写的
+`watchmux.go` / `fanout.go` / `apply.go` / 投影。⭐**唯一的跨租户逃逸在 apply 转发上**。
+
+### 判据:字段集是"谁拥有",不是"该带什么"
+
+`forwardApply` 只转发**该 field manager 拥有的字段**。字段集是本机 apiserver 对**转换前**的
+对象算出来的 ⇒ kubezoo 在转换时**注入**的字段**没有任何 manager 拥有**,静默缺席。
+kubezoo *重写*的字段没事(租户本来就拥有那些路径),**注入的才会消失**。
+
+丢的东西是承重的:
+
+| 注入者 | 丢了会怎样 |
+|---|---|
+| webhook transformer 的 `namespaceSelector` | 上游把它默认成 `{}` = **匹配全集群每个 namespace**;`failurePolicy` 默认 `Fail` ⇒ 租户自己的服务一挂,**别的租户的写入全被拒**。而 `clusterscope.go` 授予租户集群级写 webhook 配置的**理由**白纸黑字就是"被 transformer 强制了 namespace selector" |
+| namespace transformer 的 `kubezoo.io/tenant` | namespace 从每个 cluster-wide list/watch、控制器的 RoleBinding 同步、租户拆除里消失,而租户按名字**看得见**它 |
+
+⚠️ 极难发现的不对称:`scope: Namespaced` **活下来了**(`rules` 是 atomic list,整段返回),
+所以三道约束里两道还在,只缺第三道。
+
+**修法关到类而不是关到实例**:`conversionDelta` 取"转换前 vs 转换后"的 `Added ∪ Modified`,
+与拥有集求并 —— 以后新加的 transformer 不可能再重蹈。
+
+### ⚠️ 动词必须从请求读,不能从对象猜
+
+`forwardApply` 判断"这是不是 apply"曾看**对象的 managedFields 里有没有 Apply 记录**。
+那是对象**历史**的属性,不是**请求**的属性。实测:
+
+```
+客户端 PUT: data{a:1,b:2}   →  上游收到 PATCH apply-patch+yaml {"data":{"a":"1"}}   ← b 静默消失
+apply{a,b} 后 PUT a=9       →  上游收到 apply {"data":{"b":"2"}}  ⇒ SSA **删掉** data.a
+```
+`PUT data.a=9` 的净效果是 **data.a 不存在了**,HTTP 200,无 warning。
+动词只住在 `Content-Type` 里,所以 `pkg/filters/apply.go` 在那里读,`util.WithApplyPatch` 带下去。
+
+### ⚠️ CR 的类型转换器按**租户组**建索引
+
+crdHandler 用租户看到的 CRD 建转换器(组已去前缀),而喂给它的对象**已经转成上游形态**(组带前缀)
+⇒ `no corresponding type for 111111-example.com/v1` ⇒ **每个 CR 都静默回退到 deduced schema**
+(所有 list 变 atomic)⇒ 转发的 apply **宣称拥有别的 manager 写的 list 条目**,
+值相同所以不冲突不告警;对方之后想删自己那条删不掉。
+本文 §"CR 用自己 CRD 的转换器"一节写明过不能用 deduced —— 实现却从没走到过那条分支。
+修法:打字时把 apiVersion 临时还原成租户形态。
+
+### 其余四条
+
+- **PATCH 是唯一没签租户身份的动词**(contract `simple.go`),另外八个都签。上游 RBAC 评的是
+  kubezoo 不是租户。前置的 impersonated Get 挡住了大部分场景,**"可读不可写"的对象挡不住**
+- **`deletecollection` 够得着被隐藏的对象**:单对象动词全过 `refuseProjectedName`/`hideProjections`,
+  **唯独集合动词没有** ⇒ 能删掉 ClusterRoleBinding 投影的**记录**,控制器一秒内把副本当孤儿清掉、
+  撤回派生绑定 ⇒ 租户的 ClusterRoleBinding **永久静默清零**
+- **一个合法 RoleBinding 毒死整张表**:SA subject 省略 namespace 在**命名空间级** RoleBinding 里合法
+  (上游只在集群级才要求),Forward 正确地留空,Backward 却拒绝自己刚写出来的东西 ⇒
+  `get rolebindings` 整个失败、watch 终止,而且列不出来就删不掉
+- **field selector 不翻译**:只重写了 `involvedObject.namespace`。集群级资源上的 `metadata.name`
+  **永远匹配不到且不报错** ⇒ client-go 标准的单对象 informer 看到一个永远空的世界
+
+### ⚠️ 方法学:`[ -n "{}" ]` 为真
+
+给 webhook 那条写 lab 断言时,第一版查的是 `namespaceSelector` 非空 —— 而字段丢掉时上游把它
+**默认成 `{}`**(空 selector = 匹配所有),bash 读作非空字符串 ⇒ **断言在负向对照下照样 PASS**。
+必须查到具体的标签值。做负向对照的意义就在这里:**六条新断言里正好这一条是假的**。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

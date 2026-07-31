@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
+	"sigs.k8s.io/structured-merge-diff/v6/typed"
 
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/klog"
@@ -32,8 +33,11 @@ import (
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
-// deducedTypeConverter reads an object with no schema to hand, which is what a
-// custom resource is here.
+// deducedTypeConverter reads an object with no schema to hand.
+//
+// It is a last resort, and deliberately not the custom-resource path: a CRD's
+// own schema is what tells apply which lists merge by key, and losing it means
+// claiming to own list entries somebody else wrote. See typeObject.
 var deducedTypeConverter = managedfields.NewDeducedTypeConverter()
 
 // forwardApply sends a tenant's server-side apply upstream as an apply.
@@ -55,16 +59,23 @@ var deducedTypeConverter = managedfields.NewDeducedTypeConverter()
 // the current object as before, which yields a complete object that the ordinary
 // conversion path handles, and it also records which fields this manager now
 // owns. Those fields are then lifted back out of the converted object, which
-// gives the same fragment the tenant sent with every reference rewritten -- and
-// nothing else, because the field set says exactly what to take.
-func (tp *tenantProxy) forwardApply(ctx context.Context, upstream *unstructured.Unstructured,
+// gives the same fragment the tenant sent with every reference rewritten.
+//
+// tenantForm is that same object as it stood before conversion, and it is
+// required: what to lift is not the owned set alone. See conversionDelta.
+func (tp *tenantProxy) forwardApply(ctx context.Context, upstream, tenantForm *unstructured.Unstructured,
 	fieldManager string, options *metav1.UpdateOptions) (*unstructured.Unstructured, error) {
 
+	// The verb comes from the request, never from the object. A write is not an
+	// apply because its manager happened to apply something once before.
+	if !util.IsApplyPatch(ctx) {
+		return nil, nil
+	}
 	entry, found := applyEntry(upstream, fieldManager)
 	if !found {
 		return nil, nil
 	}
-	if tp.typeConverter == nil {
+	if tp.typeConverter == nil || tenantForm == nil {
 		// Without a schema the field set cannot be turned back into an object,
 		// and guessing would mean applying fields nobody asked for.
 		return nil, nil
@@ -80,18 +91,24 @@ func (tp *tenantProxy) forwardApply(ctx context.Context, upstream *unstructured.
 	stripped := upstream.DeepCopy()
 	stripped.SetManagedFields(nil)
 
-	typedObj, err := tp.typeConverter.ObjectToTyped(stripped)
+	// Both objects are typed in the tenant's own terms, so that they are the
+	// same type and can be compared. The upstream form differs only in the values
+	// kubezoo rewrote, plus the group prefix on a custom resource -- and the
+	// schema is the tenant CRD's either way.
+	tenantAPIVersion := tenantForm.GetAPIVersion()
+	typedUpstream, converter, err := tp.typeObject(stripped, tenantAPIVersion)
 	if err != nil {
-		// A custom resource whose CRD carries no usable schema. Upstream reads
-		// one the same way, treating every list as a whole rather than merging
-		// it by key.
-		typedObj, err = deducedTypeConverter.ObjectToTyped(stripped)
-		if err != nil {
-			klog.V(4).Infof("not forwarding this apply as an apply, its shape could not be read: %v", err)
-			return nil, nil
-		}
+		klog.V(4).Infof("not forwarding this apply as an apply, its shape could not be read: %v", err)
+		return nil, nil
 	}
-	extracted, ok := typedObj.ExtractItems(fields.Leaves()).AsValue().Unstructured().(map[string]interface{})
+
+	injected, err := conversionDelta(converter, tenantForm, stripped, tenantAPIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("working out which fields kubezoo added to this apply: %w", err)
+	}
+	fields = fields.Union(injected)
+
+	extracted, ok := typedUpstream.ExtractItems(fields.Leaves()).AsValue().Unstructured().(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("the fields this apply owns did not come back as an object")
 	}
@@ -125,6 +142,86 @@ func (tp *tenantProxy) forwardApply(ctx context.Context, upstream *unstructured.
 		return nil, err
 	}
 	return applied, nil
+}
+
+// typeObject reads an object against the schema kubezoo holds for it, returning
+// the converter it used so that a second object can be typed the same way.
+//
+// ⚠️ The converter is indexed by the *tenant's* GVK -- crdHandler builds it from
+// the CRD as the tenant sees it, whose group has had the tenant prefix trimmed.
+// The object handed here has already been converted upstream, so its group
+// carries the prefix and the lookup missed for every custom resource, silently
+// above V(4). Every CR therefore fell through to the deduced converter, under
+// which all lists are atomic: extracting an associative-list set returns the
+// *whole* list, so the forwarded apply claimed ownership of entries another
+// manager wrote and of defaults the tenant never sent. Nobody was warned, since
+// the values agreed and so there was no conflict to report.
+func (tp *tenantProxy) typeObject(obj *unstructured.Unstructured,
+	tenantAPIVersion string) (*typed.TypedValue, managedfields.TypeConverter, error) {
+
+	candidate := asAPIVersion(obj, tenantAPIVersion)
+	if typedObj, err := tp.typeConverter.ObjectToTyped(candidate); err == nil {
+		return typedObj, tp.typeConverter, nil
+	}
+	// Genuinely no schema. Upstream reads one the same way, treating every list
+	// as a whole rather than merging it by key.
+	typedObj, err := deducedTypeConverter.ObjectToTyped(candidate)
+	if err != nil {
+		return nil, nil, err
+	}
+	return typedObj, deducedTypeConverter, nil
+}
+
+// conversionDelta is the set of paths kubezoo's convertors touched.
+//
+// ⚠️ The owned field set is not enough on its own, and the gap it left is a
+// cross-tenant one. That set was computed by this apiserver's field manager
+// against the object as the tenant sent it, before conversion -- so a field
+// kubezoo *adds* during conversion is owned by nobody and was silently absent
+// from the patch that went upstream. Fields kubezoo rewrites were fine, because
+// the tenant owns those paths already; the injected ones vanished.
+//
+// What vanished was load-bearing. pkg/convert's webhook transformer injects the
+// namespaceSelector that confines a tenant's ValidatingWebhookConfiguration to
+// its own namespaces, and kubezoo-contract's ClusterScopedRules grants tenants
+// cluster-wide write on webhook configurations *because* of that confinement. An
+// applied webhook reached upstream with no selector and a default failurePolicy
+// of Fail, so the tenant's own service being down rejected matching writes in
+// every namespace in the cluster. The namespace transformer's kubezoo.io/tenant
+// label went the same way, which takes a namespace out of every cluster-wide
+// list, watch and teardown that selects on it.
+//
+// Taking the union with everything conversion touched closes the class rather
+// than the instance: a convertor added later cannot reintroduce it.
+func conversionDelta(converter managedfields.TypeConverter, tenantForm, upstream *unstructured.Unstructured,
+	tenantAPIVersion string) (*fieldpath.Set, error) {
+
+	before, err := converter.ObjectToTyped(tenantForm)
+	if err != nil {
+		return nil, err
+	}
+	after, err := converter.ObjectToTyped(asAPIVersion(upstream, tenantAPIVersion))
+	if err != nil {
+		return nil, err
+	}
+	comparison, err := before.Compare(after)
+	if err != nil {
+		return nil, err
+	}
+	// Added is what conversion introduced, Modified what it rewrote. Removed is
+	// deliberately left out: a path conversion dropped cannot be extracted from
+	// an object that no longer carries it.
+	return comparison.Added.Union(comparison.Modified), nil
+}
+
+// asAPIVersion returns obj under the given apiVersion, copying only if it has to.
+func asAPIVersion(obj *unstructured.Unstructured, apiVersion string) *unstructured.Unstructured {
+	if apiVersion == "" || apiVersion == obj.GetAPIVersion() {
+		return obj
+	}
+	renamed := obj.DeepCopy()
+	renamed.SetAPIVersion(apiVersion)
+	return renamed
 }
 
 // applyEntry finds what this manager owns as a result of applying.
