@@ -6,8 +6,9 @@
 叫 gateway 而不是 proxy,是因为它**不转发** —— 它终结租户侧的 API、
 双向改写请求与响应、提供自己的资源、并过滤 discovery 对外宣告的内容。
 
-⚠️ 与 [kubegateway](https://github.com/kubewharf/kubegateway) 不是一回事,
-那是另一个项目,而且可以**挡在这个前面**。
+⚠️ 与 [kubesluice](https://github.com/fivetime/kubesluice) 不是一回事 ——
+那是另一个项目,而且可以**挡在这个前面**;它源自上游的
+[kubegateway](https://github.com/kubewharf/kubegateway)。
 
 [English](./README.md) | 简体中文
 

@@ -8,8 +8,9 @@ It is a gateway rather than a proxy because it does not forward — it terminate
 the tenant-facing API, rewrites requests and responses in both directions, serves
 resources of its own, and filters what discovery advertises.
 
-⚠️ Not to be confused with [kubegateway](https://github.com/kubewharf/kubegateway),
-which is a different project and can sit in front of this one.
+⚠️ Not to be confused with [kubesluice](https://github.com/fivetime/kubesluice), a
+different project that can sit in front of this one, nor with the upstream
+[kubegateway](https://github.com/kubewharf/kubegateway) it began as.
 
 English | [简体中文](README.zh.md)
 

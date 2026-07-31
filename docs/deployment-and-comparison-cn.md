@@ -1,7 +1,9 @@
 # KubeZoo 部署形态、架构拓扑与横向对比
 
 本文回答四个问题:KubeZoo 是什么定位、怎么部署、租户身份怎么建立、以及它的限制边界在哪里。
-最后把它与 Kamaji / kubegateway 放在一起对比,并单列一节说明**为什么 KubeZoo 的租户
+最后把它与 Kamaji / kubegateway 放在一起对比
+(⚠️ 下文的 **kubegateway** 指**上游项目**;我们自己那份 fork 现在叫
+[kubesluice](https://github.com/fivetime/kubesluice),架构相同),并单列一节说明**为什么 KubeZoo 的租户
 不能自带 VM 作为 worker,只能用 Virtual Kubelet**。
 
 文中所有断言都标注了源码位置,可直接核对。
@@ -384,7 +386,7 @@ Kamaji 不存在这个问题:每租户独立 apiserver 与独立数据,租户的
 | 每租户限流/熔断 | ❌ 无 | 需外部提供 | ✅ 内建 |
 | 适用场景 | 数百个只跑几个 Pod 的小租户 | 需要完整集群语义的租户 | 需要跨集群路由与配额治理 |
 
-**可以叠加**:小租户交给 KubeZoo 压进一个集群,大租户用 Kamaji 单开控制面,kubegateway 挡在
+**可以叠加**:小租户交给 KubeZoo 压进一个集群,大租户用 Kamaji 单开控制面,kubesluice 挡在
 apiserver 前做路由与限流。三者解决的是不同问题。
 
 ---

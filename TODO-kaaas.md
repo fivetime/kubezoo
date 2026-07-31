@@ -138,7 +138,7 @@
       ⚠️⚠️ **部署前提**:kubezoo 的服务证书**必须由 Pod 信任的那个 CA(上游集群 CA)签发**,
       否则所有 in-cluster 客户端 TLS 失败;`--service-account-issuer`/`--api-audiences` 必须等于上游的
 - [ ] **代价:kubezoo 进入租户全部工作负载的 API 路径** ⇒ #84/#85 变成核心议题。
-      已定:用 kubegateway 挡在前面做精准管控
+      已定:用 kubesluice(原 kubegateway)挡在前面做精准管控
 - [ ] `kubezoo-contract 的 config/policy/tenant-api-endpoint.yaml` 里的地址是**占位符**,部署时必须换成
       kubezoo 在集群内的可达地址(Service ClusterIP / DNS 名)
 
@@ -617,7 +617,7 @@ kubezoo 管控制面多租户,kubetron 管数据面/网络多租户,kata 管计�
       - [ ] 实测键空间形态:租户前缀在 **namespace 位**,预期"每资源内连续、跨资源分散"
       - [ ] 删租户 = **每种资源一次 range 删**,不是一次连续 range
       - [ ] 与 count-index(#80)、`--keyspace`(#76,**整实例级,层次不同**)的关系
-- [ ] **叠 kubegateway 做每租户限流**(#85)—— 挡"单租户拖垮全体";
+- [ ] **叠 kubesluice 做每租户限流**(#85)—— 挡"单租户拖垮全体";
       #81 已现场验证限流/熔断/降级、双网关 HA、全局限流跨副本汇总
 - [ ] 规模压测形态是"**N 租户 × M 对象**",不是"1 租户 × 大量对象";
       注意 #40 的 Service 规模墙在这里可能更早撞上
@@ -629,7 +629,7 @@ kubezoo 管控制面多租户,kubetron 管数据面/网络多租户,kata 管计�
 | 项 | 理由 |
 |---|---|
 | **VK + OpenStack Zun 作数据面(B2)** | VK 场景没有 kubelet ⇒ 探针/生命周期/volume 合成/SA token 续期全要重写;而"租户不买节点"两条路都成立(B1 节点也是平台的)。⇒ B2 换来的只是"把节点从 k8s 挪进 OpenStack"。调研基线保留在 #86,唯一翻案场景:容器与 Nova VM 需共用 OpenStack 同一套计算配额/调度/计费 |
-| **集群内流量的透明拦截**(kubegateway 按本地端口判别租户) | 端口不能自描述,每加一租户要分配端口/改 Service/动防火墙,只换来便利性。**替代方案**:改 workload 的 `KUBERNETES_SERVICE_HOST` 指向网关主机名即可,网关零改动(Cilium 已做成 `k8sServiceHost` helm value 且 KPR 模式本就必设) |
+| **集群内流量的透明拦截**(kubesluice 按本地端口判别租户) | 端口不能自描述,每加一租户要分配端口/改 Service/动防火墙,只换来便利性。**替代方案**:改 workload 的 `KUBERNETES_SERVICE_HOST` 指向网关主机名即可,网关零改动(Cilium 已做成 `k8sServiceHost` helm value 且 KPR 模式本就必设) |
 | **OpenKruise** | CRD 租户不可见(system CRD 未实现);唯一价值 `ImagePullJob` 镜像预热的收益**取决于镜像复用率**,无数据前不据此选型。⚠️ 注意 kubezoo 的"秒级"指**租户交付**,不是 Pod 启动 |
 | **CoreDNS rewrite 方案** | 租户可建任意 namespace,要覆盖 `<ns>.svc → <tid>-<ns>.svc` 全部形态还要管反向解析/SRV/headless,是地狱。改用 kubetron 的每租户独立 zone(见 3.2) |
 | **每租户一个 LoadBalancer 地址** | kube-proxy DNAT 会把目的 IP 换成 pod IP,N 个 Service 塌缩成同一个 `LocalAddr`,只有端口能幸存 |
