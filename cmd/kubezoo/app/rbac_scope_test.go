@@ -17,7 +17,7 @@ limitations under the License.
 package app
 
 import (
-	"github.com/kubewharf/kubezoo/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
 	"sort"
 	"testing"
 

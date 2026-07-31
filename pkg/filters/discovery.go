@@ -27,7 +27,7 @@ import (
 	"k8s.io/klog"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	"github.com/kubewharf/kubezoo/pkg/proxy"
+	"github.com/fivetime/kubezoo-proxy/pkg/proxy"
 )
 
 const (

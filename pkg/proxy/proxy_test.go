@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/kubewharf/kubezoo/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
 	"net/http"
 	"net/http/httptest"
 	"testing"

@@ -19,7 +19,7 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"github.com/kubewharf/kubezoo/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

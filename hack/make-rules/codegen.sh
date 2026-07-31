@@ -46,7 +46,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 BIN_DIR="${REPO_ROOT}/bin"
-MODULE="github.com/kubewharf/kubezoo"
+MODULE="github.com/fivetime/kubezoo-proxy"
 HEADER="${REPO_ROOT}/hack/boilerplate.go.txt"
 
 VERIFY=false

@@ -3,7 +3,7 @@ SHELL := bash
 GO ?= go
 TARGETS ?= kubezoo clusterresourcequota
 WHAT ?= $(TARGETS)
-IMAGE_REPO ?= ghcr.io/kubewharf
+IMAGE_REPO ?= ghcr.io/fivetime
 IMAGE_TAG ?= $(shell git describe --tags --always --dirty)
 TARGET_PLATFORMS ?= linux/amd64
 ENVTEST_K8S_VERSION ?= 1.36.x
@@ -15,31 +15,23 @@ SETUP_ENVTEST_VERSION ?= release-0.24
 build:
 	@GIT_VERSION="$(IMAGE_TAG)" bash hack/build.sh $(WHAT)
 
-.PHONY: test-unit
-test-unit:
-	@$(GO) test $$(go list ./... | grep -v '/pkg/controller$$')
+# Everything here runs without an apiserver now. The two suites that needed one
+# left with the packages they belong to: the controller's to kubezoo-controller,
+# and the scope-table check to kubezoo-contract, whose vocabulary it checks.
+#
+# ⚠️ Which means green here says less than it used to. The behaviour this repo is
+# actually judged on is in hack/lab, and that needs all three.
+.PHONY: test
+test:
+	@$(GO) test ./...
 
 .PHONY: envtest
 envtest:
 	@GOBIN="$(CURDIR)/bin" $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
-# The controller's tests need a real apiserver to run against. -count=1 because
-# the result depends on the envtest binaries, not just on the sources.
-#
-# The scope-table check used to be here too. It moved with pkg/util into
-# kubezoo-contract, which has its own envtest target: the table it checks is
-# part of the translation vocabulary, so it belongs where that vocabulary lives.
-.PHONY: test-integration
-test-integration: envtest
-	@KUBEBUILDER_ASSETS="$$($(CURDIR)/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path)" \
-		$(GO) test -count=1 ./pkg/controller
-
-.PHONY: test
-test: test-unit test-integration
-
 .PHONY: test-race
 test-race:
-	@$(GO) test -race $$(go list ./... | grep -v '/pkg/controller$$')
+	@$(GO) test -race ./...
 
 .PHONY: format
 format:

@@ -24,7 +24,7 @@ import (
 	"k8s.io/component-base/logs"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo" // load all the prometheus client-go plugins
 
-	"github.com/kubewharf/kubezoo/cmd/kubezoo/app"
+	"github.com/fivetime/kubezoo-proxy/cmd/kubezoo/app"
 )
 
 func main() {

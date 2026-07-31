@@ -20,7 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/kubewharf/kubezoo/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
 	"net/http"
 	"sort"
 	"strings"
@@ -86,7 +86,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	"github.com/kubewharf/kubezoo/pkg/proxy"
+	"github.com/fivetime/kubezoo-proxy/pkg/proxy"
 )
 
 // crdHandler serves the `/apis` endpoint.

@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/kubewharf/kubezoo/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsapiv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
