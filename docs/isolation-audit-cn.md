@@ -2910,11 +2910,24 @@ crdHandler 用租户看到的 CRD 建转换器(组已去前缀),而喂给它的�
 - **field selector 不翻译**:只重写了 `involvedObject.namespace`。集群级资源上的 `metadata.name`
   **永远匹配不到且不报错** ⇒ client-go 标准的单对象 informer 看到一个永远空的世界
 
-### ⚠️ 方法学:`[ -n "{}" ]` 为真
+### ⚠️ 方法学三条(这轮全都亲手踩了)
+
+**① `[ -n "{}" ]` 为真**
 
 给 webhook 那条写 lab 断言时,第一版查的是 `namespaceSelector` 非空 —— 而字段丢掉时上游把它
 **默认成 `{}`**(空 selector = 匹配所有),bash 读作非空字符串 ⇒ **断言在负向对照下照样 PASS**。
 必须查到具体的标签值。做负向对照的意义就在这里:**六条新断言里正好这一条是假的**。
+
+**② 固定 `sleep` 会让断言按负载决定成败。** "撤掉租户 RoleBinding 后必须变 Forbidden"那条
+用的是 `sleep 2` —— 而删除 RoleBinding **不会立刻拒绝**,要等授权器的 RBAC 缓存追上:
+空闲租户实测不到 1 秒,整轮 lab 末尾 apiserver 忙时超过 2 秒。于是它在**产品完全正常时报了故障**,
+反过来在清闲的机器上就算整形真的过宽也会保持沉默。改成有界轮询(上界由"控制器 29s 把 binding 补回来"决定)。
+
+**③ 报错指向的地方可以和原因完全无关。** 把上面那条改成"真的等到被拒绝"之后,
+**我新加的六节断言全部落进了那个无权限窗口**,报出来的是 `AlreadyExists` 和
+`Forbidden: User "admin" cannot list rolebindings` —— 指向 apply 路径和 RoleBinding 转换,
+而真正的原因是**排版**:那一节的注释早就写着 "This runs last, and deliberately",我加在了它后面。
+注释现在点名了这件事,免得下一个人重犯。
 
 ## 尚未覆盖
 

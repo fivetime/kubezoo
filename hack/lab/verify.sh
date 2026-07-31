@@ -1599,39 +1599,6 @@ else
 fi
 
 echo
-echo "== a request into a namespace the tenant does not have reads as NotFound =="
-# Upstream refuses it with Forbidden, because a namespace that does not exist has
-# no RoleBinding, while a cluster-admin doing the same gets NotFound. Tools read
-# the difference as fatal versus routine: helm checks whether a chart's resources
-# already exist before creating the namespace, and on Forbidden it gives up
-# without ever attempting the create.
-missing_out=$($T get configmap nothing-here -n does-not-exist 2>&1)
-if grep -q NotFound <<<"$missing_out"; then
-  ok "a missing namespace reads as NotFound, not Forbidden"
-else
-  bad "missing-namespace error" "got: $(tr '\n' ' ' <<<"$missing_out" | cut -c1-140)"
-fi
-# And a real permission problem in a namespace that does exist must still say so,
-# or this reshaping is hiding failures instead of correcting one.
-#
-# This runs last, and deliberately. Producing a genuine denial means taking the
-# tenant's RoleBinding away, and the authorizer serves a stale yes for a moment
-# after the delete and a stale no for a moment after the controller puts it back.
-# Anything scheduled after this raced those two windows and failed intermittently
-# on work that had nothing to do with it.
-$K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
-sleep 2
-# Not a configmap: the tenant's own ClusterRoleBinding grants those across its
-# namespaces now, so withdrawing the binding kubezoo issues no longer takes them
-# away -- which is correct, and would make this measure nothing.
-denied_out=$($T get serviceaccount default 2>&1)
-if grep -q -i forbidden <<<"$denied_out"; then
-  ok "a genuine denial in an existing namespace is still Forbidden"
-else
-  bad "denial reshaping is too wide" "got: $(tr '\n' ' ' <<<"$denied_out" | cut -c1-140)"
-fi
-
-echo
 echo "== a server-side apply carries what kubezoo injects, not only what the tenant owns =="
 # ⭐ The field set a forwarded apply is built from is computed before conversion,
 # so a field kubezoo *adds* is owned by nobody. Both victims are here: the
@@ -1773,6 +1740,56 @@ else
 fi
 $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
+
+echo
+echo "== a request into a namespace the tenant does not have reads as NotFound =="
+# Upstream refuses it with Forbidden, because a namespace that does not exist has
+# no RoleBinding, while a cluster-admin doing the same gets NotFound. Tools read
+# the difference as fatal versus routine: helm checks whether a chart's resources
+# already exist before creating the namespace, and on Forbidden it gives up
+# without ever attempting the create.
+missing_out=$($T get configmap nothing-here -n does-not-exist 2>&1)
+if grep -q NotFound <<<"$missing_out"; then
+  ok "a missing namespace reads as NotFound, not Forbidden"
+else
+  bad "missing-namespace error" "got: $(tr '\n' ' ' <<<"$missing_out" | cut -c1-140)"
+fi
+# And a real permission problem in a namespace that does exist must still say so,
+# or this reshaping is hiding failures instead of correcting one.
+#
+# ⚠️ This runs last, and deliberately, and it has to stay last. Producing a
+# genuine denial means taking the tenant's RoleBinding away, and the authorizer
+# serves a stale yes for a moment after the delete and a stale no for a moment
+# after the controller puts it back -- measured at 29s to be put back. Anything
+# scheduled after this runs inside a window where the tenant has no rights in its
+# own namespace, and fails on work that has nothing to do with it. Six sections
+# were once appended below this one and two of them failed for exactly that
+# reason, with error messages -- AlreadyExists, Forbidden -- that pointed
+# anywhere but here.
+$K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
+# ⚠️ A budget, not a fixed sleep. Deleting the binding does not deny anything
+# until the authorizer's RBAC cache catches up, and how long that takes depends
+# on what else the apiserver is doing -- measured at under a second on an idle
+# tenant and past two seconds at the end of this run. A `sleep 2` here passed or
+# failed on load, which is the worst kind of assertion: it reported a product
+# defect when the product was fine, and would have reported nothing if the
+# reshaping really had gone too wide on a quiet day. The upper bound is the
+# controller putting the binding back, measured at 29s.
+#
+# Not a configmap: the tenant's own ClusterRoleBinding grants those across its
+# namespaces now, so withdrawing the binding kubezoo issues no longer takes them
+# away -- which is correct, and would make this measure nothing.
+denied_out=""
+for _ in $(seq 20); do
+  denied_out=$($T get serviceaccount default 2>&1)
+  grep -q -i forbidden <<<"$denied_out" && break
+  sleep 1
+done
+if grep -q -i forbidden <<<"$denied_out"; then
+  ok "a genuine denial in an existing namespace is still Forbidden"
+else
+  bad "denial reshaping is too wide" "got: $(tr '\n' ' ' <<<"$denied_out" | cut -c1-140)"
+fi
 
 echo
 echo "== cleanup =="
