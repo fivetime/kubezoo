@@ -29,6 +29,18 @@ test:
 test-with-coverage:
 	@$(GO) test ./... -coverprofile=coverage.out
 
+# Only pkg/apis/openapi is generated here -- the OpenAPI definitions for the
+# Kubernetes APIs this gateway serves, generated from k8s.io/api rather than from
+# any type this project owns. Everything generated from the owned types lives in
+# kubezoo-contract with its own codegen.
+.PHONY: codegen
+codegen:
+	@bash hack/make-rules/codegen.sh
+
+.PHONY: verify-codegen
+verify-codegen:
+	@bash hack/make-rules/codegen.sh --verify
+
 .PHONY: envtest
 envtest:
 	@GOBIN="$(CURDIR)/bin" $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
@@ -76,4 +88,4 @@ clean:
 
 .PHONY: help
 help:
-	@echo "Targets: build, test, test-with-coverage, test-race, envtest, format, lint, docker-build, local-up, clean"
+	@echo "Targets: build, test, test-with-coverage, test-race, envtest, codegen, verify-codegen, format, lint, docker-build, local-up, clean"

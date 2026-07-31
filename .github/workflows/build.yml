@@ -34,6 +34,11 @@ jobs:
       # ⚠️ Green here is a weaker signal than it used to be. What this repository
       # is actually judged on is hack/lab, and that needs all three checked out,
       # so it is not run from CI.
+      # ⭐ 65k lines generated from k8s.io/api. Nobody hand-edits it into agreement
+      # with a Kubernetes bump, so the only thing keeping it true is regenerating
+      # and diffing. Cheap: no protoc, no apiserver.
+      - name: Generated code is up to date
+        run: make verify-codegen
       - name: Tests
         run: make test-with-coverage
       - name: Upload coverage

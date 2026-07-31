@@ -88,7 +88,7 @@ import (
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	ownedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/generated/openapi"
-	proxiedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/openapi"
+	proxiedopenapi "github.com/fivetime/kubezoo-gateway/pkg/apis/openapi"
 	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
 	_ "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/install"
 	"github.com/fivetime/kubezoo-contract/pkg/common"
