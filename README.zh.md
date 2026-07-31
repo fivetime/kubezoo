@@ -1,6 +1,24 @@
-# kubezoo-io/kubezooio
+# kubezoo-proxy
 
 [English](./README.md) | 简体中文
+
+## ⚠️ 这是三个仓库之一
+
+KubeZoo 原本是一个仓库,现在是三个,**部署时三个都要**:
+
+| | |
+|---|---|
+| **kubezoo-proxy**(本仓库) | 租户直接访问的 API 服务端,改写每一个请求和响应 |
+| [kubezoo-contract](https://github.com/fivetime/kubezoo-contract) | 翻译规则、API 类型、准入策略。另外两个仓库都依赖它 |
+| [kubezoo-controller](https://github.com/fivetime/kubezoo-controller) | 把上游集群对账成这里保存的 Tenant 声明的样子 |
+
+⛔ **只装这一个的话,集群会接受 Tenant 对象然后什么都不做** —— 没有 namespace、
+没有 RoleBinding,而且**没有任何报错指向缺了什么**。它看起来一切正常,
+直到第一个租户真的去用。
+
+为什么分开:apiserver 是**全活**的,控制器不是。合在一起时每个 kubezoo 副本都会跑
+一份控制器,三副本就是三份同时对账同一批租户。拆开之后,"要几个代理"和"要几个控制器"
+才成为两个可以分别回答的问题 —— 而两个答案不一样,控制器目前只能 1(原因见它的 README)。
 
 ## 简介
 
