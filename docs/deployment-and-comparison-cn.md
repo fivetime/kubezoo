@@ -294,7 +294,7 @@ watch 静默 / 平台自身不受影响。
 
 原文记录的是移植前的状态(`go.mod` 锁 1.24、Go 1.18)。现在 `k8s.io/*` 全族锁定
 **1.36.3**(staging 模块 `v0.36.3`),Go 基线 1.26.0,生成代码已按 1.36 重新生成,
-`make verify-codegen` 会校验签入产物是否一致 —— ⚠️ **它和被生成的代码一起在 kubezoo-contract**,不在本仓库。
+`make verify-codegen` 会校验签入产物是否一致。⚠️ **生成分在两个仓库,按"从什么生成"划分**:本仓库生成 `pkg/apis/openapi`(从 `k8s.io/api`,即 Kubernetes 自己的类型);从 kubezoo 自有 API 类型生成的一切(含 protobuf marshaller)在 **kubezoo-contract**。两边各有 `make verify-codegen`。
 
 ⚠️ 仍然成立的那一半:KubeZoo **依旧引用 `k8s.io/kubernetes` 的内部包**
 (`pkg/apis/core` 等)并 fork 了 CRD handler,所以**跨小版本升级仍是一次有意的移植,

@@ -28,8 +28,8 @@ import (
 	"k8s.io/klog"
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
-	"github.com/fivetime/kubezoo-contract/pkg/util"
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // watchMux presents one watch stream to the client while holding one upstream
@@ -124,12 +124,25 @@ func (m *watchMux) add(ctx context.Context, namespace, resourceVersion string) e
 	m.watched[namespace] = w
 
 	m.forwarder.Add(1)
-	go m.forward(w)
+	go m.forward(namespace, w)
 	return nil
 }
 
+// forget drops a namespace whose stream has ended, so that a later event for it
+// can open a new one.
+//
+// Deliberately not re-opening from here. This forwarder does not know why its
+// stream ended, and reconnecting on a namespace that was deleted would spin.
+// followNamespaces sees an Added event if the namespace comes back, and that
+// path already waits out the window where the tenant cannot read it yet.
+func (m *watchMux) forget(namespace string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.watched, namespace)
+}
+
 // forward pumps one upstream stream into the merged one.
-func (m *watchMux) forward(w watch.Interface) {
+func (m *watchMux) forward(namespace string, w watch.Interface) {
 	defer m.forwarder.Done()
 	defer w.Stop()
 	for {
@@ -138,10 +151,21 @@ func (m *watchMux) forward(w watch.Interface) {
 			return
 		case event, open := <-w.ResultChan():
 			if !open {
-				// One namespace's stream ended -- most often because the
-				// namespace was deleted. The others are still good, so this
-				// forwarder retires quietly rather than ending the client's
-				// watch.
+				// One namespace's stream ended. The others are still good, so
+				// this forwarder retires rather than ending the client's watch --
+				// but it has to forget the namespace on the way out, or the
+				// namespace is gone from the merged stream for good.
+				//
+				// ⚠️ This used to just return. add() refuses a namespace already
+				// in the map and nothing ever removed one, so the first time a
+				// single stream ended for any reason other than the whole mux
+				// stopping -- the apiserver's own randomised watch timeout, an
+				// upstream restart, a transient error, or the namespace being
+				// deleted and recreated under the same name -- that namespace
+				// stopped appearing and the client's watch stayed open reporting
+				// nothing wrong. A cache that is wrong and says nothing, which is
+				// the failure this file exists to avoid.
+				m.forget(namespace)
 				return
 			}
 			select {

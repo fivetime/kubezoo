@@ -24,7 +24,7 @@ records completed infrastructure work and the remaining compatibility boundary.
 
 The migration described below has been done. The `k8s.io/*` family is aligned on
 1.36.3 (`v0.36.3` for staging modules) through `replace` directives, the
-generated stack was regenerated against it, and `make verify-codegen` **in kubezoo-contract** checks that
+generated stack was regenerated against it, and `make verify-codegen` -- here for pkg/apis/openapi, in kubezoo-contract for everything generated from the owned types -- checks that
 the checked-in output still matches.
 
 1. ~~Select one maintained Kubernetes minor and align every `k8s.io/*` module.~~

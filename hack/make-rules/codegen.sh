@@ -21,8 +21,6 @@
 #   hack/make-rules/codegen.sh --verify   regenerate into a scratch copy and fail
 #                                         if the committed output differs
 #
-#!/usr/bin/env bash
-
 # Copyright 2022 The KubeZoo Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,30 +34,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Regenerates the generated code in this repository.
-#
-# Why this script exists
-# ----------------------
-# The largest generated file in the tree, pkg/apis/openapi/zz_generated.openapi.go
-# (~55k lines, ~1000 schemas), had no recipe: nothing in the Makefile or under
-# hack/ referenced it, so there was no way to reproduce it. That matters most
-# when moving to a new Kubernetes version, because the file has to be rebuilt
-# against the new type set and there was nothing to rebuild it with.
-#
-# The input list below was recovered from the file itself: every package it
-# carries schemas for. See "OpenAPI inputs" for what was deliberately left out.
-#
-# The generators are invoked directly rather than through github.com/zoumo/kube-codegen.
-# That wrapper cannot be installed with a modern Go toolchain (its go.mod carries
-# 17 replace directives, which `go install pkg@version` refuses), it pins
-# generators from 2021, and its copy-back step does not always run. Calling the
-# upstream generators keeps the recipe explicit and lets versions follow go.mod.
-#
-# Usage:
-#   hack/make-rules/codegen.sh            regenerate in place
-#   hack/make-rules/codegen.sh --verify   fail if the tree is out of date
-#   TARGETS=openapi hack/make-rules/codegen.sh   run only some targets
 
 set -o errexit
 set -o nounset
@@ -75,26 +49,12 @@ HEADER="${REPO_ROOT}/hack/boilerplate.go.txt"
 VERIFY=false
 [[ "${1:-}" == "--verify" ]] && VERIFY=true
 
-# Targets to run, in order. Override with TARGETS="deepcopy openapi".
+# The only target. Kept as a variable so a second one could be added without
+# reshaping the script.
 TARGETS="${TARGETS:-openapi-served}"
 
-# ---------------------------------------------------------------------------
-# The APIs this repository owns.
-#
-# Not every generator applies to every API: tenant/v1alpha1 has a hand written
-# register.go and no defaulting, so running register-gen or defaulter-gen over
-# it produces files that collide with the hand written ones. Keep the narrower
-# lists in step with what is actually checked in.
-# ---------------------------------------------------------------------------
-OWNED_APIS=(
-  "${MODULE}/pkg/apis/quota/v1alpha1"
-  "${MODULE}/pkg/apis/tenant/v1alpha1"
-)
 
 # APIs whose registration and defaulting are generated.
-GENERATED_REGISTER_APIS=(
-  "${MODULE}/pkg/apis/quota/v1alpha1"
-)
 
 # ---------------------------------------------------------------------------
 # OpenAPI inputs for pkg/apis/openapi -- the APIs KubeZoo serves to tenants.

@@ -57,15 +57,15 @@ format:
 lint:
 	@golangci-lint run
 
-# Code generation moved to kubezoo-contract along with everything it generates:
-# the API types, their deepcopy and defaulters, the protobuf marshallers, the
-# clients, and both OpenAPI definition sets. Running it from here would drive the
-# generators over pkg/apis paths this repository no longer has.
+# ⚠️ Generation is split across two repositories, by what each output is
+# generated FROM. The codegen target above produces pkg/apis/openapi, generated
+# from k8s.io/api -- Kubernetes' types. Everything generated from the API types
+# kubezoo owns, including the protobuf marshallers, is generated in
+# kubezoo-contract by its own `make codegen`.
 #
-# ⚠️ The protobuf guard travelled with it and matters: a field added without
-# regenerating is accepted by the API server, reported as created, and then
-# silently absent when read back. `make verify-codegen` in kubezoo-contract is
-# what catches that.
+# The protobuf half matters and lives over there: a field added to an owned type
+# without regenerating is accepted by the API server, reported as created, and
+# then silently absent when read back.
 
 .PHONY: docker-build
 docker-build:
