@@ -1226,6 +1226,93 @@ else
 fi
 
 echo
+echo "== a tenant's ServiceAccount gets the cluster-wide half that is its own =="
+# The projection is a RoleBinding per namespace and a RoleBinding never
+# authorizes a cluster-scoped resource, so the cluster-scoped rules of a tenant's
+# ClusterRole were dropped in silence -- the tenant wrote the binding, saw no
+# error, and its operator failed at runtime. The part that can be granted for
+# real is the part confined to the tenant's own API groups: those names carry the
+# tenant, so there is nothing to filter.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: ownscopeds.verify.example}
+spec:
+  group: verify.example
+  names: {plural: ownscopeds, singular: ownscoped, kind: OwnScoped}
+  scope: Cluster
+  versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object}}}]
+EOF
+cr_scoped=no
+for _ in $(seq 30); do
+  $T get ownscopeds >/dev/null 2>&1 && { cr_scoped=yes; break; }
+  sleep 2
+done
+if [ "$cr_scoped" = yes ]; then
+  $T -n default create serviceaccount own-op >/dev/null 2>&1
+  $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: own-op}
+rules:
+  - apiGroups: ["verify.example"]
+    resources: ["ownscopeds"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+EOF
+  expect_allowed "a tenant binds its ServiceAccount to a role naming its own cluster-scoped resource" \
+    $T apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: own-op}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: own-op}
+subjects: [{kind: ServiceAccount, name: own-op, namespace: default}]
+EOF
+  own_sa="system:serviceaccount:$NS:own-op"
+  own_group="$TID-verify.example"
+  granted=no
+  for _ in $(seq 30); do
+    [ "$($K auth can-i list "ownscopeds.$own_group" --as="$own_sa" 2>/dev/null)" = yes ] && { granted=yes; break; }
+    sleep 2
+  done
+  if [ "$granted" = yes ]; then
+    ok "and it can read that resource cluster-wide, which no RoleBinding could have given it"
+  else
+    bad "it can read that resource cluster-wide" \
+        "still refused, so the cluster-scoped half of its own ClusterRole was dropped in silence"
+  fi
+  # The whole reason this is safe: the group name carries the tenant.
+  if [ "$($K auth can-i list "ownscopeds.999999-verify.example" --as="$own_sa" 2>/dev/null)" = no ]; then
+    ok "while the same resource in another tenant's group is refused, by name and not by filtering"
+  else
+    bad "the same resource in another tenant's group is refused" "it can read another tenant's"
+  fi
+  # Only its own groups: a rule over native resources must not come with it.
+  if [ "$($K auth can-i list secrets --as="$own_sa" 2>/dev/null)" = no ] &&
+     [ "$($K auth can-i get customresourcedefinitions --as="$own_sa" 2>/dev/null)" = no ]; then
+    ok "and nothing native comes with it, though the same role granted secrets too"
+  else
+    bad "nothing native comes with it" \
+        "secrets=$($K auth can-i list secrets --as="$own_sa" 2>/dev/null) crds=$($K auth can-i get customresourcedefinitions --as="$own_sa" 2>/dev/null)"
+  fi
+  # Withdrawing has to be as prompt as granting, or a deleted binding keeps
+  # granting with nothing in the tenant's view to explain it.
+  $T delete clusterrolebinding own-op >/dev/null 2>&1
+  withdrawn=no
+  for _ in $(seq 30); do
+    [ "$($K auth can-i list "ownscopeds.$own_group" --as="$own_sa" 2>/dev/null)" = no ] && { withdrawn=yes; break; }
+    sleep 2
+  done
+  if [ "$withdrawn" = yes ]; then
+    ok "and deleting the binding takes it away again"
+  else
+    bad "deleting the binding takes it away again" "it still grants, and nothing the tenant can see says why"
+  fi
+fi
+
+echo
 echo "== a tenant cannot grant anything to an identity it does not own =="
 # Group subjects used to pass through unrewritten while User and ServiceAccount
 # subjects were prefixed. Measured before this: a tenant bound system:authenticated

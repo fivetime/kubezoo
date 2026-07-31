@@ -618,7 +618,10 @@ func syncNamespaceRoleBindings(coreClient v1.CoreV1Interface, rbacClient rbaccli
 		}
 	}
 
-	return syncProjectedClusterRoleBindings(coreClient, rbacClient, tenantId, namespaces.Items)
+	if err := syncProjectedClusterRoleBindings(coreClient, rbacClient, tenantId, namespaces.Items); err != nil {
+		return err
+	}
+	return syncOwnGroupClusterBindings(rbacClient, tenantId, mode)
 }
 
 // syncProjectedClusterRoleBindings keeps a tenant's ClusterRoleBindings present
@@ -699,6 +702,185 @@ func syncProjectedClusterRoleBindings(coreClient v1.CoreV1Interface, rbacClient 
 				return fmt.Errorf("projecting clusterrolebinding %s into namespace %s: %w",
 					name, ns.Name, err)
 			}
+		}
+	}
+	return nil
+}
+
+// ownGroupBindingPrefix begins the names of the real cluster-scoped bindings
+// kubezoo derives from a tenant's own projected ones.
+//
+// Under kubezoo:, which a tenant cannot address: names of cluster-scoped objects
+// a tenant writes get the tenant prefix, so anything it asks for lands under
+// <tid>-.
+const ownGroupBindingPrefix = "kubezoo:crgroups:"
+
+// ownGroupRules keeps the rules of a role that name nothing but the tenant's own
+// API groups.
+//
+// A tenant's CRD groups are prefixed -- 111111-cert-manager.io -- so the group
+// name itself carries the tenant, and a rule confined to those groups can only
+// ever reach that tenant's objects. That is what makes this safe to grant for
+// real, cluster-wide, rather than through the projection: there is nothing to
+// filter, because there is nothing else in there. Measured: a ServiceAccount
+// granted this lists clusterissuers in its own group and is refused in another
+// tenant's.
+//
+// A rule survives only if every group it names is the tenant's. A wildcard is
+// not the tenant's, and neither is the core group, and a rule mixing one of
+// those with a tenant group would grant the lot. Rules over non-resource URLs
+// have no groups at all and are dropped with everything else.
+func ownGroupRules(tenantID string, rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
+	prefix := tenantID + "-"
+	kept := make([]rbacv1.PolicyRule, 0, len(rules))
+	for _, rule := range rules {
+		if len(rule.APIGroups) == 0 || len(rule.Resources) == 0 {
+			continue
+		}
+		ownOnly := true
+		for _, group := range rule.APIGroups {
+			if !strings.HasPrefix(group, prefix) {
+				ownOnly = false
+				break
+			}
+		}
+		if ownOnly {
+			kept = append(kept, rule)
+		}
+	}
+	return kept
+}
+
+// syncOwnGroupClusterBindings gives a tenant's ServiceAccounts the cluster-wide
+// half of what it bound them to, for the part of it that is its own.
+//
+// The projection cannot carry this: it is a RoleBinding per namespace, and a
+// RoleBinding never authorizes a cluster-scoped resource, so the cluster-scoped
+// rules of a tenant's ClusterRole were silently dropped -- the tenant wrote the
+// binding, saw no error, and its operator failed at runtime. This is the part of
+// that gap which can be closed without widening anything: rules confined to the
+// tenant's own API groups.
+//
+// What is deliberately not here is the rest of it -- list and watch on native
+// cluster-scoped resources such as customresourcedefinitions. RBAC cannot bound
+// those by name, since a list request names nothing, so granting them would rest
+// on kubezoo's filtering rather than on RBAC, and would have to be withheld from
+// anything not coming through kubezoo. That is a separate decision; see the
+// audit.
+func syncOwnGroupClusterBindings(rbacClient rbacclient.RbacV1Interface, tenantID string,
+	mode tenantv1alpha1.TenantSuspensionMode) error {
+
+	recordNamespace := tenantID + "-" + metav1.NamespaceSystem
+	selector := labels.SelectorFromSet(labels.Set{common.ProjectedClusterRoleBindingLabelKey: "true"})
+	records, err := rbacClient.RoleBindings(recordNamespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("listing tenant %s's projected clusterrolebindings: %w", tenantID, err)
+	}
+
+	wanted := map[string]*rbacv1.ClusterRoleBinding{}
+	roles := map[string]*rbacv1.ClusterRole{}
+	// A frozen tenant keeps nothing: its workloads reach upstream directly, so
+	// leaving these would let a suspended tenant carry on reading.
+	if !isFreeze(mode) {
+		for i := range records.Items {
+			record := &records.Items[i]
+			if record.RoleRef.Kind != "ClusterRole" {
+				continue
+			}
+			role, err := rbacClient.ClusterRoles().Get(context.TODO(), record.RoleRef.Name, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					// A binding pointing at nothing. The tenant can see that for
+					// itself, and it grants nothing meanwhile.
+					continue
+				}
+				return fmt.Errorf("reading clusterrole %s for tenant %s: %w", record.RoleRef.Name, tenantID, err)
+			}
+			rules := ownGroupRules(tenantID, role.Rules)
+			if mode == tenantv1alpha1.SuspensionReadOnly {
+				rules = narrowToReadOnly(rules)
+			}
+			if len(rules) == 0 {
+				continue
+			}
+			name := ownGroupBindingPrefix + tenantID + ":" + util.TrimProjectedBindingName(record.Name)
+			roles[name] = &rbacv1.ClusterRole{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   name,
+					Labels: map[string]string{common.TenantNamespaceLabelKey: tenantID},
+				},
+				Rules: rules,
+			}
+			wanted[name] = &rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   name,
+					Labels: map[string]string{common.TenantNamespaceLabelKey: tenantID},
+				},
+				RoleRef: rbacv1.RoleRef{
+					APIGroup: rbacv1.GroupName,
+					Kind:     "ClusterRole",
+					Name:     name,
+				},
+				Subjects: record.Subjects,
+			}
+		}
+	}
+
+	// Withdraw first: a binding whose record is gone still grants, and the
+	// tenant has nothing in its own view that would explain it.
+	existing, err := rbacClient.ClusterRoleBindings().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(labels.Set{common.TenantNamespaceLabelKey: tenantID}).String(),
+	})
+	if err != nil {
+		return fmt.Errorf("listing tenant %s's derived cluster bindings: %w", tenantID, err)
+	}
+	for i := range existing.Items {
+		name := existing.Items[i].Name
+		if !strings.HasPrefix(name, ownGroupBindingPrefix) {
+			continue
+		}
+		if _, keep := wanted[name]; keep {
+			continue
+		}
+		if err := rbacClient.ClusterRoleBindings().Delete(context.TODO(), name,
+			metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("withdrawing derived cluster binding %s: %w", name, err)
+		}
+		if err := rbacClient.ClusterRoles().Delete(context.TODO(), name,
+			metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("withdrawing derived cluster role %s: %w", name, err)
+		}
+	}
+
+	for name, role := range roles {
+		roleOpts := reconciliation.ReconcileRoleOptions{
+			Role:                   reconciliation.ClusterRoleRuleOwner{ClusterRole: role},
+			Client:                 reconciliation.ClusterRoleModifier{Client: rbacClient.ClusterRoles()},
+			Confirm:                true,
+			RemoveExtraPermissions: true,
+		}
+		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			_, err := roleOpts.Run()
+			return err
+		}); err != nil {
+			return fmt.Errorf("reconciling derived cluster role %s: %w", name, err)
+		}
+		bindingOpts := reconciliation.ReconcileRoleBindingOptions{
+			RoleBinding:         reconciliation.ClusterRoleBindingAdapter{ClusterRoleBinding: wanted[name]},
+			Client:              reconciliation.ClusterRoleBindingClientAdapter{Client: rbacClient.ClusterRoleBindings()},
+			Confirm:             true,
+			RemoveExtraSubjects: true,
+		}
+		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			_, err := bindingOpts.Run()
+			return err
+		}); err != nil {
+			return fmt.Errorf("reconciling derived cluster binding %s: %w", name, err)
 		}
 	}
 	return nil

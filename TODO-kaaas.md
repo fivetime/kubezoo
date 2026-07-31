@@ -193,14 +193,24 @@
       靠 kubezoo 请求侧兜底 ⇒ 请求能通,但对象里的 namespace 与它认为的不一致。
       彻底解决要给每个 namespace 生成 ConfigMap 挂到那个路径
 
-- [ ] ⛔ **P0:集群级授权分发给租户的 SA**(审计 §AS,三条都实测过)
-      ✅ **能且干净**:租户自己前缀的 **CR 组**(ClusterIssuer 这类)—— 真 ClusterRoleBinding 限定在
-      `111111-cert-manager.io` 上即可,**组名带租户 ⇒ 结构封闭、零信任扩大**(实测别人的组 = no)。
-      **operator 的集群级 CR 全归这一类**
-      ✅ 能:原生集群级资源的 `get` —— `resourceNames` 精确匹配租户前缀的对象名
-      ⛔ **不能**:原生集群级资源的 `list`/`watch` —— **list 没有名字**,`resourceNames` 对它不生效
-      (RBAC 的定义,不是实现问题)⇒ 只能走 §AN 的**路径绑定组**
-      对照实验:手工把这半授上去,cainjector CrashLoop→Running、controller 拿到 leader
+- [x] ✅ **集群级授权分发给 SA:结构封闭的那一半已做**(审计 §AY)
+      判据 = **规则里的 API 组是否全部带租户前缀**(`111111-cert-manager.io` 组名自带租户
+      ⇒ 结构上够不到别人,不需要过滤)⇒ 派生**真的集群级** ClusterRole+Binding
+      `kubezoo:crgroups:<租户ID>:<名字>`,subject 照抄投影记录。
+      ⭐ 过滤**整条留或整条丢**:`*` / core / 混写 / 只是开头像租户 ID 的组,全丢。单测 9 条。
+      ⚠️ **必须有 informer**:租户建 CRB 不会重新处理该租户 ⇒ 原本要等 resync(最长 10min,
+      实测 30s 仍未出现);加了按投影标签选择的 RoleBinding informer 后 **建/删各 ~2s**。
+      ⚠️ 这条**不能**在请求路径做:派生的是集群级对象,而请求路径冒充的是租户,租户在集群级什么都没有。
+      冻结时一并撤除。守卫 5 条,红测红 1 条(其余四条是安全对照,本来就该两边都绿)
+- [ ] ⛔ **剩下的一半:原生集群级资源的 `list`/`watch`**(CRD / 两种 webhookconfiguration)
+      `resourceNames` 对 list 不生效(**list 请求没有名字**)⇒ 只能走 §AN 的路径绑定组,
+      那意味着**隔离从"RBAC 兜底"退成"kubezoo 过滤正确"**,且暴露面从每租户一个身份
+      变成**每个工作负载**;还要解决"该不该给这个 SA"在热路径上查+缓存陈旧。**需单独决策**
+- [ ] ⛔ **建议不做:`certificatesigningrequests` + `signers/approve`**
+      租户今天**完全没有**这两项(核过 `clusterScopedRules()`)⇒ 不是"传下去"而是**新开权限**;
+      批准 CSR = **签发客户端证书**,身份层的东西。
+      ⚠️ 另记:`apiservices` kubezoo 不提供,授权是**惰性的**且没有任何报错指向它
+
 - [ ] ⛔ **P0:投影只能承载命名空间级授权 ⇒ cert-manager 装得进去、跑不起来**(审计 §AR,真装过)
       `helm install` 走完全部阶段(6 CRD / 3 Deployment / 13 ClusterRole / 10 CRB / 1 webhook 配置),
       但 3 个 Pod 挂 2 个:cainjector 读 `customresourcedefinitions` 被拒、

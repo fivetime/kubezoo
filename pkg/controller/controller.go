@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"net"
 	"reflect"
 	"strconv"
@@ -186,6 +187,33 @@ func Run(stopCh <-chan struct{}, ti cache.SharedIndexInformer, tenantCli tenantc
 	// groups change when the tenant adds or removes a CRD, and waiting for the
 	// tenant resync leaves it unable to grant rights over a CRD it has just
 	// created -- measured: the create is Forbidden until the tenant is touched.
+	// A tenant's ClusterRoleBinding becomes a RoleBinding in each of its
+	// namespaces, and the cluster-scoped half of what it grants -- the part
+	// confined to the tenant's own API groups -- is derived from that record
+	// here. The tenant writes the binding through the proxy, which cannot create
+	// the derived objects itself because they are cluster-scoped and the tenant
+	// holds nothing at cluster scope. So the controller has to notice, and
+	// waiting for the tenant resync would leave a chart's operator unable to read
+	// its own custom resources for as long as that takes -- measured at over
+	// thirty seconds and bounded only by the resync period.
+	//
+	// The selector is the label the records carry, so this watches those and
+	// nothing else.
+	rbFactory := informers.NewSharedInformerFactoryWithOptions(typedCli, namespaceResyncPeriod,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = common.ProjectedClusterRoleBindingLabelKey
+		}))
+	rbInformer := rbFactory.Rbac().V1().RoleBindings().Informer()
+	if _, err := rbInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { tc.enqueueProjectionOwner(obj) },
+		UpdateFunc: func(_, obj interface{}) { tc.enqueueProjectionOwner(obj) },
+		DeleteFunc: func(obj interface{}) { tc.enqueueProjectionOwner(obj) },
+	}); err != nil {
+		utilruntime.HandleError(fmt.Errorf("adding the projected binding event handler: %w", err))
+		return
+	}
+	rbFactory.Start(stopCh)
+
 	crdFactory := externalinformer.NewSharedInformerFactory(tc.upstreamCRDClient, namespaceResyncPeriod)
 	crdInformer := crdFactory.Apiextensions().V1().CustomResourceDefinitions().Informer()
 	if _, err := crdInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -234,6 +262,24 @@ func (tc *TenantController) enqueueNamespaceOwner(obj interface{}) {
 // tenant's CRD groups on the way in, so 111111-cert-manager.io belongs to
 // 111111 by construction, and a CRD the platform installed has no prefix and is
 // nobody's.
+// enqueueProjectionOwner queues the tenant a projected ClusterRoleBinding
+// belongs to, so that the cluster-scoped half it implies is derived as soon as
+// the tenant writes it.
+func (tc *TenantController) enqueueProjectionOwner(obj interface{}) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	binding, ok := obj.(*rbacv1.RoleBinding)
+	if !ok {
+		return
+	}
+	tenantID, _, found := strings.Cut(binding.Namespace, "-")
+	if !found || tenantID == "" {
+		return
+	}
+	tc.queue.Add(Event{tenantId: tenantID, eventType: Update})
+}
+
 func (tc *TenantController) enqueueCRDOwner(obj interface{}) {
 	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = tombstone.Obj
