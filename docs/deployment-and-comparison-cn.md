@@ -59,7 +59,6 @@ KubeZoo **部署在上游集群内部**,现在是**两份清单、三个组件**
 
 # 面向租户的服务端证书与客户端 CA
 - --client-ca-file=/etc/kubezoo/pki/ca.pem
-- --client-ca-key-file=/etc/kubezoo/pki/ca-key.pem      # ← 注意:CA 私钥也在这里
 - --tls-cert-file=/etc/kubezoo/pki/kubernetes.pem
 - --tls-private-key-file=/etc/kubezoo/pki/kubernetes-key.pem
 
@@ -69,8 +68,6 @@ KubeZoo **部署在上游集群内部**,现在是**两份清单、三个组件**
 - --proxy-client-ca-file=/etc/upstream/pki/ca.crt
 - --proxy-upstream-master=https://kubernetes             # ← 集群内 kubernetes Service
 
-- --proxy-bind-address=127.0.0.1
-- --proxy-secure-port=6443
 - --authorization-mode=AlwaysAllow                       # ← 见 §6 的安全说明
 ```
 
@@ -131,8 +128,9 @@ KubeZoo **部署在上游集群内部**,现在是**两份清单、三个组件**
 
 ### 4.1 签发
 
-管理员创建 Tenant 对象后,KubeZoo 用自己持有的 CA 私钥为该租户签发一张客户端证书
-(`pkg/util/certs.go:99-100`):
+管理员创建 Tenant 对象后,**kubezoo-controller** 用 CA 私钥为该租户签发一张客户端证书
+(kubezoo-contract 的 `pkg/util/certs.go`)。⚠️ 签发的是**控制器**,不是 gateway ——
+gateway 只拿 `ca.pem` 做验证,它的 Secret 里根本没有私钥。
 
 ```go
 OrganizationalUnit: []string{tenantID},        // OU = 6 位租户 ID

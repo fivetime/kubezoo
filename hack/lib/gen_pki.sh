@@ -95,7 +95,18 @@ EOF
 
 gen_kubernetes_cert() {
 
-    KUBERNETES_HOSTNAMES=kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster,kubernetes.svc.cluster.local,localhost,host.minikube.internal
+    # ⭐ kubezoo* is here because the controller reaches this server by Service
+    # name. It did not used to: the controller ran inside this process and never
+    # opened a connection. Splitting it out created a client that verifies this
+    # certificate against a host the certificate did not name, and the failure is
+    # the worst-shaped one available -- the controller starts, blocks, looks
+    # healthy, and reconciles nothing, which is exactly what both manifests warn
+    # happens when you forget to deploy it at all.
+    #
+    # ⚠️ The lab could never have caught this. It runs the controller as a host
+    # process against 127.0.0.1, which was in the list already; only the manifest
+    # path uses the Service name.
+    KUBERNETES_HOSTNAMES=kubernetes,kubernetes.default,kubernetes.default.svc,kubernetes.default.svc.cluster,kubernetes.svc.cluster.local,localhost,host.minikube.internal,kubezoo,kubezoo.default,kubezoo.default.svc,kubezoo.default.svc.cluster.local
 
     cat >$KUBEZOO_DIR/kubernetes-csr.json <<EOF
 {
@@ -294,6 +305,11 @@ set_context() {
         --user=zoo-admin
 }
 
+# ⚠️ Kept in step with cmd/kubezoo/app/options by hand -- nothing checks it. It is
+# printed for an operator to paste, so a flag that lives here and not in the
+# binary is a copy-paste that fails to start. --client-ca-key-file,
+# --proxy-bind-address and --proxy-secure-port were exactly that after the
+# controller moved out and stopped needing them.
 kubezoo_parametes="
 
 --allow-privileged=true \
@@ -309,7 +325,6 @@ kubezoo_parametes="
 --storage-backend=etcd3 \
 --authorization-mode=AlwaysAllow \
 --client-ca-file=$KUBEZOO_DIR/ca.pem \
---client-ca-key-file=$KUBEZOO_DIR/ca-key.pem \
 --tls-cert-file=$KUBEZOO_DIR/kubernetes.pem \
 --tls-private-key-file=$KUBEZOO_DIR/kubernetes-key.pem \
 --service-account-key-file=$UPSTREAM_DIR/sa.pub \
@@ -322,8 +337,6 @@ kubezoo_parametes="
 --watch-cache=true \
 --proxy-upstream-master=$KIND_SERVER \
 --service-account-lookup=false \
---proxy-bind-address=127.0.0.1 \
---proxy-secure-port=6443 \
 --api-audiences=foo
 "
 

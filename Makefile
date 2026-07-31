@@ -76,4 +76,4 @@ clean:
 
 .PHONY: help
 help:
-	@echo "Targets: build, test-unit, test-integration, test, test-race, format, lint, codegen, verify-codegen, docker-build, local-up, clean"
+	@echo "Targets: build, test, test-with-coverage, test-race, envtest, format, lint, docker-build, local-up, clean"
