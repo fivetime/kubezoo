@@ -219,8 +219,20 @@ func (m *watchMux) followNamespaces(ctx context.Context, tp *tenantProxy) error 
 // outlasts the retries is reported, and the message says what the client has to
 // do about it.
 func (m *watchMux) join(ctx context.Context, namespace, resourceVersion string) {
-	const attempts = 12
-	backoff := 250 * time.Millisecond
+	// The budget is what a new namespace costs to become readable, not a guess.
+	// The tenant controller has to notice the namespace, write the RoleBinding,
+	// and then the authorizer's cache has to catch up -- measured at roughly
+	// 170ms and 310ms when that controller ran inside this process and had one
+	// job. It is its own process now and does more per namespace, and the same
+	// wait was measured at about six seconds.
+	//
+	// ⚠️ Three seconds was not merely tight, it was silent: join gave up, logged,
+	// and the client kept a stream that looked healthy and never mentioned the
+	// namespace again. Thirty seconds is generous on purpose -- the cost of
+	// waiting too long is a late event, and the cost of waiting too little is a
+	// cache that is wrong and says nothing.
+	const attempts = 60
+	backoff := 500 * time.Millisecond
 	var err error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err = m.add(ctx, namespace, resourceVersion); err == nil {

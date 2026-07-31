@@ -25,6 +25,10 @@ build:
 test:
 	@$(GO) test ./...
 
+.PHONY: test-with-coverage
+test-with-coverage:
+	@$(GO) test ./... -coverprofile=coverage.out
+
 .PHONY: envtest
 envtest:
 	@GOBIN="$(CURDIR)/bin" $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
@@ -41,17 +45,15 @@ format:
 lint:
 	@golangci-lint run
 
-.PHONY: codegen
-codegen:
-	@bash hack/make-rules/codegen.sh
-
-.PHONY: verify-codegen
-verify-codegen:
-	@bash hack/make-rules/codegen.sh --verify
-
-.PHONY: code-gen client-gen
-code-gen: codegen
-client-gen: codegen
+# Code generation moved to kubezoo-contract along with everything it generates:
+# the API types, their deepcopy and defaulters, the protobuf marshallers, the
+# clients, and both OpenAPI definition sets. Running it from here would drive the
+# generators over pkg/apis paths this repository no longer has.
+#
+# ⚠️ The protobuf guard travelled with it and matters: a field added without
+# regenerating is accepted by the API server, reported as created, and then
+# silently absent when read back. `make verify-codegen` in kubezoo-contract is
+# what catches that.
 
 .PHONY: docker-build
 docker-build:

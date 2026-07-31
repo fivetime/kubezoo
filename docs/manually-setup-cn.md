@@ -3,6 +3,17 @@
 本文介绍如何在 Kubernetes 集群上部署 KubeZoo. 虽然 KubeZoo 可以对接任何标准的 Kubernetes 集群，但是作为样例,
 本文会以 `kind` 集群作为上游集群.
 
+
+> ⚠️ **这里描述的只是三个组件之一。** `make local-up` 起的是 kubezoo-gateway,
+> 并且**在能找到同级的 [kubezoo-controller](https://github.com/fivetime/kubezoo-controller)
+> 检出时**一并部署它。没有控制器的话,集群会**接受 Tenant 对象然后什么都不做** ——
+> 没有 namespace、没有 RoleBinding,**也没有任何报错指向缺了什么**。
+> 准入策略是第三块,来自
+> [kubezoo-contract](https://github.com/fivetime/kubezoo-contract);
+> 缺了它,租户可以点名平台的任意 RuntimeClass 从而跑出沙箱。
+>
+> 检出目录不在同级时,用 `KUBEZOO_CONTROLLER_DIR` 和 `KUBEZOO_CONTRACT_DIR` 指定。
+
 ### 前置条件
 
 请安装最新版本的 

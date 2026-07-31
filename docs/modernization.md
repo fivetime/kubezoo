@@ -24,7 +24,7 @@ records completed infrastructure work and the remaining compatibility boundary.
 
 The migration described below has been done. The `k8s.io/*` family is aligned on
 1.36.3 (`v0.36.3` for staging modules) through `replace` directives, the
-generated stack was regenerated against it, and `make verify-codegen` checks that
+generated stack was regenerated against it, and `make verify-codegen` **in kubezoo-contract** checks that
 the checked-in output still matches.
 
 1. ~~Select one maintained Kubernetes minor and align every `k8s.io/*` module.~~
@@ -51,7 +51,7 @@ Until then, vulnerability reporting remains visible but non-blocking.
 ## What green does not tell you
 
 Recorded because the port produced it three times over: compiling, `make test`
-passing, `verify-codegen` passing and the binary starting are four independent
+passing, `verify-codegen` (now in kubezoo-contract) passing and the binary starting are four independent
 things, and none of them implies the server can serve a request. The port was
 green on all four while every request failed, on three defects a compiler cannot
 see -- an unset OpenAPI v3 config, the project's own types missing from the

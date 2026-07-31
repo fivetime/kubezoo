@@ -7,8 +7,10 @@ toolchain go1.26.5
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/go-logr/logr v1.4.3
+	github.com/go-test/deep v1.0.8
 	github.com/golang/protobuf v1.5.4
 	github.com/google/gnostic-models v0.7.0
+	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	github.com/stretchr/testify v1.11.1
@@ -29,7 +31,6 @@ require (
 
 require (
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	k8s.io/component-helpers v0.36.3 // indirect
 	sigs.k8s.io/apiserver-runtime v1.1.1 // indirect
 )
@@ -52,7 +53,7 @@ require (
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/fivetime/kubezoo-contract v0.2.0
+	github.com/fivetime/kubezoo-contract v0.3.0
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

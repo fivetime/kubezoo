@@ -87,20 +87,20 @@ import (
 	"k8s.io/kubernetes/pkg/routes"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
-	"github.com/fivetime/kubezoo-contract/pkg/common"
-	"github.com/fivetime/kubezoo-contract/pkg/convert"
-	"github.com/fivetime/kubezoo-contract/pkg/util"
-	"github.com/fivetime/kubezoo-gateway/cmd/kubezoo/app/options"
 	ownedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/generated/openapi"
 	proxiedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/openapi"
 	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
 	_ "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/install"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
-	tenantfilters "github.com/fivetime/kubezoo-gateway/pkg/filters"
 	"github.com/fivetime/kubezoo-contract/pkg/generated/clientset/versioned"
 	quotaclient "github.com/fivetime/kubezoo-contract/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
 	"github.com/fivetime/kubezoo-contract/pkg/generated/informers/externalversions"
 	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
+	"github.com/fivetime/kubezoo-gateway/cmd/kubezoo/app/options"
+	"github.com/fivetime/kubezoo-gateway/pkg/convert"
+	tenantfilters "github.com/fivetime/kubezoo-gateway/pkg/filters"
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy"
 	tenantrest "github.com/fivetime/kubezoo-gateway/pkg/rest"
 )
@@ -375,6 +375,23 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 	// ⚠️ Deployment consequence: kubezoo alone no longer creates a tenant's
 	// namespaces or issues its RoleBindings. A cluster running only this will
 	// accept Tenant objects and do nothing with them.
+	// ⭐ Start it here. Nothing else does any more, and nothing used to either --
+	// the informer got started as a side effect of being handed to
+	// controller.Run, which did `go tc.tenantInformer.Run(stopCh)`. Taking the
+	// controller out of this process took the gateway's own informer with it.
+	//
+	// What that broke is not the controller's work, which moved wholesale and is
+	// fine. It is WithTenantSuspension: its lister was permanently empty, so
+	// suspensionFor found no tenant and treated every one as not suspended. The
+	// filter fails open by design, so nothing logged and nothing errored -- a
+	// frozen tenant's kubectl was simply refused by upstream RBAC instead, which
+	// looks close enough to working to pass a casual read. The hook below waits
+	// for a sync that was never going to happen, so even the readiness gate said
+	// nothing.
+	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("start-tenant-informer", func(context genericapiserver.PostStartHookContext) error {
+		controlPlaneConfig.tenantInformers.Start(context.Done())
+		return nil
+	})
 	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("tenant-informer-synced", func(context genericapiserver.PostStartHookContext) error {
 		return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 			return controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Informer().HasSynced(), nil
@@ -544,12 +561,6 @@ type ProxyConfig struct {
 
 	proxyTransport http.RoundTripper
 	upstreamMaster *url.URL
-
-	proxyBindAddress string
-	proxySecurePort  int
-
-	clientCAFile    string
-	clientCAKeyFile string
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -656,21 +667,17 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	}
 
 	return &ProxyConfig{
-		typeConverter:    typeConverter,
-		dynamicClient:    dynamicClient,
-		discoveryClient:  discoveryClient,
-		crdClient:        crdClient,
-		typedClientSet:   typedClientSet,
-		crdInformers:     crdInformers,
-		quotaClient:      clusterQuotaClient,
-		nativeConvertor:  nativeConvertor,
-		customConvertor:  customConvertor,
-		proxyTransport:   proxyTransport,
-		upstreamMaster:   upstreamMaster,
-		proxyBindAddress: o.BindAddress,
-		proxySecurePort:  o.SecurePort,
-		clientCAFile:     o.ClientCAFile,
-		clientCAKeyFile:  o.ClientCAKeyFile,
+		typeConverter:   typeConverter,
+		dynamicClient:   dynamicClient,
+		discoveryClient: discoveryClient,
+		crdClient:       crdClient,
+		typedClientSet:  typedClientSet,
+		crdInformers:    crdInformers,
+		quotaClient:     clusterQuotaClient,
+		nativeConvertor: nativeConvertor,
+		customConvertor: customConvertor,
+		proxyTransport:  proxyTransport,
+		upstreamMaster:  upstreamMaster,
 	}, nil
 }
 

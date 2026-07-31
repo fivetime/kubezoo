@@ -541,9 +541,27 @@ echo "== a cross-namespace list is assembled from the tenant's namespaces =="
 for extra in fanout-a fanout-b; do
   $T create namespace "$extra" >/dev/null 2>&1
 done
-for _ in $(seq 20); do
-  [ "$($K get ns "$TID-fanout-a" -o jsonpath='{.status.phase}' 2>/dev/null)" = Active ] && break
-  sleep 2
+# Wait until the tenant can actually write in the new namespaces, not until they
+# exist. Those are different moments: the namespace is Active as soon as upstream
+# creates it, while the RoleBinding that lets the tenant use it is written by the
+# controller afterwards and then has to reach the authorizer's cache.
+#
+# Waiting on Active was passing on timing alone. It stopped when the controller
+# grew more per-namespace work, and the symptom was this fixture silently
+# creating nothing -- which reads as "the cross-namespace list is broken" rather
+# than "the setup had not finished".
+for extra in fanout-a fanout-b; do
+  writable=no
+  for _ in $(seq 30); do
+    if $T -n "$extra" create configmap fan-probe --from-literal=a=b >/dev/null 2>&1; then
+      $T -n "$extra" delete configmap fan-probe >/dev/null 2>&1
+      writable=yes
+      break
+    fi
+    sleep 2
+  done
+  [ "$writable" = yes ] || bad "cross-namespace fixture" \
+    "the tenant still cannot write in $extra, so nothing below would mean anything"
 done
 for extra in default fanout-a fanout-b; do
   for i in 1 2 3; do
@@ -593,7 +611,11 @@ echo "== a cross-namespace watch is merged from the tenant's namespaces =="
 # none are missing: a stream that quietly stops covering a namespace leaves an
 # informer's cache wrong while it believes it is current.
 watch_log=$LAB/verify-watch.log
-timeout 60 $T get configmaps -A -w --no-headers >"$watch_log" 2>&1 &
+# The budget has to outlast the polling below -- 6s + up to 60s waiting for the
+# late namespace to become writable + up to 40s for the event to travel. At 60s
+# the watch was being killed before the event it was waiting for could arrive,
+# which reads exactly like "a namespace created mid-watch is invisible".
+timeout 180 $T get configmaps -A -w --no-headers >"$watch_log" 2>&1 &
 watch_pid=$!
 sleep 6
 $T -n fanout-a create configmap watched-existing --from-literal=a=b >/dev/null 2>&1
@@ -601,9 +623,20 @@ $T -n fanout-a create configmap watched-existing --from-literal=a=b >/dev/null 2
 # read it for a moment after it appears -- the RoleBinding has to reach the
 # authorizer -- so this is also a test that the join waits that out.
 $T create namespace watch-late >/dev/null 2>&1
-sleep 10
-$T -n watch-late create configmap watched-new --from-literal=a=b >/dev/null 2>&1
-sleep 12
+# Poll rather than sleep a fixed ten seconds. How long the tenant waits for a new
+# namespace to become writable depends on how much the controller has to do per
+# namespace, and that has grown -- a fixed wait turns "the controller got slower"
+# into "the merged watch is broken".
+for _ in $(seq 30); do
+  $T -n watch-late create configmap watched-new --from-literal=a=b >/dev/null 2>&1 && break
+  sleep 2
+done
+# Then give the event time to travel: the mux has to notice the namespace, open a
+# stream on it, and forward. Poll for the same reason.
+for _ in $(seq 20); do
+  grep -q watched-new "$watch_log" && break
+  sleep 2
+done
 kill "$watch_pid" >/dev/null 2>&1
 wait "$watch_pid" 2>/dev/null
 

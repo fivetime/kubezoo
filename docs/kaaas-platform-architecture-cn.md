@@ -491,11 +491,11 @@ exclude:
 
 | 策略 | 状态 | 说明 |
 |---|---|---|
-| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | ✅ 已写并实测 | `config/policy/tenant-platform-classes.yaml`。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`。kubezoo 里曾实现过一版,已按 §8.0 判据删除(不越俎代庖)。<br>实现三坑:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);连 `spec.priority` 一起清;连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
-| **拒绝 `spec.nodeName`** | ✅ 已写并实测 | `config/policy/tenant-scheduling.yaml`。只匹配 `CREATE` —— 调度器绑定后 `spec.nodeName` 就有值,规则若也匹配 `UPDATE`,已调度的 Pod 再也改不动 |
+| **`runtimeClassName` / `ingressClassName` / `priorityClassName` 由平台决定** | ✅ 已写并实测 | **kubezoo-contract** 的 `config/policy/tenant-platform-classes.yaml`。⚠️ **本行原先的理由是错的**:原文说"租户写 `kata` 会被改写成 `111111-kata` 而不存在" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效,能引用平台任意 RuntimeClass(含 runc ⇒ 跑出沙箱)与 `system-cluster-critical`。kubezoo 里曾实现过一版,已按 §8.0 判据删除(不越俎代庖)。<br>实现三坑:PodSpec 嵌 **9** 个 kind(Kyverno autogen 只覆盖 8,缺 `PodTemplate`);连 `spec.priority` 一起清;连废弃的 `kubernetes.io/ingress.class` 注解一起删 |
+| **拒绝 `spec.nodeName`** | ✅ 已写并实测 | **kubezoo-contract** 的 `config/policy/tenant-scheduling.yaml`。只匹配 `CREATE` —— 调度器绑定后 `spec.nodeName` 就有值,规则若也匹配 `UPDATE`,已调度的 Pod 再也改不动 |
 | **白名单 `tolerations`** | ✅ 已写并实测 | 同上。⚠️ **不能一刀切**:`DefaultTolerationSeconds` 是**进程内** mutating 插件,在 webhook 之前就给每个 Pod 加了 `not-ready` / `unreachable` 两条(实测确认),写成"不许有 tolerations"会拒掉每一个 Pod |
-| **PSA `restricted` 等价规则** | ✅ 已写并实测 | `config/policy/tenant-pod-security.yaml`。⛔ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见 §8.2.1 |
-| 拒绝 DaemonSet | ✅ 已写并实测 | `config/policy/tenant-deny-daemonset.yaml` |
+| **PSA `restricted` 等价规则** | ✅ 已写并实测 | **kubezoo-contract** 的 `config/policy/tenant-pod-security.yaml`。⛔ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见 §8.2.1 |
+| 拒绝 DaemonSet | ✅ 已写并实测 | **kubezoo-contract** 的 `config/policy/tenant-deny-daemonset.yaml` |
 | **拒绝租户自写 `nodeSelector` / `affinity`,由平台注入** | P1 | 见 §8.2.2 —— 形态从"白名单"改成"注入 + 拒绝" |
 | 强制 `schedulerName` | 等前置决策 | 只有当平台真跑了一个**承载策略的**自定义调度器时才是控制点(租户填回 `default-scheduler` 即绕过);填个不存在的只会让自己 Pending。B1 的 kata 节点池要不要专属调度器还没定,**这条现在不算未决项** |
 
@@ -537,7 +537,7 @@ PSA 的判定输入是 namespace 标签 `pod-security.kubernetes.io/enforce`,而
 
 
 ✅ **2026-07-29 多节点 lab 实测:kubezoo + Kyverno 可以实现这条原则**(审计 §R),
-策略见 `config/policy/tenant-placement.yaml`。成立依赖两个前提,见本节末。
+策略见 **kubezoo-contract** 的 `config/policy/tenant-placement.yaml`。成立依赖两个前提,见本节末。
 
 **设计已定**(用户确认):**每个租户有自己的 worker 节点池,节点本身带污点**,
 防止普通应用调度过来。平台**替换**租户 Pod 的落点字段 ——
@@ -577,7 +577,7 @@ kubelet 报 `Predicate NodeAffinity failed`,容器一个都没起;
 改用 `ValidatingAdmissionPolicy`(进程内、无 webhook —— 正是 §8.5 偏好的形态)后
 租户 binding 被拒且 `nodeName` 保持为空;⚠️ 表达式要写成**只放行 `system:kube-scheduler`**,
 无条件拒绝会让所有 Pod 永远 Pending(负向对照已验调度器不受影响)。
-配置 `config/policy/tenant-deny-binding.yaml`,详见审计 §R⑤。
+配置 **kubezoo-contract** 的 `config/policy/tenant-deny-binding.yaml`,详见审计 §R⑤。
 
 ##### ⚠️ 两个实现坑
 

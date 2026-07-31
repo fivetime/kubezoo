@@ -123,6 +123,12 @@ UPSTREAM_SA_ISSUER=$(kubectl --context "kind-$CLUSTER" -n kube-system get pod \
   | tr ',' '\n' | grep -o 'service-account-issuer=[^"]*' | cut -d= -f2-)
 UPSTREAM_SA_ISSUER=${UPSTREAM_SA_ISSUER:-https://kubernetes.default.svc.cluster.local}
 echo "upstream SA issuer: $UPSTREAM_SA_ISSUER"
+# Build first. The controller's script builds its own binary and the policies come
+# from a pinned module, so this was the only component the lab could silently run
+# a stale build of -- and it did: a run after removing three flags started the
+# previous binary, which still demanded them, and the failure surfaced as a tenant
+# namespace that never appeared.
+( cd "$ZOO" && make build >/dev/null )
 pkill -f _output/local/bin/linux/amd64/kubezoo || true
 sleep 1
 PKI=$ZOO/_output/pki
@@ -131,14 +137,14 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --etcd-prefix=/zoo --etcd-servers=http://127.0.0.1:2379 --event-ttl=1h0m0s \
   --max-requests-inflight=1002 --service-cluster-ip-range=192.168.0.1/16 --service-node-port-range=20000-32767 \
   --storage-backend=etcd3 --authorization-mode=AlwaysAllow \
-  --client-ca-file=$PKI/kubezoo/ca.pem --client-ca-key-file=$PKI/kubezoo/ca-key.pem \
+  --client-ca-file=$PKI/kubezoo/ca.pem \
   --tls-cert-file=$PKI/kubezoo/kubernetes.pem --tls-private-key-file=$PKI/kubezoo/kubernetes-key.pem \
   --service-account-key-file=$PKI/upstream/sa.pub --service-account-issuer=$UPSTREAM_SA_ISSUER \
   --service-account-signing-key-file=$PKI/upstream/sa.key \
   --proxy-client-cert-file=$PKI/upstream/client.crt --proxy-client-key-file=$PKI/upstream/client-key.crt \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=false \
-  --proxy-bind-address=0.0.0.0 --proxy-secure-port=6443 --api-audiences=$UPSTREAM_SA_ISSUER \
+  --api-audiences=$UPSTREAM_SA_ISSUER \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
   >"$LAB/kubezoo.log" 2>&1 &
 

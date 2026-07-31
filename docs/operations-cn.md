@@ -66,7 +66,7 @@ hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的�
 
 上面那些 `get` 只能告诉你"对象在";**只有这个能告诉你"它真的会拒"**。
 
-⚠️⚠️ **kubezoo-contract** 的 `config/policy/` 里有两条是 Kubernetes 原生的 `ValidatingAdmissionPolicy`,
+⚠️⚠️ **kubezoo-contract** 的 `config/policy/` 里有**三条**是 Kubernetes 原生的 `ValidatingAdmissionPolicy`,
 不是 Kyverno** —— `kubectl get clusterpolicy` **看不到它们**。
 只查 Kyverno 就以为装全了,是最容易犯的错。
 
@@ -295,8 +295,8 @@ kubectl --kubeconfig <租户的kubeconfig> get pods              # 应恢复正�
 
 ## 6. 上线检查单
 
-- [ ] `kubectl get clusterpolicy` 5 条全 `READY=True`
-- [ ] `kubectl get validatingadmissionpolicy` **2 条**(这两条 `get clusterpolicy` 看不到)
+- [ ] `kubectl get clusterpolicy` **7 条**全 `READY=True`
+- [ ] `kubectl get validatingadmissionpolicy` **3 条**(这几条 `get clusterpolicy` 看不到)
 - [ ] 做过一次存量修正:namespace 的 PSA 标签 **+ 存量违规 Pod 已删**
 - [ ] 每个租户节点池的 `kubezoo.io/pool` 标签**互不相同**(§2,承重前提)
 - [ ] 在 canary 租户上完整走过一遍冻结:§3.3 三条 + §3.4 功能检查 + §3.5 解除

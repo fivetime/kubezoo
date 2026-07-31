@@ -16,15 +16,16 @@ type ProxyOptions struct {
 	ProxyClientQPS   float32
 	ProxyClientBurst int
 
-	ClientCAFile    string
-	ClientCAKeyFile string
-	UpstreamMaster  string
+	// ClientCAFile is copied from the authentication options; it is the CA that
+	// tenant client certificates are verified against. Signing them is the
+	// controller's job now, so the signing key is not here and must not be:
+	// this process has no reason to hold the root of the tenant trust chain.
+	ClientCAFile   string
+	UpstreamMaster string
 	// PublicIngressClasses are the IngressClass names that reach the platform's
 	// own ingress controller, and through it the public internet.
 	PublicIngressClasses  []string
 	ServiceAccountKeyFile string
-	BindAddress           string
-	SecurePort            int
 }
 
 // NewProxyOptions creates a new ProxyOptions object
@@ -32,7 +33,6 @@ func NewProxyOptions() *ProxyOptions {
 	return &ProxyOptions{
 		ProxyClientQPS:   1000,
 		ProxyClientBurst: 2000,
-		SecurePort:       6443,
 	}
 }
 
@@ -55,9 +55,6 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"A tenant naming one of these is asking to be exposed; every other class it names is prefixed with "+
 			"its tenant id and can only be served by a controller the tenant runs itself. Empty by default, "+
 			"which leaves every tenant Ingress internal.")
-	fs.StringVar(&o.BindAddress, "proxy-bind-address", o.BindAddress, "The server address of the tenants' kubeconfig file, N.B. this address should be a valid server address of the client-ca-file.")
-	fs.IntVar(&o.SecurePort, "proxy-secure-port", o.SecurePort, "The port on which the kubezoo used to serve HTTPS with authentication and authorization.")
-	fs.StringVar(&o.ClientCAKeyFile, "client-ca-key-file", o.ClientCAKeyFile, "Filename containing a PEM-encoded RSA or ECDSA private key used to sign tenant certificates.")
 }
 
 func (o *ProxyOptions) Validate() []error {
@@ -76,20 +73,11 @@ func (o *ProxyOptions) Validate() []error {
 	if len(o.ProxyClientCertFile) == 0 {
 		errors = append(errors, fmt.Errorf("--proxy-client-cert-file cannot be empty"))
 	}
-	if len(o.ClientCAKeyFile) == 0 {
-		errors = append(errors, fmt.Errorf("--client-ca-key-file cannot be empty"))
-	}
 	if len(o.ClientCAFile) == 0 {
 		errors = append(errors, fmt.Errorf("--client-ca-file cannot be empty"))
 	}
 	if len(o.UpstreamMaster) == 0 {
 		errors = append(errors, fmt.Errorf("--proxy-upstream-master cannot be empty"))
-	}
-	if len(o.BindAddress) == 0 {
-		errors = append(errors, fmt.Errorf("--proxy-bind-address cannot be empty"))
-	}
-	if o.SecurePort < 1 || o.SecurePort > 65535 {
-		errors = append(errors, fmt.Errorf("--proxy-secure-port %v must be between 1 and 65535, inclusive. It cannot be turned off with 0", o.SecurePort))
 	}
 	return errors
 }

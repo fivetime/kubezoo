@@ -218,11 +218,22 @@ create_pki_secret() {
     if kubectl get secret kubezoo-pki; then
         kubectl delete secret kubezoo-pki
     fi
+    # ⭐ No ca-key.pem here. The gateway verifies tenant certificates against
+    # ca.pem and signs nothing; issuing them moved to kubezoo-controller. Handing
+    # the signing key to a process with no use for it is the root of the tenant
+    # trust chain sitting in one more place than it has to.
     kubectl create secret generic kubezoo-pki \
-        --from-file=ca-key.pem=$KUBEZOO_DIR/ca-key.pem \
         --from-file=ca.pem=$KUBEZOO_DIR/ca.pem \
         --from-file=kubernetes-key.pem=$KUBEZOO_DIR/kubernetes-key.pem \
         --from-file=kubernetes.pem=$KUBEZOO_DIR/kubernetes.pem
+
+    # The signing half, for kubezoo-controller alone.
+    if kubectl get secret kubezoo-ca; then
+        kubectl delete secret kubezoo-ca
+    fi
+    kubectl create secret generic kubezoo-ca \
+        --from-file=ca.pem=$KUBEZOO_DIR/ca.pem \
+        --from-file=ca-key.pem=$KUBEZOO_DIR/ca-key.pem
 
     if kubectl get secret upstream-pki; then
         kubectl delete secret upstream-pki

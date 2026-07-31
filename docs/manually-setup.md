@@ -12,6 +12,18 @@ Please install the latest version of
 - [yq](https://github.com/mikefarah/yq#install)
 - [cfssl](https://github.com/cloudflare/cfssl#installation)
 
+> ⚠️ **This describes one component of three.** `make local-up` brings up
+> kubezoo-gateway and, if it can find a checkout of
+> [kubezoo-controller](https://github.com/fivetime/kubezoo-controller) beside
+> this one, applies that too. Without the controller, the cluster accepts Tenant
+> objects and creates nothing for them — no namespaces, no RoleBindings, and no
+> error naming what is missing. The admission policies are a third piece, from
+> [kubezoo-contract](https://github.com/fivetime/kubezoo-contract); without them
+> a tenant can name any of the platform's runtime classes and leave the sandbox.
+>
+> Set `KUBEZOO_CONTROLLER_DIR` and `KUBEZOO_CONTRACT_DIR` if the checkouts are
+> not siblings of this one.
+
 ### Create `kind` cluster and run kubezoo on it
 
 Run the following command to create local kubezoo enviroment

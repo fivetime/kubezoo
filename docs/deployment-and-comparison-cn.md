@@ -76,8 +76,10 @@ KubeZoo **部署在上游集群内部**,现在是**两份清单、三个组件**
 
 两点值得单独指出:
 
-- **`--client-ca-key-file`** —— KubeZoo 持有租户 CA 的**私钥**,因为它要为每个新租户**签发**
-  客户端证书(§4)。这意味着 KubeZoo 进程本身是租户体系的信任根,其被攻破等价于全体租户沦陷。
+- ⭐ **租户 CA 的私钥不在 gateway 手里。** 签发租户客户端证书(§4)是
+  **kubezoo-controller** 的活,所以私钥只挂在它那个 Pod 上;gateway 只拿 `ca.pem`
+  做**验证**。⚠️ 拆分之前两件事在一个进程里,那时 KubeZoo 进程本身就是租户体系的信任根 ——
+  现在信任根是 **kubezoo-controller**,攻破它等价于全体租户沦陷,攻破 gateway 不等价。
 - **`--proxy-upstream-master=https://kubernetes`** —— 它连上游走的就是集群内的
   `kubernetes` Service,KubeZoo 自身是一个标准的 in-cluster 客户端。
 
@@ -294,7 +296,7 @@ watch 静默 / 平台自身不受影响。
 
 原文记录的是移植前的状态(`go.mod` 锁 1.24、Go 1.18)。现在 `k8s.io/*` 全族锁定
 **1.36.3**(staging 模块 `v0.36.3`),Go 基线 1.26.0,生成代码已按 1.36 重新生成,
-`make verify-codegen` 会校验签入产物是否一致。
+`make verify-codegen` 会校验签入产物是否一致 —— ⚠️ **它和被生成的代码一起在 kubezoo-contract**,不在本仓库。
 
 ⚠️ 仍然成立的那一半:KubeZoo **依旧引用 `k8s.io/kubernetes` 的内部包**
 (`pkg/apis/core` 等)并 fork 了 CRD handler,所以**跨小版本升级仍是一次有意的移植,
