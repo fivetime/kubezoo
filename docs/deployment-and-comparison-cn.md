@@ -34,13 +34,20 @@ Master/etcd/计算资源**。租户 ID 固定 6 位字符,理论容量 36⁶ ≈
 
 ## 2. 部署形态
 
-KubeZoo **部署在上游集群内部**,由两个 StatefulSet 构成
-(`config/setup/all_in_one.yaml`):
+KubeZoo **部署在上游集群内部**,现在是**两份清单、三个组件**:
 
-| 组件 | 形态 | 作用 |
-|---|---|---|
-| `kubezoo` | StatefulSet,示例 `replicas: 1` | 无状态代理,设计上可横向扩展 |
-| `kubezoo-etcd` | StatefulSet | **只存 KubeZoo 自己的元数据**(Tenant 对象等),前缀 `/zoo` |
+| 组件 | 清单 | 形态 | 作用 |
+|---|---|---|---|
+| `kubezoo` | `config/setup/proxy.yaml` | StatefulSet,示例 `replicas: 1` | 无状态代理,设计上可横向扩展 |
+| `kubezoo-etcd` | 同上 | StatefulSet | **只存 KubeZoo 自己的元数据**(Tenant 对象等),前缀 `/zoo` |
+| `kubezoo-controller` | **kubezoo-controller 仓库**的 `config/setup/controller.yaml` | Deployment,**只能 `replicas: 1`** | 把上游对账成 Tenant 声明的样子 |
+
+⚠️ **两份都要装。** 只装 proxy 的话,集群会**接受 Tenant 对象然后什么都不做** ——
+没有 namespace、没有 RoleBinding,而且**没有任何报错指向缺了什么**。
+
+⭐ 为什么拆开:apiserver 是**全活**的,控制器不是。合在一起时每个 kubezoo 副本都会跑
+一份控制器,三副本就是三份同时对账同一批租户。拆开之后,"要几个代理"和"要几个控制器"
+才成为两个可以分别回答的问题 —— 而目前的答案分别是"可以加"和"只能 1"。
 
 关键启动参数:
 
@@ -410,4 +417,4 @@ apiserver 前做路由与限流。三者解决的是不同问题。
 - 设计文档:[`design.md`](./design.md) / [`design-cn.md`](./design-cn.md)
 - 部署步骤:[`manually-setup.md`](./manually-setup.md) / [`manually-setup-cn.md`](./manually-setup-cn.md)
 - FAQ:[`faq.md`](./faq.md) / [`faq.zh.md`](./faq.zh.md)
-- 部署清单:[`../config/setup/all_in_one.yaml`](../config/setup/all_in_one.yaml)
+- 部署清单:[`../config/setup/proxy.yaml`](../config/setup/proxy.yaml)

@@ -1,3 +1,13 @@
+# kubezoo-proxy:租户 API 的入口,加上它自己那套 etcd(只存 Tenant/Quota 这些
+# kubezoo 自有对象,不存租户的工作负载)。
+#
+# ⚠️ 这一份**不够**。租户控制器是另一个部署(kubezoo-controller),只装这一份的话,
+# 集群会**接受 Tenant 对象然后什么都不做** —— 没有 namespace、没有 RoleBinding,
+# 而且没有任何报错指向缺了什么。两份都要装。
+#
+# 为什么分开:apiserver 是全活的,控制器不是。合在一起的话每个 kubezoo 副本都会跑
+# 一份控制器,三副本就是三份同时对账同一批租户。
+
 # KubeZoo statefulset
 apiVersion: apps/v1
 kind: StatefulSet
@@ -5,6 +15,8 @@ metadata:
   name: kubezoo
 spec:
   serviceName: kubezoo
+  # 代理是无状态的,可以往上加 —— 但先读 kubezoo-controller 的 README:
+  # 控制器目前只能跑一个副本,这两个数字是分开的。
   replicas: 1
   selector:
     matchLabels:

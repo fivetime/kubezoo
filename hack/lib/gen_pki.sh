@@ -234,6 +234,33 @@ create_pki_secret() {
         --from-file=client-key.crt=$UPSTREAM_DIR/client-key.crt \
         --from-file=ca.crt=$UPSTREAM_DIR/ca.crt
 
+    # The controller reads Tenant objects from kubezoo, so it needs a client
+    # credential for kubezoo -- not for the upstream cluster, which it reaches
+    # with its ServiceAccount. It runs in a different pod than kubezoo, so this
+    # has to be a mounted kubeconfig rather than the loopback config the
+    # in-process controller used to get for free.
+    #
+    # The server name is the Service, because this one is used from inside the
+    # cluster. The address written into each tenant's own kubeconfig is a
+    # separate setting on the controller, and is the one tenants reach from
+    # outside.
+    local ctrl_kubeconfig=$KUBEZOO_DIR/controller.kubeconfig
+    rm -f $ctrl_kubeconfig
+    kubectl --kubeconfig=$ctrl_kubeconfig config set-cluster zoo \
+        --certificate-authority=$KUBEZOO_DIR/ca.pem --embed-certs=true \
+        --server=https://kubezoo:6443
+    kubectl --kubeconfig=$ctrl_kubeconfig config set-credentials zoo-admin \
+        --client-certificate=$KUBEZOO_DIR/admin.pem \
+        --client-key=$KUBEZOO_DIR/admin-key.pem --embed-certs=true
+    kubectl --kubeconfig=$ctrl_kubeconfig config set-context zoo \
+        --cluster=zoo --user=zoo-admin
+    kubectl --kubeconfig=$ctrl_kubeconfig config use-context zoo
+    if kubectl get secret kubezoo-controller-kubeconfig; then
+        kubectl delete secret kubezoo-controller-kubeconfig
+    fi
+    kubectl create secret generic kubezoo-controller-kubeconfig \
+        --from-file=kubezoo.kubeconfig=$ctrl_kubeconfig
+
     if kubectl get secret quota-webhook-pki; then
         kubectl delete secret quota-webhook-pki
     fi

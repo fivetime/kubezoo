@@ -81,12 +81,26 @@ local_up() {
     done
 
     echo "Setting up kubezoo on $CLUSTER_NAME..."
-    kubectl apply -f $ZOO_ROOT/config/setup/all_in_one.yaml
+    kubectl apply -f $ZOO_ROOT/config/setup/proxy.yaml
 
     while ! (kubectl --context "kind-${CLUSTER_NAME}" get pods kubezoo-0 | grep "Running"); do
         echo ">> wait for kubezoo server running"
         sleep 1s
     done
+
+    # The tenant controller is a separate deployment now, from a separate
+    # repository. Without it the cluster accepts Tenant objects and creates
+    # nothing for them, so bringing up only the proxy would look like a working
+    # kubezoo right until the first tenant does not get its namespaces.
+    CONTROLLER_ROOT=${KUBEZOO_CONTROLLER_DIR:-$ZOO_ROOT/../kubezoo-controller}
+    if [ -f "$CONTROLLER_ROOT/config/setup/controller.yaml" ]; then
+        echo "Setting up kubezoo-controller from $CONTROLLER_ROOT..."
+        kubectl apply -f "$CONTROLLER_ROOT/config/setup/controller.yaml"
+    else
+        echo ">> WARNING: kubezoo-controller not found at $CONTROLLER_ROOT."
+        echo ">> Tenants will be accepted and never reconciled. Set KUBEZOO_CONTROLLER_DIR"
+        echo ">> or apply its config/setup/controller.yaml by hand."
+    fi
 
     echo "Export kubezoo server to 6443"
     kubectl --context "kind-${CLUSTER_NAME}" port-forward svc/kubezoo 6443:6443
