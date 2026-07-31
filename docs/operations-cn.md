@@ -18,7 +18,7 @@ kubezoo 是租户的**前门**,它只约束租户本人的 `kubectl`。
 ## 1. 部署:必须装什么
 
 ```bash
-kubectl apply -f config/policy/
+kubectl apply -f ../kubezoo-contract/config/policy/   # ⚠️ 策略在 contract 仓库
 ```
 
 装完确认**两类都在**:
@@ -66,7 +66,7 @@ hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的�
 
 上面那些 `get` 只能告诉你"对象在";**只有这个能告诉你"它真的会拒"**。
 
-⚠️⚠️ **`config/policy/` 里有两条是 Kubernetes 原生的 `ValidatingAdmissionPolicy`,
+⚠️⚠️ **kubezoo-contract** 的 `config/policy/` 里有两条是 Kubernetes 原生的 `ValidatingAdmissionPolicy`,
 不是 Kyverno** —— `kubectl get clusterpolicy` **看不到它们**。
 只查 Kyverno 就以为装全了,是最容易犯的错。
 
@@ -310,4 +310,4 @@ kubectl --kubeconfig <租户的kubeconfig> get pods              # 应恢复正�
 - `security-admission.md` —— 安全边界:kubezoo 管什么、不管什么
 - `isolation-audit-cn.md` —— 每一条结论背后的实测记录与负向对照
 - `kaaas-platform-architecture-cn.md` §8 —— 职责划分判据、策略层选型
-- `../config/policy/README.md` —— 改策略前必读的那几个坑
+- **kubezoo-contract** 的 `config/policy/README.md` —— 改策略前必读的那几个坑

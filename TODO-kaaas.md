@@ -131,7 +131,7 @@
       上游落地 `widgets.111111-example.com`
 
 - [x] ✅ **四个缺口逐条重测完毕**(审计 §Z)。手段:mutate 注入 `KUBERNETES_SERVICE_HOST`
-      指向 kubezoo(`config/policy/tenant-api-endpoint.yaml`,podspec env 压过 kubelet 注入的)。
+      指向 kubezoo(`kubezoo-contract 的 config/policy/tenant-api-endpoint.yaml`,podspec env 压过 kubelet 注入的)。
       §X③ operator 组名错位 → **解决**;**每租户不同 operator 版本** → **成立**(实测:同名组
       `example.com`,111111 只见 v1、222222 只见 v2);§T 冻结绕过 → **关上**(SA 写 403);
       §Q/§S binding 绕过 → **关上**(被 VAP 拒)。
@@ -139,7 +139,7 @@
       否则所有 in-cluster 客户端 TLS 失败;`--service-account-issuer`/`--api-audiences` 必须等于上游的
 - [ ] **代价:kubezoo 进入租户全部工作负载的 API 路径** ⇒ #84/#85 变成核心议题。
       已定:用 kubegateway 挡在前面做精准管控
-- [ ] `config/policy/tenant-api-endpoint.yaml` 里的地址是**占位符**,部署时必须换成
+- [ ] `kubezoo-contract 的 config/policy/tenant-api-endpoint.yaml` 里的地址是**占位符**,部署时必须换成
       kubezoo 在集群内的可达地址(Service ClusterIP / DNS 名)
 
 - [x] ✅ **ClusterRole 第一半已解:租户可以给自己的 CRD 组授权**(审计 §AB)
@@ -425,7 +425,7 @@ apimachinery/api/gogo 三个 `.proto` 的 import 路径、`goimports` 没装、
 > 安全边界的总览见 [`docs/security-admission.md`](docs/security-admission.md)。
 
 findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSet 由**策略层**执行,
-策略在 `config/policy/`,lab 默认装 Kyverno 并应用):
+策略在 **kubezoo-contract** 的 `config/policy/`,lab 默认装 Kyverno 并应用):
 
 - [x] ✅ **`-A` 已改为逐 namespace 扇出**(见 1.2)。
       ⚠️ **本条原先写的"要先定两个语义让步(分页 / resourceVersion)"是错的** ——
@@ -469,7 +469,7 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       - 同族问题仓库里已出现一次:配额 webhook 的 objectSelector(见 2.3)。
         **通用规则:排除条件只能建立在租户无法控制的东西上**
 - [x] ✅ **主机名抢占已裁决(默认安全的一半)**(审计 §AM)
-      `config/policy/tenant-ingress-hostnames.yaml`,**原生 VAP**:租户只能声明
+      `kubezoo-contract 的 config/policy/tenant-ingress-hostnames.yaml`,**原生 VAP**:租户只能声明
       `*.<租户ID>.<平台后缀>`,域外一律拒。租户 ID 从 namespace 前缀取(租户伪造不了)。
       实测七条:自己子域可用 / 别人子域拒 / 任意外域拒 / **空 host 拒**(等于占下整个入口)/
       **UPDATE 改成越界也拒** / 多条 rule 有一条越界就整个拒 / 平台不受约束。
@@ -495,7 +495,7 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       代价:MAP **没有 autogen**,PodSpec 那 8~9 个 kind 要逐个手写路径(`CronJob` 多一层)
 - [ ] 必备策略(**都得策略引擎做**;原生 PSA 连它自己那一条都守不住,见下):
       - [x] ✅ **三个 class 字段由平台决定** —— `runtimeClassName` / `ingressClassName` /
-            `priorityClassName`(含 `spec.priority`)。`config/policy/tenant-platform-classes.yaml`,
+            `priorityClassName`(含 `spec.priority`)。`kubezoo-contract 的 config/policy/tenant-platform-classes.yaml`,
             已在 7 个租户 namespace 上实测;kubezoo 侧实现已删除
             ⚠️ **本条原先的理由是错的**:曾写"租户写 `kata` 会被改写成 `<tid>-kata` 而不存在,
             所以只能由平台注入" —— **该字段根本不被改写**,#82 实测租户写什么就原样生效。
@@ -504,11 +504,11 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
               MAP 没有 autogen,`CronJob` 多一层)、`spec.priority` 要跟名字一起清、
               废弃的 `kubernetes.io/ingress.class` 注解要跟字段一起删
       - [x] ✅ **拒绝 `spec.nodeName`** + **白名单 `tolerations`** ——
-            `config/policy/tenant-scheduling.yaml`,已实测(审计 §O)。
+            `kubezoo-contract 的 config/policy/tenant-scheduling.yaml`,已实测(审计 §O)。
             ⚠️ 三个坑:`tolerations` 不能一刀切(`DefaultTolerationSeconds` 是进程内插件,
             在 webhook 之前就加了两条,实测确认)、规则只能匹配 `CREATE`(否则已调度的
             Pod 再也改不动)、多策略并存时**判据是拒绝消息里的策略名**
-      - [x] ✅ **PSA `restricted` 等价规则** —— `config/policy/tenant-pod-security.yaml`,已实测。
+      - [x] ✅ **PSA `restricted` 等价规则** —— `kubezoo-contract 的 config/policy/tenant-pod-security.yaml`,已实测。
             ⛔ **原生 PSA 在这里是废的**:PSA 判定输入是 namespace 标签,而 kubezoo 只钉死
             `kubezoo.io/tenant`,其余标签原样转发 ⇒ 租户把自己标成 `privileged`
             (建时带 / 事后 patch 两条路)就拿到 **Running 的 privileged + hostNetwork Pod**,
@@ -516,7 +516,7 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             修法用 Kyverno `validate.podSecurity`(按 `kubezoo.io/tenant` 匹配,且**有 autogen**),
             并把 PSA 标签钉回 `restricted` 让原生 PSA 反过来兜底。详见审计 §N
       - [x] ✅ **落点控制:每租户节点池 + 注入替换 —— 已实测可行**(审计 §R)
-            `config/policy/tenant-placement.yaml`;⚠️ 两个承重前提见下,残余=binding 在 API 层仍成功
+            `kubezoo-contract 的 config/policy/tenant-placement.yaml`;⚠️ 两个承重前提见下,残余=binding 在 API 层仍成功
             > **一句话原则(用户定案):租户看不到节点,没有任何调度权,他写的东西会被平台替换掉。**
             **完成判据 = 租户不能通过任何一条写入路径影响落点**,不只是 PodSpec 字段 ——
             `pods/binding` 是 Pod 建好之后的**另一次写入**,替换够不到它(§Q)
@@ -533,7 +533,7 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
             - [x] ✅ **binding 在 API 层也堵住了 —— 但只能用原生 VAP**:
               Kyverno 3.8.2 的 `kinds: [Pod/binding]` 子资源匹配**实测不生效**
               (Ready + webhook 注册了 + 日志里连请求都没有,第四次"Ready 但什么都不做")。
-              `config/policy/tenant-deny-binding.yaml` 用 `ValidatingAdmissionPolicy`。
+              `kubezoo-contract 的 config/policy/tenant-deny-binding.yaml` 用 `ValidatingAdmissionPolicy`。
               ⚠️ 表达式写"只放行 system:kube-scheduler",无条件拒绝会让所有 Pod 永远 Pending
             - ⛔ **打散不要用 required podAntiAffinity**:每评估一个节点扫一遍已有 Pod,
               是调度吞吐杀手,按北极星(规模优先)大集群上会先撞这堵墙 ⇒ 用 `topologySpreadConstraints`
@@ -546,13 +546,13 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
       - [ ] 等前置决策:强制 `schedulerName` —— 只有平台真跑了**承载策略的**自定义调度器时
             才是控制点(租户填回 `default-scheduler` 即绕过)。B1 的 kata 节点池方案未定,
             **现在不算未决项**
-      - [x] ✅ 拒绝 DaemonSet —— `config/policy/tenant-deny-daemonset.yaml`,已实测
+      - [x] ✅ 拒绝 DaemonSet —— `kubezoo-contract 的 config/policy/tenant-deny-daemonset.yaml`,已实测
 - [x] ✅ **`pods/binding` 已坐实并已堵住**(审计 §Q/§R⑤/§S)
       推论的每一步都对:租户 `*` on `*` 含 `create pods/binding`;`deny-nodename` 匹配
       `kinds: [Pod]` 匹配不到 Binding;kubelet 只检 `NoExecute`,`NoSchedule` 被绕开。
       ⛔ **Kyverno 3.8.2 的 `kinds: [Pod/binding]` 子资源匹配实测不生效**
       (Ready + webhook 注册了 + 日志里连请求都没有)⇒ 改用原生 VAP
-      `config/policy/tenant-deny-binding.yaml`,两条路(kubectl / Pod 内直连上游)都已验证被拒
+      `kubezoo-contract 的 config/policy/tenant-deny-binding.yaml`,两条路(kubectl / Pod 内直连上游)都已验证被拒
 
 - [x] ✅ **节点名从 `spec.nodeName` 漏给租户 —— 定案接受,不改**(用户 2026-07-29)
       知道节点名只在能拿它做事时才值钱,而落点字段全被平台替换 ⇒ 名字兑现不了;
@@ -563,7 +563,7 @@ findings A–M 共 13 条,除下列一条外全部已修并实测(I 与 DaemonSe
 
 - [x] ✅ **#90 `Frozen` 现在够得到租户预置的 ServiceAccount 了**(审计 §T,已复测)
       两半:控制器冻结时给租户每个 ns 打 `kubezoo.io/frozen`(`markFrozen`,守卫测试已验证会红)
-      + 上游 VAP `config/policy/tenant-frozen-deny-writes.yaml`。
+      + 上游 VAP `kubezoo-contract 的 config/policy/tenant-frozen-deny-writes.yaml`。
       ⭐ 表达式是**放行不属于本租户的身份**,不是"拒绝租户" —— 否则 controller-manager
       一起被拦,症状是租户 Deployment 永远不出 Pod 且无报错指向策略(复测 ⑤ 专门验这条)。
       ⚠️ 只拦写不拦读:冻结的承诺是什么都不删、负载照常跑

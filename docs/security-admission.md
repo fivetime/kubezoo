@@ -26,7 +26,7 @@
 | 建**集群级**对象撞名 / 探测存在性 | 名字前缀是唯一防线,**RBAC 表达不了前缀** |
 | 建准入 webhook | 未收口时**全集群生效**,能打死其他租户和平台 |
 | 建 ClusterRole 给自己提权 | `escalate`/`bind` 动词就是那条豁免 |
-| 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 —— 由策略层拦(`config/policy/`) |
+| 引用平台的集群级对象(RuntimeClass / PriorityClass / IngressClass) | 拿到平台的运行时(可跑出沙箱)或全集群最高优先级 —— 由策略层拦(**kubezoo-contract** 的 `config/policy/`) |
 | 读发现面 / OpenAPI | 枚举出其它租户的 id、CRD 组名与 schema |
 | 摘掉自己 namespace 上的平台标签 | 策略匹配与退租清理同时失效 |
 | 从自己 Pod 的 `spec.nodeName` 枚举平台节点名 | ✅ 可行,但**已定案接受**:落点字段全被替换,名字兑现不了(见 §6) |
@@ -59,7 +59,7 @@ kubezoo 侧拦截只约束租户本人的 `kubectl`。
 | 措施 | 位置 |
 |---|---|
 | namespace / name / CRD 组名前缀翻译,双向 | `pkg/convert` |
-| 上游 RBAC **按 namespace 下发**,集群级逐资源指定动词 | `pkg/controller/rbac.go` |
+| 上游 RBAC **按 namespace 下发**,集群级逐资源指定动词 | **kubezoo-controller** 的 `pkg/controller/rbac.go` |
 | 不授 `escalate`/`bind`;`nodes/proxy` 等显式拒绝清单 | 同上,附守卫测试 |
 | 租户 webhook 收口:`clientConfig` 命名空间加前缀、`namespaceSelector` 强制本租户、rule `scope` 强制 Namespaced、拒绝 `clientConfig.url` | `pkg/convert/webhookconfiguration.go` |
 | Node 对租户不可见(list/get/watch 三条路径) | `pkg/util` + `pkg/proxy` + `pkg/convert` |
@@ -68,7 +68,7 @@ kubezoo 侧拦截只约束租户本人的 `kubectl`。
 | 退租强制清理 finalizer | `pkg/controller/teardown.go` |
 | 错误消息擦除:租户前缀 **+ webhook 名字**(后者会暴露平台用什么策略引擎) | `pkg/util/errors.go` |
 | 停机两种模式(read-only / frozen),前门 + 上游 RBAC 两层 | `pkg/filters/suspension.go` + 控制器 |
-| **冻结时给租户 namespace 打 `kubezoo.io/frozen`,上游 VAP 据此拒绝租户身份的写** —— 这是唯一够得到租户预置 ServiceAccount 的一层 | `pkg/controller/rbac.go` + `config/policy/tenant-frozen-deny-writes.yaml` |
+| **冻结时给租户 namespace 打 `kubezoo.io/frozen`,上游 VAP 据此拒绝租户身份的写** —— 这是唯一够得到租户预置 ServiceAccount 的一层 | **kubezoo-controller** 的 `pkg/controller/rbac.go` + **kubezoo-contract** 的 `config/policy/tenant-frozen-deny-writes.yaml` |
 
 ⚠️ **集群级资源没有第二道防线**:RBAC 的 `resourceNames` 是精确匹配,表达不了
 "名字以 `<租户ID>-` 开头"。这一层写错就是直接越权 —— 审计里 PersistentVolume、
@@ -78,10 +78,10 @@ kubezoo 侧拦截只约束租户本人的 `kubectl`。
 
 | 约束 | 现状 |
 |---|---|
-| `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)由平台决定 | ✅ **策略已写并实测** `config/policy/` |
+| `runtimeClassName` / `ingressClassName` / `priorityClassName`(含 `spec.priority`)由平台决定 | ✅ **策略已写并实测** **kubezoo-contract** 的 `config/policy/` |
 | 拒绝 DaemonSet | ✅ **策略已写并实测**(租户被拒;平台自己的 DaemonSet 不受影响) |
-| PSA `restricted` 等价规则 | ✅ **策略已写并实测** `config/policy/tenant-pod-security.yaml`。⚠️ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见下 |
-| 拒绝 `spec.nodeName`、约束 `tolerations` | ✅ **策略已写并实测** `config/policy/tenant-scheduling.yaml`(审计 §O) |
+| PSA `restricted` 等价规则 | ✅ **策略已写并实测** **kubezoo-contract** 的 `config/policy/tenant-pod-security.yaml`。⚠️ **必须用 Kyverno 的 `validate.podSecurity`,不能用原生 PSA** —— 见下 |
+| 拒绝 `spec.nodeName`、约束 `tolerations` | ✅ **策略已写并实测** **kubezoo-contract** 的 `config/policy/tenant-scheduling.yaml`(审计 §O) |
 | 落点:平台**注入**池子的 `nodeSelector`/`toleration`/`topologySpreadConstraints`,并**拒掉租户自写**的 `nodeSelector`/`affinity` | 未做(形态见架构 §8.2.2;⛔ 别用 required 反亲和,别用白名单) |
 
 ⛔ **原生 PSA(namespace 标签 `pod-security.kubernetes.io/enforce`)在这里是废的**:
@@ -91,7 +91,7 @@ kubezoo 只钉死 `kubezoo.io/tenant` 一个标签,其余标签原样转发上�
 又是"判定条件建立在租户可控输入上"那个形状。策略层按 `kubezoo.io/tenant` 匹配才立得住;
 原生 PSA 降级为**兜底**(由策略把标签钉回 `restricted`)。
 
-⭐ **策略在 `config/policy/`,lab 默认安装 Kyverno 并应用它们** —— 没有它们的 lab
+⭐ **策略在 **kubezoo-contract** 的 `config/policy/`,lab 默认安装 Kyverno 并应用它们** —— 没有它们的 lab
 测的不是完整形态,而上面每一条不生效时都是一条实测可用的越权。
 ⚠️ 那个目录的 README 记了两个会让策略 **"Ready 但什么都不做"** 的坑,改策略前务必看。
 

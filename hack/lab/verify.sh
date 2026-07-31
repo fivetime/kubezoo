@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+#
+# ⚠️ 这个文件**没有按仓库拆**,而且不该拆。
+#
+# 三个仓库的东西已经各自有自己的测试:contract 有翻译规则的单测和作用域表对照,
+# controller 有对着真 apiserver 的对账测试,proxy 有请求改写的单测。
+# 那些都能单独跑。
+#
+# ⭐ 这里的 118 条断言**一条都不能**:每一条都从"建一个租户"开始 —— 那需要 proxy
+# 接受 Tenant 对象、需要 controller 建出 namespace 和 RoleBinding、需要策略层在管
+# 工作负载。测的是**隔离**,而隔离是三者合起来的性质,不是任何一个的属性。
+#
+# ⇒ 把它按仓库切开,只会得到三份各自都跑不起来的断言。它放在 proxy 是因为 proxy
+# 是入口,不是因为它属于 proxy。
 # Prove that every policy in config/policy/ actually refuses something.
 #
 # This exists because "READY=True" is not evidence. Four separate times in this

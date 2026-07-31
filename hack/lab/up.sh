@@ -149,16 +149,16 @@ for i in $(seq 60); do
 done
 echo "kubezoo healthz: $(curl -sk --cert $PKI/kubezoo/admin.pem --key $PKI/kubezoo/admin-key.pem https://127.0.0.1:6443/healthz)"
 
-# The tenant controller is its own binary now (kubezoo-controller). kubezoo alone
+# The tenant controller is its own binary in its own repository. kubezoo alone
 # accepts Tenant objects and does nothing with them -- no namespaces, no
 # RoleBindings -- so a lab without this process passes nothing.
+#
+# How to start it lives over there, not here: a copy would drift from the flags
+# that repository actually supports.
 CTRL=${KUBEZOO_CONTROLLER_DIR:-$ZOO/../kubezoo-controller}
-if [ ! -d "$CTRL" ]; then
+if [ ! -x "$CTRL/hack/lab/up-controller.sh" ]; then
   echo "FATAL: kubezoo-controller not found at $CTRL; set KUBEZOO_CONTROLLER_DIR" >&2; exit 1
 fi
-( cd "$CTRL" && go build -o "$LAB/kubezoo-controller" ./cmd/kubezoo-controller )
-# The controller reads Tenant objects from kubezoo and writes to the upstream
-# cluster, so it needs a kubeconfig for each. They are different clusters.
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-cluster zoo \
   --certificate-authority=$PKI/kubezoo/ca.pem --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-credentials admin \
@@ -166,59 +166,22 @@ kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-credentials admin \
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-context c --cluster=zoo --user=admin >/dev/null
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config use-context c >/dev/null
 kubectl --context "kind-$CLUSTER" config view --minify --raw > "$LAB/ctrl-upstream.kubeconfig"
-pgrep -f "$LAB/kubezoo-controller" | xargs -r kill 2>/dev/null || true
-nohup "$LAB/kubezoo-controller" \
-  --kubezoo-kubeconfig="$LAB/ctrl-zoo.kubeconfig" \
-  --upstream-kubeconfig="$LAB/ctrl-upstream.kubeconfig" \
-  --client-ca-file=$PKI/kubezoo/ca.pem --client-ca-key-file=$PKI/kubezoo/ca-key.pem \
-  --kubezoo-address=127.0.0.1 --kubezoo-port=6443 \
-  >"$LAB/kubezoo-controller.log" 2>&1 &
-for i in $(seq 30); do
-  grep -q "kubezoo-controller running" "$LAB/kubezoo-controller.log" 2>/dev/null && break
-  sleep 1
-done
-if ! pgrep -f "$LAB/kubezoo-controller" >/dev/null; then
-  echo "FATAL: kubezoo-controller did not stay up:" >&2; tail -5 "$LAB/kubezoo-controller.log" >&2; exit 1
-fi
-echo "kubezoo-controller: up"
+"$CTRL/hack/lab/up-controller.sh" "$LAB" \
+  "$LAB/ctrl-zoo.kubeconfig" "$LAB/ctrl-upstream.kubeconfig" "$PKI/kubezoo"
 # The policy layer is part of the tested shape, not an optional extra: without it
 # a tenant can name any of the platform's runtime classes and take
 # system-cluster-critical, so a lab without it is not testing the real thing.
-echo "== kyverno =="
-if ! kubectl --context "kind-$CLUSTER" get ns kyverno >/dev/null 2>&1; then
-  helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null 2>&1 || true
-  helm repo update kyverno >/dev/null 2>&1 || true
-  helm install kyverno kyverno/kyverno -n kyverno --create-namespace \
-    --version "${KYVERNO_CHART_VERSION:-3.8.2}" \
-    --kube-context "kind-$CLUSTER" --wait --timeout 8m >/dev/null
+# The policy layer is part of the tested shape, not an optional extra: without it
+# a tenant can name any of the platform's runtime classes and take
+# system-cluster-critical, so a lab without it is not testing the real thing.
+#
+# It lives in kubezoo-contract, because the policies re-implement the same tenant
+# vocabulary the Go code uses -- see that repository's hack/lab/policies.sh.
+echo "== policies =="
+CONTRACT=${KUBEZOO_CONTRACT_DIR:-$ZOO/../kubezoo-contract}
+if [ ! -x "$CONTRACT/hack/lab/policies.sh" ]; then
+  echo "FATAL: kubezoo-contract not found at $CONTRACT; set KUBEZOO_CONTRACT_DIR" >&2; exit 1
 fi
-# The hostname policy carries a domain suffix that only means something in a real
-# deployment, so the lab substitutes its own rather than shipping a placeholder
-# that would refuse every Ingress.
-mkdir -p "$LAB/policy"
-cp "$ZOO"/config/policy/*.yaml "$LAB/policy/"
-sed -i "s/TENANT_DOMAIN_SUFFIX/${TENANT_DOMAIN_SUFFIX:-apps.example.com}/" "$LAB/policy/tenant-ingress-hostnames.yaml"
-kubectl --context "kind-$CLUSTER" apply -f "$LAB/policy/" 2>&1 | grep -v '^Warning' || true
-# config/policy/ holds one native ValidatingAdmissionPolicy alongside the Kyverno
-# ones -- Kyverno cannot match the pods/binding subresource, see that file.
-kubectl --context "kind-$CLUSTER" get validatingadmissionpolicy -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | sed 's/^/vap: /' 
-# A policy that is listed but has no status is enforcing nothing, and printing
-# READY=<none> next to it reads like "still syncing" rather than "broken". That
-# happened: a policy of ours refused the writes Kyverno needs to register its own
-# webhooks, so three policies never became ready and pods went entirely
-# unguarded while the lab looked fine. Wait, then fail loudly.
-for _ in $(seq 40); do
-  not_ready=$(kubectl --context "kind-$CLUSTER" get clusterpolicy \
-    -o custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status --no-headers 2>/dev/null \
-    | awk '$2 != "True" {print $1}')
-  [ -z "$not_ready" ] && break
-  sleep 3
-done
-kubectl --context "kind-$CLUSTER" get clusterpolicy -o custom-columns=NAME:.metadata.name,READY:.status.conditions[0].status --no-headers
-if [ -n "$not_ready" ]; then
-  echo "FATAL: these policies never became ready, so they are enforcing nothing: $not_ready" >&2
-  echo "       check the kyverno admission controller log; a policy of ours can block its own webhook registration" >&2
-  exit 1
-fi
+"$CONTRACT/hack/lab/policies.sh" "kind-$CLUSTER" "${TENANT_DOMAIN_SUFFIX:-apps.example.com}"
 
 echo "lab up: upstream ctx = kind-kz-audit3, zoo admin ctx = zoo"
