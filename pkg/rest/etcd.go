@@ -22,7 +22,7 @@ import (
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
 
-	"github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
+	"github.com/fivetime/kubezoo-contract/pkg/apis/tenant/v1alpha1"
 )
 
 // REST implements a RESTStorage for audit sink against etcd

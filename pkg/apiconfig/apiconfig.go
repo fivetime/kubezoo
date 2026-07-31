@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
 
-	"github.com/kubewharf/kubezoo/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 )
 
 type APIGroupConfig struct {

@@ -19,7 +19,7 @@ package test_rest
 import (
 	"testing"
 
-	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
+	tenantv1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/v1alpha1"
 )
 
 // TestValidateSuspension: an unvalidated mode is stored as written, and the two

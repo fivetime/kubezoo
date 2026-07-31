@@ -29,7 +29,7 @@ import (
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	kubezoodynamic "github.com/kubewharf/kubezoo/pkg/dynamic"
+	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
 )
 
 // watchMux presents one watch stream to the client while holding one upstream

@@ -46,7 +46,7 @@ import (
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	"github.com/kubewharf/kubezoo/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 )
 
 // tenantProxyWithLister implements StandardStorage

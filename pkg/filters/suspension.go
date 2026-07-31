@@ -27,8 +27,8 @@ import (
 	"k8s.io/klog"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
-	tenantlister "github.com/kubewharf/kubezoo/pkg/generated/listers/tenant/v1alpha1"
+	tenantv1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/v1alpha1"
+	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 )
 
 // WithTenantSuspension refuses a suspended tenant's requests at the front door,

@@ -91,17 +91,16 @@ import (
 	"github.com/fivetime/kubezoo-contract/pkg/convert"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/kubewharf/kubezoo/cmd/kubezoo/app/options"
-	ownedopenapi "github.com/kubewharf/kubezoo/pkg/apis/generated/openapi"
-	proxiedopenapi "github.com/kubewharf/kubezoo/pkg/apis/openapi"
-	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
-	_ "github.com/kubewharf/kubezoo/pkg/apis/tenant/install"
-	"github.com/kubewharf/kubezoo/pkg/controller"
-	"github.com/kubewharf/kubezoo/pkg/dynamic"
+	ownedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/generated/openapi"
+	proxiedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/openapi"
+	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
+	_ "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/install"
+	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 	tenantfilters "github.com/kubewharf/kubezoo/pkg/filters"
-	"github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned"
-	quotaclient "github.com/kubewharf/kubezoo/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
-	"github.com/kubewharf/kubezoo/pkg/generated/informers/externalversions"
-	tenantlister "github.com/kubewharf/kubezoo/pkg/generated/listers/tenant/v1alpha1"
+	"github.com/fivetime/kubezoo-contract/pkg/generated/clientset/versioned"
+	quotaclient "github.com/fivetime/kubezoo-contract/pkg/generated/clientset/versioned/typed/quota/v1alpha1"
+	"github.com/fivetime/kubezoo-contract/pkg/generated/informers/externalversions"
+	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 	"github.com/kubewharf/kubezoo/pkg/proxy"
 	tenantrest "github.com/kubewharf/kubezoo/pkg/rest"
 )
@@ -367,21 +366,15 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 		return nil, err
 	}
 
-	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("start-tenant-controller", func(context genericapiserver.PostStartHookContext) error {
-		go controller.Run(make(chan struct{}),
-			controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Informer(),
-			controlPlaneConfig.tenantClient.TenantV1alpha1(),
-			proxyConfig.typedClientSet,
-			proxyConfig.discoveryClient,
-			proxyConfig.dynamicClient,
-			proxyConfig.crdClient,
-			proxyConfig.quotaClient,
-			proxyConfig.clientCAFile,
-			proxyConfig.clientCAKeyFile,
-			proxyConfig.proxyBindAddress,
-			proxyConfig.proxySecurePort)
-		return nil
-	})
+	// The tenant controller used to be started here. It is its own binary now --
+	// kubezoo-controller -- because an apiserver is all-active and a controller
+	// is not: every replica of this process would have run one, all reconciling
+	// the same tenants. Splitting them is what makes the replica count of each
+	// a separate decision.
+	//
+	// ⚠️ Deployment consequence: kubezoo alone no longer creates a tenant's
+	// namespaces or issues its RoleBindings. A cluster running only this will
+	// accept Tenant objects and do nothing with them.
 	m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("tenant-informer-synced", func(context genericapiserver.PostStartHookContext) error {
 		return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 			return controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Informer().HasSynced(), nil

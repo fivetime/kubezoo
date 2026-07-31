@@ -148,6 +148,39 @@ for i in $(seq 60); do
   sleep 1
 done
 echo "kubezoo healthz: $(curl -sk --cert $PKI/kubezoo/admin.pem --key $PKI/kubezoo/admin-key.pem https://127.0.0.1:6443/healthz)"
+
+# The tenant controller is its own binary now (kubezoo-controller). kubezoo alone
+# accepts Tenant objects and does nothing with them -- no namespaces, no
+# RoleBindings -- so a lab without this process passes nothing.
+CTRL=${KUBEZOO_CONTROLLER_DIR:-$ZOO/../kubezoo-controller}
+if [ ! -d "$CTRL" ]; then
+  echo "FATAL: kubezoo-controller not found at $CTRL; set KUBEZOO_CONTROLLER_DIR" >&2; exit 1
+fi
+( cd "$CTRL" && go build -o "$LAB/kubezoo-controller" ./cmd/kubezoo-controller )
+# The controller reads Tenant objects from kubezoo and writes to the upstream
+# cluster, so it needs a kubeconfig for each. They are different clusters.
+kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-cluster zoo \
+  --certificate-authority=$PKI/kubezoo/ca.pem --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-credentials admin \
+  --client-certificate=$PKI/kubezoo/admin.pem --client-key=$PKI/kubezoo/admin-key.pem --embed-certs=true >/dev/null
+kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-context c --cluster=zoo --user=admin >/dev/null
+kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config use-context c >/dev/null
+kubectl --context "kind-$CLUSTER" config view --minify --raw > "$LAB/ctrl-upstream.kubeconfig"
+pgrep -f "$LAB/kubezoo-controller" | xargs -r kill 2>/dev/null || true
+nohup "$LAB/kubezoo-controller" \
+  --kubezoo-kubeconfig="$LAB/ctrl-zoo.kubeconfig" \
+  --upstream-kubeconfig="$LAB/ctrl-upstream.kubeconfig" \
+  --client-ca-file=$PKI/kubezoo/ca.pem --client-ca-key-file=$PKI/kubezoo/ca-key.pem \
+  --kubezoo-address=127.0.0.1 --kubezoo-port=6443 \
+  >"$LAB/kubezoo-controller.log" 2>&1 &
+for i in $(seq 30); do
+  grep -q "kubezoo-controller running" "$LAB/kubezoo-controller.log" 2>/dev/null && break
+  sleep 1
+done
+if ! pgrep -f "$LAB/kubezoo-controller" >/dev/null; then
+  echo "FATAL: kubezoo-controller did not stay up:" >&2; tail -5 "$LAB/kubezoo-controller.log" >&2; exit 1
+fi
+echo "kubezoo-controller: up"
 # The policy layer is part of the tested shape, not an optional extra: without it
 # a tenant can name any of the platform's runtime classes and take
 # system-cluster-critical, so a lab without it is not testing the real thing.

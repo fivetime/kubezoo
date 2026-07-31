@@ -26,7 +26,7 @@ import (
 	"testing"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
-	"github.com/kubewharf/kubezoo/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 
 	"github.com/stretchr/testify/assert"
 

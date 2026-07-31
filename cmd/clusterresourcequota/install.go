@@ -22,8 +22,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	scheme "k8s.io/client-go/kubernetes/scheme"
 
-	quota "github.com/kubewharf/kubezoo/pkg/apis/quota"
-	quotav1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/quota/v1alpha1"
+	quota "github.com/fivetime/kubezoo-contract/pkg/apis/quota"
+	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
 )
 
 func init() {

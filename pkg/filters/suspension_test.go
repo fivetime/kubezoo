@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apiserver/pkg/endpoints/request"
 
-	tenantv1alpha1 "github.com/kubewharf/kubezoo/pkg/apis/tenant/v1alpha1"
+	tenantv1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/v1alpha1"
 )
 
 // TestReadOnlySuspensionAllowsReadsAndRefusesWrites is the billing case: the

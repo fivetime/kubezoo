@@ -21,15 +21,16 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/kubewharf/kubezoo/pkg/controller"
+	"github.com/fivetime/kubezoo-contract/pkg/common"
 )
 
 // TestClusterScopedGrantsCoverWhatWeServe keeps the tenant's cluster-scoped RBAC
 // grant in step with the resources kubezoo actually exposes.
 //
-// The grant is a hand-written list in pkg/controller, because pkg cannot import
-// this package to derive it. This test closes that loop from the side that can
-// see both.
+// The grant is a hand-written list in kubezoo-contract, because the controller
+// that builds the tenant's ClusterRole from it lives in a third repository and
+// cannot see what this one serves. This test closes that loop from the side that
+// can see both.
 //
 // Getting it wrong is quiet in both directions. Serving a cluster-scoped
 // resource that the grant omits breaks tenants at runtime with a Forbidden that
@@ -60,7 +61,7 @@ func TestClusterScopedGrantsCoverWhatWeServe(t *testing.T) {
 	}
 
 	granted := map[string]map[string]bool{}
-	for _, rule := range controller.ClusterScopedRulesForTest() {
+	for _, rule := range common.ClusterScopedRules() {
 		for _, group := range rule.APIGroups {
 			if granted[group] == nil {
 				granted[group] = map[string]bool{}
@@ -84,7 +85,7 @@ func TestClusterScopedGrantsCoverWhatWeServe(t *testing.T) {
 	// node. Refusals are listed explicitly so they read as decisions, and so
 	// that an accidental gap still fails below.
 	refused := map[string]map[string]bool{}
-	for group, resources := range controller.NotGrantedToTenantsForTest() {
+	for group, resources := range common.NotGrantedToTenants() {
 		refused[group] = map[string]bool{}
 		for _, resource := range resources {
 			refused[group][resource] = true
