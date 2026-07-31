@@ -1660,16 +1660,38 @@ kind: ConfigMap
 metadata: {name: ssa-cm}
 data: {a: "1"}
 EOF
+# ⚠️ The PUT must ADD a field and leave the applied one alone. The obvious
+# version -- change a and add b -- passes against the defect, and the reason is
+# worth knowing: changing a field the Apply entry owns is exactly what destroys
+# that entry. The field manager subtracts the conflicting paths, the entry's set
+# becomes empty and the entry is deleted, so the unfixed code finds no Apply
+# entry, declines to forward, and the PUT lands correctly. Leaving a untouched
+# keeps the entry alive, which is the state the defect needs: the unfixed code
+# then forwards an apply of {a:1} alone and b never reaches upstream.
 $T get configmap ssa-cm -o json 2>/dev/null \
-  | python3 -c 'import json,sys; o=json.load(sys.stdin); o["data"]["b"]="2"; o["data"]["a"]="9"; print(json.dumps(o))' \
+  | python3 -c 'import json,sys; o=json.load(sys.stdin); o["data"]["b"]="2"; print(json.dumps(o))' \
   | $T replace --field-manager=ctrl -f - >/dev/null 2>&1
 got_a=$($K -n "$NS" get configmap ssa-cm -o jsonpath='{.data.a}' 2>/dev/null)
 got_b=$($K -n "$NS" get configmap ssa-cm -o jsonpath='{.data.b}' 2>/dev/null)
-if [ "$got_a" = 9 ] && [ "$got_b" = 2 ]; then
-  ok "the update wrote both fields, and neither was dropped nor deleted"
+if [ "$got_a" = 1 ] && [ "$got_b" = 2 ]; then
+  ok "the update added a field without the applied one being re-applied over it"
 else
   bad "an update by a manager that has applied before" \
-      "data.a='${got_a:-<gone>}' want 9, data.b='${got_b:-<gone>}' want 2"
+      "data.a='${got_a:-<gone>}' want 1, data.b='${got_b:-<gone>}' want 2"
+fi
+
+# And the apply path really did go up as an apply. ⚠️ Nothing else here can see
+# this: if the forwarding is skipped, the ordinary write carries the whole
+# converted object and the result looks perfect. Only the bookkeeping differs,
+# and only the manager's next apply notices, by conflicting with its own last
+# one -- which is the entire reason the forwarding exists.
+op=$($K -n "$NS" get configmap ssa-cm \
+  -o jsonpath='{.metadata.managedFields[?(@.manager=="ctrl")].operation}' 2>/dev/null)
+if grep -q Apply <<<"$op"; then
+  ok "and upstream recorded the apply as an apply, so the next one converges"
+else
+  bad "upstream recorded the apply as an apply" \
+      "manager ctrl has operation='${op:-<nothing>}'; a repeated apply will now conflict with itself"
 fi
 $T delete configmap ssa-cm >/dev/null 2>&1
 

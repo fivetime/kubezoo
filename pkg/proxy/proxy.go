@@ -43,10 +43,11 @@ import (
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
+	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
-	"github.com/fivetime/kubezoo-contract/pkg/util"
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // tenantProxyWithLister implements StandardStorage
@@ -82,6 +83,23 @@ type tenantProxy struct {
 	// typeConverter reads an object against its schema, so that the fields a
 	// server-side apply owns can be lifted back out of the converted object.
 	typeConverter managedfields.TypeConverter
+
+	// injectedPaths names fields kubezoo adds to an object *above* this storage,
+	// which conversionDelta therefore cannot see.
+	//
+	// ⚠️ conversionDelta works by comparing the object before and after
+	// convertTenantObjectToUpstreamObject, so it closes that window and only that
+	// window. The ClusterRoleBinding projection sits above it: asRoleBinding
+	// stamps the projection label inside objInfo.UpdatedObject, before this
+	// storage ever sees the object, so the label is identical on both sides of
+	// the comparison and lands in neither Added nor Modified. It is not in the
+	// owned set either, because the tenant never wrote it. A server-side apply
+	// therefore created the record with no label at all -- and the label is what
+	// every consumer selects on, so the tenant's ClusterRoleBindings listed as
+	// empty and the controller never derived the cluster-scoped half of them.
+	//
+	// Anything that injects above a storage has to say so here.
+	injectedPaths *fieldpath.Set
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface

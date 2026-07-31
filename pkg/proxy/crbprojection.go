@@ -37,6 +37,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/apis/rbac"
+	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
@@ -112,6 +113,11 @@ func newClusterRoleBindingProjection(config apiconfig.StorageConfig) (rest.Stora
 	// This one is the projection's own way in to the records, so it must not
 	// hide them from itself.
 	lister.hideProjected = false
+	// asRoleBinding stamps this label before the inner storage sees the object,
+	// which is above the window conversionDelta can compare -- so a forwarded
+	// server-side apply would drop it, and the label is what every consumer of a
+	// projection record selects on. See tenantProxy.injectedPaths.
+	lister.injectedPaths = projectionLabelPath()
 
 	tableConvertor := config.TableConvertor
 	if tableConvertor == nil {
@@ -201,7 +207,10 @@ func (p *clusterRoleBindingProjection) Get(ctx context.Context, name string,
 func (p *clusterRoleBindingProjection) List(ctx context.Context,
 	options *metainternalversion.ListOptions) (runtime.Object, error) {
 
-	scoped := withProjectedSelector(options)
+	scoped, err := withProjectedSelector(options)
+	if err != nil {
+		return nil, err
+	}
 	obj, err := p.inner.List(inNamespace(ctx, canonicalNamespace), scoped)
 	if err != nil {
 		return nil, err
@@ -227,7 +236,11 @@ func (p *clusterRoleBindingProjection) List(ctx context.Context,
 func (p *clusterRoleBindingProjection) Watch(ctx context.Context,
 	options *metainternalversion.ListOptions) (watch.Interface, error) {
 
-	inner, err := p.inner.Watch(inNamespace(ctx, canonicalNamespace), withProjectedSelector(options))
+	scoped, err := withProjectedSelector(options)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := p.inner.Watch(inNamespace(ctx, canonicalNamespace), scoped)
 	if err != nil {
 		return nil, err
 	}
@@ -389,8 +402,29 @@ var roleBindingGVR = schema.GroupVersionResource{
 	Resource: "rolebindings",
 }
 
-// withProjectedSelector narrows a list or watch to the records.
-func withProjectedSelector(options *metainternalversion.ListOptions) *metainternalversion.ListOptions {
+// withProjectedSelector narrows a list or watch to the records, and rewrites the
+// field selector into the records' own terms.
+//
+// ⚠️ The field selector used to go through untouched, and this is the one place
+// util.ConvertInternalListOptions cannot help: it is handed the *inner* storage's
+// scope, which says namespaced RoleBinding, so it correctly leaves metadata.name
+// alone -- while the object the client asked about is a cluster-scoped
+// ClusterRoleBinding whose upstream name is neither the tenant's name nor
+// tenantID+"-"+name, but ProjectedBindingName(name).
+//
+// Two ways that went wrong, both silent:
+//   - `metadata.name=my-crb` matched nothing, because the record is called
+//     kubezoo:clusterrolebinding:my-crb. A single-object informer -- the standard
+//     client-go pattern, and the very case the option convertor's own comment
+//     names -- watched an empty world forever, while `kubectl get
+//     clusterrolebinding my-crb` worked, since Get translates the name.
+//   - `metadata.name!=keepme` matched *everything*, keepme's own record included,
+//     because no record is literally named keepme. A DeleteCollection carrying it
+//     deleted the one object it was told to spare.
+//
+// Transforming the value covers both, because Transform preserves the operator:
+// name!=X becomes recordName!=ProjectedBindingName(X), which is exact.
+func withProjectedSelector(options *metainternalversion.ListOptions) (*metainternalversion.ListOptions, error) {
 	scoped := metainternalversion.ListOptions{}
 	if options != nil {
 		scoped = *options
@@ -402,8 +436,43 @@ func withProjectedSelector(options *metainternalversion.ListOptions) *metaintern
 		}
 	}
 	scoped.LabelSelector = selector
-	return &scoped
+
+	if scoped.FieldSelector != nil {
+		transformed, err := scoped.FieldSelector.Transform(func(label, value string) (string, string, error) {
+			switch label {
+			case "metadata.name":
+				if value != "" {
+					value = util.ProjectedBindingName(value)
+				}
+			case "metadata.namespace":
+				// A ClusterRoleBinding has no namespace. Left alone it would be
+				// matched against the record's, which is the tenant's kube-system
+				// and means nothing the client could have intended.
+				return "", "", fmt.Errorf(
+					"metadata.namespace is not a field of a cluster-scoped clusterrolebinding")
+			}
+			return label, value, nil
+		})
+		if err != nil {
+			return nil, apierrors.NewBadRequest(err.Error())
+		}
+		scoped.FieldSelector = transformed
+	}
+	return &scoped, nil
 }
+
+// projectionLabelPath is the one field this storage injects, named so that a
+// forwarded server-side apply carries it.
+func projectionLabelPath() *fieldpath.Set {
+	label := common.ProjectedClusterRoleBindingLabelKey
+	return fieldpath.NewSet(fieldpath.Path{
+		fieldpath.PathElement{FieldName: strPtr("metadata")},
+		fieldpath.PathElement{FieldName: strPtr("labels")},
+		fieldpath.PathElement{FieldName: &label},
+	})
+}
+
+func strPtr(s string) *string { return &s }
 
 // asRoleBinding turns the tenant's ClusterRoleBinding into the record.
 func asRoleBinding(obj runtime.Object) (runtime.Object, error) {

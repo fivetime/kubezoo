@@ -75,10 +75,21 @@ func (tp *tenantProxy) forwardApply(ctx context.Context, upstream, tenantForm *u
 	if !found {
 		return nil, nil
 	}
-	if tp.typeConverter == nil || tenantForm == nil {
+	if tp.typeConverter == nil {
 		// Without a schema the field set cannot be turned back into an object,
 		// and guessing would mean applying fields nobody asked for.
 		return nil, nil
+	}
+	if tenantForm == nil {
+		// ⚠️ Loud, not a quiet fall-through. Every caller reaching here on an
+		// apply takes the snapshot first, so a nil is a programming error -- and
+		// falling back to an ordinary write would hide it perfectly, because that
+		// write carries the whole converted object and the result upstream looks
+		// right. What is lost is the bookkeeping, and it stays lost silently
+		// until the manager's next apply conflicts with its own last one.
+		// Removing the snapshot from both callers was measured to leave every
+		// test in the repository green.
+		return nil, fmt.Errorf("cannot forward this apply: the object as the tenant sent it was not kept")
 	}
 
 	fields := &fieldpath.Set{}
@@ -107,6 +118,11 @@ func (tp *tenantProxy) forwardApply(ctx context.Context, upstream, tenantForm *u
 		return nil, fmt.Errorf("working out which fields kubezoo added to this apply: %w", err)
 	}
 	fields = fields.Union(injected)
+	if tp.injectedPaths != nil {
+		// What a storage above this one added before the snapshot was taken, and
+		// which the comparison therefore cannot see. See tenantProxy.injectedPaths.
+		fields = fields.Union(tp.injectedPaths)
+	}
 
 	extracted, ok := typedUpstream.ExtractItems(fields.Leaves()).AsValue().Unstructured().(map[string]interface{})
 	if !ok {
@@ -191,8 +207,18 @@ func (tp *tenantProxy) typeObject(obj *unstructured.Unstructured,
 // label went the same way, which takes a namespace out of every cluster-wide
 // list, watch and teardown that selects on it.
 //
-// Taking the union with everything conversion touched closes the class rather
-// than the instance: a convertor added later cannot reintroduce it.
+// Taking the union with everything conversion touched closes the class for every
+// convertor, so one added later cannot reintroduce it.
+//
+// ⚠️ It closes that class and no other, and an earlier version of this comment
+// claimed otherwise. The comparison can only see what changed between the
+// tenantForm snapshot and the converted object -- that is, inside
+// convertTenantObjectToUpstreamObject. A field injected *above* this storage is
+// present on both sides and shows up in neither Added nor Modified. There is
+// already one in tree: the ClusterRoleBinding projection stamps its label in
+// asRoleBinding, inside objInfo.UpdatedObject, and a server-side-applied
+// ClusterRoleBinding was created upstream with no label at all. Injectors above
+// a storage declare themselves through tenantProxy.injectedPaths.
 func conversionDelta(converter managedfields.TypeConverter, tenantForm, upstream *unstructured.Unstructured,
 	tenantAPIVersion string) (*fieldpath.Set, error) {
 

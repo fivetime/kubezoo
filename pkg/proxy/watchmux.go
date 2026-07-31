@@ -253,12 +253,19 @@ func (m *watchMux) forward(namespace string, w watch.Interface) {
 				m.onBookmark(namespace, event)
 				continue
 			}
-			m.recordProgress(namespace, event)
+			// ⚠️ Recorded after the send, not before. The watermark is meant to
+			// be a revision through which every stream has *delivered*, and
+			// recording it first made it a revision every stream had merely
+			// *seen*: another stream's bookmark could then be computed from it,
+			// restamped and delivered while this event was still queued, so the
+			// client's resume point reached a revision it had not been given the
+			// event for. One event, silently, on any interleaving.
 			select {
 			case m.result <- event:
 			case <-m.stop:
 				return
 			}
+			m.recordProgress(namespace, event)
 		}
 	}
 }
@@ -413,15 +420,26 @@ func (m *watchMux) followNamespaces(ctx context.Context, tp *tenantProxy) error 
 				// the news -- a panic, not a lost message. Added here rather than
 				// inside, while this goroutine's own count keeps the group above
 				// zero.
-				m.forwarder.Add(1)
-				go func(namespace, startAt string) {
-					defer m.forwarder.Done()
-					m.join(ctx, namespace, startAt)
-				}(accessor.GetName(), startAt)
+				m.goJoin(ctx, accessor.GetName(), startAt)
 			}
 		}
 	}()
 	return nil
+}
+
+// goJoin starts a join, counted in the same WaitGroup as the forwarders.
+//
+// ⚠️ The count is what keeps m.result open while the join runs, and a join that
+// gives up has something to say on it. Uncounted, the last forwarder could
+// retire and close that channel first -- a panic, not a lost message. Add()
+// happens here, on the caller's goroutine, while the caller's own count keeps
+// the group above zero.
+func (m *watchMux) goJoin(ctx context.Context, namespace, resourceVersion string) {
+	m.forwarder.Add(1)
+	go func() {
+		defer m.forwarder.Done()
+		m.join(ctx, namespace, resourceVersion)
+	}()
 }
 
 // join adds a namespace to the merged stream, waiting out the moment where it

@@ -18,12 +18,14 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
@@ -47,6 +49,12 @@ func (f *fakeWatchResource) Namespace(namespace string) kubezoodynamic.ResourceI
 }
 
 func (f *fakeNamespacedResource) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
+	if f.watcher == nil {
+		// A namespace the tenant cannot read yet, which is the state a freshly
+		// created one spends its first seconds in and the reason join retries.
+		return nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "",
+			fmt.Errorf("not yet"))
+	}
 	return f.watcher, nil
 }
 
@@ -192,22 +200,88 @@ func TestBookmarkIsTheMinimumAcrossStreams(t *testing.T) {
 // A join retries for thirty seconds and ends the merged stream if it never
 // succeeds, so it has something to say long after the rest of the mux may have
 // retired. m.result is closed once the forwarders are done, and a send on a
-// closed channel is a panic rather than a lost message -- which is why join is
-// counted in the same WaitGroup, and why expire checks before it speaks.
+// closed channel is a panic rather than a lost message.
+//
+// ⚠️ Looped on purpose. Removing the guard leaves a select with one send case on
+// a closed channel and one ready receive, and the runtime's shuffled poll order
+// picks the safe branch about four times in five -- measured 24 passes in 30 with
+// the guard deleted. A single attempt is not a guard.
 func TestExpireAfterStopDoesNotPanic(t *testing.T) {
-	m, _ := newTestMux(t, metav1.ListOptions{ResourceVersion: "1000"}, "111111-a")
+	for i := 0; i < 200; i++ {
+		func() {
+			m, _ := newTestMux(t, metav1.ListOptions{ResourceVersion: "1000"}, "111111-a")
+			m.Stop()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, open := <-m.ResultChan(); !open {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the merged stream never closed after Stop")
+				}
+			}
+			m.expire("a join that outlived the stream")
+		}()
+	}
+}
 
-	m.Stop()
-	// Everything has retired and m.result is closed by now.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, open := <-m.ResultChan(); !open {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the merged stream never closed after Stop")
-		}
+// TestAPendingJoinHoldsTheStreamOpen covers the other half of the same fix, and
+// the half that actually matters.
+//
+// ⚠️ expire's stop pre-check is not sufficient on its own: a join whose expire
+// body has already passed that check can still be holding a send on m.result
+// while the last forwarder retires, Wait() returns and close(m.result) runs.
+// Counting the join in the same WaitGroup is what makes that impossible, and
+// reverting it to a bare `go m.join(...)` left every watchmux test green.
+//
+// The invariant is exactly this: while a join is outstanding, the group that
+// guards close(m.result) must not fall to zero.
+func TestAPendingJoinHoldsTheStreamOpen(t *testing.T) {
+	// Built here rather than by newTestMux, which starts its Wait goroutine
+	// immediately: with no namespaces the counter would already be zero and the
+	// first Add would race it.
+	m := &watchMux{
+		resource: &fakeWatchResource{watchers: map[string]*watch.FakeWatcher{}},
+		options:  metav1.ListOptions{ResourceVersion: "1000"},
+		tenantID: "111111",
+		result:   make(chan watch.Event),
+		stop:     make(chan struct{}),
+		watched:  map[string]watch.Interface{},
+		streams:  map[string]*streamProgress{},
+	}
+	t.Cleanup(m.Stop)
+
+	// Stands in for the namespace follower, which is what spawns joins and holds a
+	// count of its own throughout. goJoin's Add is only safe because of that --
+	// adding to a WaitGroup whose counter is zero while something waits on it is a
+	// misuse, which is exactly why goJoin documents where its Add runs.
+	m.forwarder.Add(1)
+
+	drained := make(chan struct{})
+	go func() {
+		m.forwarder.Wait()
+		close(drained)
+	}()
+
+	// A namespace the tenant cannot read yet, so join retries rather than
+	// returning -- the state a real join spends its first seconds in.
+	m.goJoin(context.Background(), "111111-not-yet", "1000")
+
+	// The follower retires. Only the join is left holding the group up.
+	m.forwarder.Done()
+
+	select {
+	case <-drained:
+		t.Fatal("the group that guards close(m.result) fell to zero while a join was still " +
+			"outstanding; that join's expire would be a send on a closed channel")
+	case <-time.After(300 * time.Millisecond):
 	}
 
-	m.expire("a join that outlived the stream")
+	// Stop unwinds it: the join gives up at once and the group empties.
+	m.Stop()
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Error("the join did not give up after Stop")
+	}
 }

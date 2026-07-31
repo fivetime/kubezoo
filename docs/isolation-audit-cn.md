@@ -2929,6 +2929,67 @@ crdHandler 用租户看到的 CRD 建转换器(组已去前缀),而喂给它的�
 而真正的原因是**排版**:那一节的注释早就写着 "This runs last, and deliberately",我加在了它后面。
 注释现在点名了这件事,免得下一个人重犯。
 
+## BA. ✅ 第五轮复审:验证第四轮的修复本身
+
+问的是"修复完整吗、修复引入了什么"。十条里**八条如实成立**,两条没关上它们自己声称关上的东西 ——
+⭐**其中一条正是我上一轮批评第三轮时的那个毛病:修好了实例,却断言修好了类。**
+
+### ⭐ `conversionDelta` 的窗口边界(注释写错了)
+
+原注释:「Taking the union with everything conversion touched **closes the class rather than the
+instance**: a convertor added later cannot reintroduce it.」
+
+**这句是错的。** `conversionDelta` 只能看见 `tenantForm` 快照**之后**的改写,也就是
+`convertTenantObjectToUpstreamObject` 那个窗口内的。而 ClusterRoleBinding 投影的 `asRoleBinding`
+在 `objInfo.UpdatedObject` 里注入投影标签,**在快照之上** ⇒ 标签在比较的两侧都在,
+既不在 `Added` 也不在 `Modified`;也不在 owned 集里(租户从没写过它)。
+
+后果:`kubectl apply --server-side` 建新 ClusterRoleBinding,上游收到的 patch **一个 label 都没有**。
+而所有消费者都按这个标签选:`get clusterrolebindings` **返回空**(`get <name>` 却找得到)、
+控制器**永远不派生集群级那一半**、之后新建的 namespace 拿不到副本。只在首次写入触发,客户端 apply 会自愈。
+
+修法:窗口之上的注入方**自己声明**(`tenantProxy.injectedPaths`),并把那句注释改成事实。
+
+### ⭐ 三处 field selector 的最后一处
+
+`ListOptionScope` 覆盖了它到得了的每个调用点,但**唯一需要额外处理的那个没拿到** ——
+投影把**集群级**资源的 selector 交给**命名空间级**的内层 proxy,`ConvertInternalListOptions` 于是
+正确地不去动 `metadata.name`,而记录的真名是 `ProjectedBindingName(name)`。两种失败都静默:
+
+| 选择器 | 后果 |
+|---|---|
+| `metadata.name=my-crb` | 匹配不到任何东西 ⇒ 单对象 informer 看到永远空的世界,而 `get` 却正常 |
+| `metadata.name!=keepme` | **匹配到全部**(没有任何记录字面上叫 keepme)⇒ `DeleteCollection` **把要保留的那条也删了** |
+
+修法在 `withProjectedSelector` 里转换取值(`Transform` 保留运算符,所以 `!=` 也精确);
+`metadata.namespace` 直接拒(集群级对象没有这个字段)。
+
+### ⭐ 原有的 high:teardown 丢分隔符
+
+`controller.go` 两处按 `HasPrefix(name, tenantId)` 判归属,**没有横杠** —— 而 contract 自己的
+`UpstreamObjectBelongsToTenant` 一直要求 `tenantID+"-"`。租户名校验只查长度 6 和 RFC1123,**无保留名单**。
+⇒ 建一个叫 `system` 的租户再删掉,会扫掉全集群以 `system` 开头的集群级对象。
+真 1.36.2 apiserver 复现:**70 条 bootstrap ClusterRole 删掉 66 条**;按仓库 shipped 的 RBAC 限权仍删 65 条
+(manifest 授的正是 clusterroles 的 delete);`rbac/bootstrap-roles` 是 post-start hook,**不会自愈**。
+
+### ⚠️⚠️ 最难堪的一条:我的"负向对照"结论不成立
+
+我上一轮写过"六条新断言全部经负向对照证实会红"。**两条其实是摆设**:
+
+1. `TestConversionDeltaCarriesInjectedFields` **根本不调用 `forwardApply`** —— 它自己在测试里做并集。
+   把产品代码的 `fields.Union(injected)` 删掉,**整个套件全绿**;把两处 `tenantForm` 快照废掉,**也全绿**。
+2. verify.sh「an ordinary update … stays an update」**对着它所针对的缺陷会通过**:PUT 改掉 `a`
+   这个动作**恰好摧毁**缺陷所依赖的那条 Apply 记录(field manager 减去冲突路径 ⇒ 记录变空被删),
+   于是未修复的代码找不到 Apply 记录、不转发、PUT 正常落地。改成**只新增 `b`、不碰 `a`** 才有判别力。
+
+**逻辑漏洞在哪**:我当时是**同时**退掉五处修复跑的负向对照 —— 一起退会红,**不等于**每条断言守得住它自己那条修复。
+和 `[ -n "{}" ]` 同类,只是更隐蔽。现在每条守卫都单独做过 mutation。
+
+顺带补上:CR 类型转换器那条修复**原先三个仓库里一个测试都没有**;
+`TestExpireAfterStopDoesNotPanic` 原先约四次才抓一次(改成循环 200 次)且没覆盖它注释声称覆盖的
+WaitGroup 那半(补 `TestAPendingJoinHoldsTheStreamOpen`);
+`recordProgress` 原先在**发送之前**记录,使水位线变成"看见过"而非"已交付",已移到发送之后。
+
 ## 尚未覆盖
 
 诚实列出,不算做完:
