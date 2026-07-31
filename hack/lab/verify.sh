@@ -250,13 +250,18 @@ expect_allowed "canary identity can write before the freeze (control)" \
 
 kubectl --kubeconfig "$ZOOKC" patch tenant "$TID" --type=merge \
   -p '{"spec":{"suspension":{"mode":"Frozen","reason":"verify.sh"}}}' >/dev/null 2>&1
+# Wait for the condition being asserted, not for a weaker one. This used to break
+# out as soon as any namespace carried the label and then assert that all of them
+# did -- and the controller labels them one at a time, so the gap between those
+# two is real. It failed at 3 of 4, which is what sampling a converging system at
+# an arbitrary moment looks like.
+total=$($K get ns -l "kubezoo.io/tenant=$TID" --no-headers 2>/dev/null | wc -l)
 for _ in $(seq 20); do
-  [ "$($K get ns -l kubezoo.io/frozen --no-headers 2>/dev/null | grep -c "^$TID-")" -gt 0 ] && break
+  [ "$($K get ns -l kubezoo.io/frozen --no-headers 2>/dev/null | grep -c "^$TID-")" = "$total" ] && break
   sleep 3
 done
 
 labelled=$($K get ns -l kubezoo.io/frozen --no-headers 2>/dev/null | grep -c "^$TID-")
-total=$($K get ns -l "kubezoo.io/tenant=$TID" --no-headers 2>/dev/null | wc -l)
 [ "$labelled" = "$total" ] && [ "$total" -gt 0 ] && ok "all $total of the tenant's namespaces are labelled frozen" \
   || bad "freeze labelling" "$labelled of $total labelled -- upstream has no other way to know"
 
