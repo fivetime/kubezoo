@@ -20,7 +20,7 @@ limitations under the License.
 package app
 
 import (
-	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"net/http"
 	"time"
 
@@ -40,8 +40,8 @@ import (
 	"k8s.io/apiserver/pkg/util/webhook"
 	kubeexternalinformers "k8s.io/client-go/informers"
 
-	"github.com/fivetime/kubezoo-proxy/cmd/kubezoo/app/options"
-	"github.com/fivetime/kubezoo-proxy/pkg/proxy"
+	"github.com/fivetime/kubezoo-gateway/cmd/kubezoo/app/options"
+	"github.com/fivetime/kubezoo-gateway/pkg/proxy"
 )
 
 var (

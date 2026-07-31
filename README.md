@@ -1,8 +1,15 @@
-# kubezoo-proxy
+# kubezoo-gateway
 
 The tenant-facing API server. It adds multi-tenancy to an existing Kubernetes
-cluster by rewriting requests and responses, so tenants see a cluster of their
-own while sharing one control plane and data plane underneath.
+cluster by translating between two views of it: tenants see a cluster of their
+own, and one control plane and data plane serve all of them underneath.
+
+It is a gateway rather than a proxy because it does not forward — it terminates
+the tenant-facing API, rewrites requests and responses in both directions, serves
+resources of its own, and filters what discovery advertises.
+
+⚠️ Not to be confused with [kubegateway](https://github.com/kubewharf/kubegateway),
+which is a different project and can sit in front of this one.
 
 English | [简体中文](README.zh.md)
 
@@ -13,7 +20,7 @@ all of them**:
 
 | | |
 |---|---|
-| **kubezoo-proxy** (here) | The API server tenants talk to. Rewrites every request and response. |
+| **kubezoo-gateway** (here) | The API server tenants talk to. Terminates the tenant-facing API and translates it into upstream calls, in both directions. |
 | [kubezoo-contract](https://github.com/fivetime/kubezoo-contract) | The translation rules, the API types, and the admission policies. Both other repositories depend on it. |
 | [kubezoo-controller](https://github.com/fivetime/kubezoo-controller) | Reconciles the upstream cluster against the Tenant objects this server holds. |
 

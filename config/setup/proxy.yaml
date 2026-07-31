@@ -1,4 +1,4 @@
-# kubezoo-proxy:租户 API 的入口,加上它自己那套 etcd(只存 Tenant/Quota 这些
+# kubezoo-gateway:租户 API 的入口,加上它自己那套 etcd(只存 Tenant/Quota 这些
 # kubezoo 自有对象,不存租户的工作负载)。
 #
 # ⚠️ 这一份**不够**。租户控制器是另一个部署(kubezoo-controller),只装这一份的话,

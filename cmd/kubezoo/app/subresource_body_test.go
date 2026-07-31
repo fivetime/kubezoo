@@ -18,7 +18,7 @@ package app
 
 import (
 	"fmt"
-	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"reflect"
 	"testing"
 

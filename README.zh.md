@@ -1,4 +1,13 @@
-# kubezoo-proxy
+# kubezoo-gateway
+
+租户直接访问的 API 服务端。它在同一个物理集群上翻译出多个租户视角:
+租户看到的是自己的一个集群,而底下是同一套控制面和数据面。
+
+叫 gateway 而不是 proxy,是因为它**不转发** —— 它终结租户侧的 API、
+双向改写请求与响应、提供自己的资源、并过滤 discovery 对外宣告的内容。
+
+⚠️ 与 [kubegateway](https://github.com/kubewharf/kubegateway) 不是一回事,
+那是另一个项目,而且可以**挡在这个前面**。
 
 [English](./README.md) | 简体中文
 
@@ -8,7 +17,7 @@ KubeZoo 原本是一个仓库,现在是三个,**部署时三个都要**:
 
 | | |
 |---|---|
-| **kubezoo-proxy**(本仓库) | 租户直接访问的 API 服务端,改写每一个请求和响应 |
+| **kubezoo-gateway**(本仓库) | 租户直接访问的 API 服务端。终结租户侧 API,双向翻译成上游调用 |
 | [kubezoo-contract](https://github.com/fivetime/kubezoo-contract) | 翻译规则、API 类型、准入策略。另外两个仓库都依赖它 |
 | [kubezoo-controller](https://github.com/fivetime/kubezoo-controller) | 把上游集群对账成这里保存的 Tenant 声明的样子 |
 

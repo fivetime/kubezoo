@@ -17,14 +17,14 @@ limitations under the License.
 package app
 
 import (
-	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"sort"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	master "k8s.io/kubernetes/pkg/controlplane"
 
-	"github.com/fivetime/kubezoo-proxy/pkg/proxy"
+	"github.com/fivetime/kubezoo-gateway/pkg/proxy"
 )
 
 // allDeclaredGroups is every group kubezoo exposes to tenants, legacy and not.

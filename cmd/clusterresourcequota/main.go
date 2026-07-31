@@ -32,7 +32,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/fivetime/kubezoo-proxy/pkg/clusterresourcequota/controllers"
+	"github.com/fivetime/kubezoo-gateway/pkg/clusterresourcequota/controllers"
 	//+kubebuilder:scaffold:imports
 )
 

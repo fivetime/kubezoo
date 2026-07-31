@@ -1,4 +1,4 @@
-module github.com/fivetime/kubezoo-proxy
+module github.com/fivetime/kubezoo-gateway
 
 go 1.26.0
 

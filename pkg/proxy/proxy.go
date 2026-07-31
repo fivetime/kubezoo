@@ -20,10 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/fivetime/kubezoo-proxy/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"strings"
 
-	"github.com/fivetime/kubezoo-proxy/pkg/proxy/pod"
+	"github.com/fivetime/kubezoo-gateway/pkg/proxy/pod"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
