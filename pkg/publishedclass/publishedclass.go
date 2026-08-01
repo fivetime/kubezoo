@@ -46,17 +46,12 @@ type Set interface {
 	// Retired reports whether the class is published but on the way out.
 	// Visible stays true for these.
 	//
-	// ⚠️ NOTHING CALLS THIS YET. Refusing a new reference to a retired class is
-	// deliberately a separate change, because it is the first thing here that can
-	// reject a tenant's write, and it has a trap: the refusal must fire on CREATE
-	// only. A PVC's spec.storageClassName is immutable once bound, so validating
-	// on UPDATE would make every subsequent write to an existing PVC fail --
-	// including a GitOps controller reapplying an unchanged manifest, which would
-	// turn retiring a class into a stuck reconcile loop the tenant cannot escape.
-	//
-	// What the tri-state already does today is honest on its own: a tenant reads
-	// the label off the object and can see the class is going away, which is the
-	// part that needs lead time.
+	// ⚠️ Read by tenantProxy.refuseRetiredStorageClass on the CREATE path ONLY,
+	// and that restriction is load-bearing. A PVC's spec.storageClassName is
+	// immutable once bound, so a tenant cannot edit its way off a retired class;
+	// checking on update would make every later write to an existing claim fail,
+	// including a GitOps controller reapplying a manifest it has not changed,
+	// turning a retirement into a reconcile loop with no way out.
 	Retired(name string) bool
 	// Names lists every visible class.
 	Names() []string

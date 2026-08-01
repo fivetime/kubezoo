@@ -25,6 +25,7 @@ import (
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy/pod"
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,11 +36,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/managedfields"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
@@ -100,6 +103,11 @@ type tenantProxy struct {
 	//
 	// Anything that injects above a storage has to say so here.
 	injectedPaths *fieldpath.Set
+
+	// publishedStorageClasses answers which storage classes the platform offers
+	// and which it has retired, so that a create can be refused before it
+	// provisions anything. Nil on every resource but persistentvolumeclaims.
+	publishedStorageClasses publishedclass.Set
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -185,16 +193,18 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		isCustomResource: config.IsCustomResource,
 		hideProjected: config.Resource == "rolebindings" && config.Subresource == "" &&
 			config.Kind.Group == "rbac.authorization.k8s.io",
-		resource:             config.Resource,
-		subresource:          config.Subresource,
-		shortNames:           config.ShortNames,
-		newFunc:              config.NewFunc,
-		newListFunc:          config.NewListFunc,
-		typeConverter:        config.TypeConverter,
-		dynamicClient:        config.DynamicClient,
-		convertor:            config.Convertor,
-		groupVersionKindFunc: config.GroupVersionKindFunc,
-		tableConvertor:       tc,
+		resource:      config.Resource,
+		subresource:   config.Subresource,
+		shortNames:    config.ShortNames,
+		newFunc:       config.NewFunc,
+		newListFunc:   config.NewListFunc,
+		typeConverter: config.TypeConverter,
+		dynamicClient: config.DynamicClient,
+
+		publishedStorageClasses: config.PublishedStorageClasses,
+		convertor:               config.Convertor,
+		groupVersionKindFunc:    config.GroupVersionKindFunc,
+		tableConvertor:          tc,
 	}
 	if config.NewListFunc == nil {
 		return proxy, nil
@@ -570,6 +580,12 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseProjectedLabel(utd); err != nil {
 		return nil, err
 	}
+	// Before forwardApply, so that a server-side apply is refused too -- that is
+	// the path `kubectl apply --server-side` takes for an object that does not
+	// exist yet, and it is the common way PVCs get created.
+	if err := tp.refuseRetiredStorageClass(obj); err != nil {
+		return nil, err
+	}
 
 	// An apply that has to create the object is still an apply, and this is the
 	// path it takes -- most resources refuse to be created by an update. Sending
@@ -883,6 +899,65 @@ func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID stri
 //
 // Scoped to RBAC. A tenant may perfectly well have a PersistentVolume called
 // admin; it is the roles kubezoo binds that must stay its own.
+// refuseRetiredStorageClass refuses a create that would newly reference a storage
+// class the platform has labelled as going away.
+//
+// ⚠️ CREATE ONLY, and that is load-bearing rather than an omission. A bound PVC's
+// spec.storageClassName is immutable, so a tenant cannot repair its own manifest
+// once the class is retired. Checking on update would therefore fail every later
+// write to a PVC that already names it -- including a GitOps controller
+// reapplying a manifest it has not changed, which would turn retiring a class
+// into a reconcile loop the tenant has no way out of. Every create path funnels
+// through tenantProxy.Create: a POST arrives there directly, and a server-side
+// apply of an object that does not exist arrives via guaranteedUpdate, which
+// hands the missing case to Create rather than sending it as an update.
+//
+// This refuses only a RETIRED class, not an unpublished one. Publication is
+// discovery, not authorization -- pkg/publishedclass says so and hack/lab
+// asserts it -- so removing a label stays a safe, reversible act: an operator
+// tidying up, or fixing a typo, must not be what makes a tenant's StatefulSet
+// fail to scale.
+//
+// PersistentVolume is deliberately not covered. Its storageClassName declares
+// which class a volume already satisfies rather than asking for one to be
+// provisioned, so refusing it would block a tenant from statically providing
+// storage without protecting anything.
+func (tp *tenantProxy) refuseRetiredStorageClass(obj runtime.Object) error {
+	if tp.publishedStorageClasses == nil {
+		return nil
+	}
+	pvc, ok := obj.(*core.PersistentVolumeClaim)
+	if !ok {
+		return nil
+	}
+	// Empty is not "names no class": it means the default class, which the
+	// setdefault admission plugin fills in upstream.
+	//
+	// ⚠️ Redundant TODAY and kept deliberately. Retired("") is already false --
+	// nothing in the store is named "" -- so removing this line changes nothing
+	// right now, and a mutation test confirms that it does not. It is here for
+	// the edit that is obviously next: turning this guard from "refuse a retired
+	// class" into "refuse anything unpublished" means swapping Retired(name) for
+	// !Visible(name), and Visible("") is false, so that one-word change would
+	// start refusing every PVC that does not name a class explicitly -- which is
+	// most of them ever written.
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+		return nil
+	}
+	name := *pvc.Spec.StorageClassName
+	if !tp.publishedStorageClasses.Retired(name) {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}, pvc.Name,
+		field.ErrorList{field.Invalid(
+			field.NewPath("spec", "storageClassName"), name,
+			fmt.Sprintf("storage class %q is being retired and is not accepting new claims; "+
+				"the ones still available are listed by `kubectl get storageclass`. "+
+				"Claims that already use it keep working -- this refuses only new ones.", name),
+		)})
+}
+
 func (tp *tenantProxy) refuseReservedName(tenantID, upstreamName string) error {
 	if tp.namespaceScoped || tp.kind.Group != "rbac.authorization.k8s.io" {
 		return nil

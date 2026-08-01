@@ -1643,6 +1643,70 @@ else
   bad "a retired class stays visible" "tenant sees published='${retired:-<gone>}', want deprecated"
 fi
 
+# ⭐ While it is retired, a NEW claim naming it is refused -- on both create
+# paths. POST is what client-side `kubectl apply` uses for an object that does
+# not exist; `kubectl apply --server-side` sends a PATCH instead, which reaches
+# tenantProxy.Create only because guaranteedUpdate hands the missing case over
+# rather than sending it as an update. Asserting only the first would leave the
+# common path unproven.
+for mode in "" "--server-side"; do
+  what=${mode:---post}
+  out=$($T apply $mode -f - 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: sc-retired-$$-${what#--}}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources: {requests: {storage: 1Mi}}
+EOF
+)
+  if grep -q "being retired" <<<"$out"; then
+    ok "a new claim naming a retired class is refused (${what#--})"
+  else
+    bad "a new claim naming a retired class is refused (${what#--})" \
+        "got: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+  fi
+done
+
+# ...while the claim that already names it keeps being writable. This is the
+# reason retirement is a state of its own rather than just removing the label:
+# spec.storageClassName is immutable once bound, so a tenant cannot edit its way
+# out, and refusing on update would make every later write fail -- including a
+# GitOps controller reapplying a manifest it has not changed.
+#
+# ⚠️ No -n here, and no upstream namespace name. $T already carries -n default,
+# which is where the claim above was created; adding a second -n wins over the
+# first, and naming the UPSTREAM namespace on a patch does not work even though
+# it does on a get. tp.Get hands the patcher an object whose namespace has been
+# converted back to the tenant's name, the request URL still carries the upstream
+# one, and the generic patcher refuses the mismatch with a BadRequest that says
+# nothing about namespaces being translated at all.
+if $T patch persistentvolumeclaims sc-probe --type=merge \
+     -p '{"metadata":{"annotations":{"probe":"still-writable"}}}' >/dev/null 2>&1; then
+  ok "and an existing claim on that same class is still writable"
+else
+  bad "an existing claim on a retired class is still writable" \
+      "$($T patch persistentvolumeclaims sc-probe --type=merge -p '{"metadata":{"annotations":{"probe":"x"}}}' 2>&1 | tr '\n' ' ' | cut -c1-160)"
+fi
+
+# A claim that names no class at all is a request for the DEFAULT class, and must
+# not be caught by any of this.
+if $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: sc-default-$$}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Mi}}
+EOF
+then
+  ok "a claim naming no class at all is still accepted"
+else
+  bad "a claim naming no class is accepted" "the default-class path was refused"
+fi
+$T delete pvc "sc-default-$$" >/dev/null 2>&1
+
 # ⚠️ Unpublishing must not break anything a tenant already has. Publishing is
 # discovery, not authorization -- see the flag help. The PVC written above keeps
 # its class and upstream keeps provisioning it.

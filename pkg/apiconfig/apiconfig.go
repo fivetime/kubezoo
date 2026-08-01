@@ -81,6 +81,17 @@ type StorageConfig struct {
 	// proxy. See pkg/proxy/publicclass.go and pkg/publishedclass.
 	PublishedClasses publishedclass.Set
 
+	// PublishedStorageClasses lets an ordinary tenant proxy refuse a CREATE that
+	// would newly reference a storage class the platform has marked as going
+	// away. Nil disables the check.
+	//
+	// ⚠️ NOT the same field as PublishedClasses above, and setting the wrong one
+	// is not a compile error. PublishedClasses CHANGES WHAT THIS STORAGE IS --
+	// NewTenantProxy branches on it and returns the read-only published view
+	// instead. Setting it on persistentvolumeclaims would turn the PVC endpoint
+	// into a read-only list of storage classes.
+	PublishedStorageClasses publishedclass.Set
+
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL
 	GroupVersionKindFunc GroupVersionKindFunc

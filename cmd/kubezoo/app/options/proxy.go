@@ -75,9 +75,10 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"Prefer labelling the StorageClass "+common.StorageClassPublishedLabelKey+"=true, which takes "+
 			"effect without a restart -- this flag can only be changed by restarting the gateway, which "+
 			"interrupts every tenant's API access, and a name misspelled here fails silently. Labelling it "+
-			"\""+common.PublishedDeprecated+"\" instead announces that the class is going away: it stays "+
-			"visible, so a tenant can see why its own PersistentVolumeClaim names it. This flag is unioned "+
-			"with the labelled set and kept so that an upgrade does not silently un-publish anything.")
+			"\""+common.PublishedDeprecated+"\" instead retires it: new PersistentVolumeClaims naming it are "+
+			"refused, while it stays visible and every claim that already uses it keeps working, so tenants "+
+			"have a window to migrate. This flag is unioned with the labelled set and kept so that an "+
+			"upgrade does not silently un-publish anything.")
 }
 
 func (o *ProxyOptions) Validate() []error {

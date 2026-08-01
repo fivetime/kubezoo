@@ -625,6 +625,17 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	if config.Kind.Group == "storage.k8s.io" && config.Resource == "storageclasses" {
 		config.PublishedClasses = c.publishedStorageClasses
 	}
+	// ⚠️ A different field, on a different resource, doing a different thing:
+	// this leaves the PVC endpoint an ordinary tenant proxy and only lets it
+	// refuse a CREATE that names a retired class. Assigning PublishedClasses here
+	// instead would replace the PVC endpoint with a read-only list of storage
+	// classes, and it would compile.
+	// The subresource check is not decoration: persistentvolumeclaims/status
+	// carries the same Resource string, and a status write is not a claim.
+	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
+		config.Subresource == "" {
+		config.PublishedStorageClasses = c.publishedStorageClasses
+	}
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport
 	config.UpstreamMaster = c.upstreamMaster

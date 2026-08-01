@@ -18,16 +18,21 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/storage"
 
+	"github.com/fivetime/kubezoo-contract/pkg/common"
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
@@ -181,5 +186,91 @@ func TestPublishedClassesAreReadOnly(t *testing.T) {
 	}
 	if s.(rest.Scoper).NamespaceScoped() {
 		t.Error("a StorageClass is cluster-scoped")
+	}
+}
+
+// TestRefuseRetiredStorageClass pins the three answers the guard has to give.
+//
+// The interesting one is the middle: an UNPUBLISHED class is still accepted.
+// Publication is discovery, not authorization, so removing a label has to stay a
+// safe and reversible act -- otherwise an operator tidying up would be what makes
+// some tenant's StatefulSet stop scaling, and a bound PVC's storageClassName is
+// immutable, so the tenant could not repair its own manifest.
+func TestRefuseRetiredStorageClass(t *testing.T) {
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	for name, value := range map[string]string{
+		"fast-ssd":        common.PublishedTrue,
+		"legacy-spinning": common.PublishedDeprecated,
+	} {
+		if err := store.Add(&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{common.StorageClassPublishedLabelKey: value},
+		}}); err != nil {
+			t.Fatalf("seeding the store: %v", err)
+		}
+	}
+	proxy := &tenantProxy{publishedStorageClasses: publishedclass.New("storageclass",
+		common.StorageClassPublishedLabelKey, store, func() bool { return true }, nil)}
+
+	claim := func(class *string) *core.PersistentVolumeClaim {
+		return &core.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "team"},
+			Spec:       core.PersistentVolumeClaimSpec{StorageClassName: class},
+		}
+	}
+	name := func(s string) *string { return &s }
+
+	for _, tc := range []struct {
+		what    string
+		object  runtime.Object
+		refused bool
+	}{
+		{"a published class", claim(name("fast-ssd")), false},
+		{"a retired class", claim(name("legacy-spinning")), true},
+		{"a class the platform never published", claim(name("platform-internal")), false},
+		// Empty is not "names no class": it is a request for the default class,
+		// which the setdefault admission plugin fills in upstream. Refusing it
+		// would refuse most PVCs ever written.
+		//
+		// ⚠️ These two pin behaviour, not the line of code that implements it:
+		// the implementation gets them right for free today, because Retired("")
+		// is false anyway, and deleting its explicit empty check leaves both
+		// passing. They earn their keep on the edit that swaps Retired for
+		// !Visible, which would otherwise start refusing every PVC that does not
+		// name a class -- see the comment on refuseRetiredStorageClass.
+		{"the default class, named by omission", claim(name("")), false},
+		{"the default class, named by a nil pointer", claim(nil), false},
+		// The guard runs on every create the proxy serves, so it has to be inert
+		// for everything that is not a claim.
+		{"something that is not a claim at all", &core.ConfigMap{}, false},
+	} {
+		err := proxy.refuseRetiredStorageClass(tc.object)
+		if tc.refused && err == nil {
+			t.Errorf("%s: accepted, want refused", tc.what)
+		}
+		if !tc.refused && err != nil {
+			t.Errorf("%s: refused with %v, want accepted", tc.what, err)
+		}
+		if tc.refused && err != nil {
+			if !apierrors.IsInvalid(err) {
+				t.Errorf("%s: refused with %T, want an Invalid so kubectl points at the field", tc.what, err)
+			}
+			// The tenant cannot list what it may use unless the message says how.
+			if !strings.Contains(err.Error(), "kubectl get storageclass") {
+				t.Errorf("%s: the refusal does not tell the tenant where to look: %v", tc.what, err)
+			}
+		}
+	}
+}
+
+// TestRetiredCheckIsInertWithoutASet -- every other resource's proxy leaves the
+// field nil, and must not pay for or be affected by this.
+func TestRetiredCheckIsInertWithoutASet(t *testing.T) {
+	proxy := &tenantProxy{}
+	class := "legacy-spinning"
+	if err := proxy.refuseRetiredStorageClass(&core.PersistentVolumeClaim{
+		Spec: core.PersistentVolumeClaimSpec{StorageClassName: &class},
+	}); err != nil {
+		t.Errorf("a proxy with no published set refused a claim: %v", err)
 	}
 }
