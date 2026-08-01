@@ -336,7 +336,10 @@ kubezoo_parametes="
 --request-timeout=10m \
 --watch-cache=true \
 --proxy-upstream-master=$KIND_SERVER \
---service-account-lookup=false \
+# 上游默认 true。只管旧式 Secret 型 token:bound token 另走一个认证器,永远查存续。
+# 关掉它省不下 pod 路径的开销,只会让手工建的 service-account-token 在删掉 SA 后
+# 仍然有效且永不过期 —— 见 config/setup/proxy.yaml 里的完整说明。
+--service-account-lookup=true \
 --api-audiences=foo
 "
 

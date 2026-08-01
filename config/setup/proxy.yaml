@@ -55,7 +55,14 @@ spec:
         - --request-timeout=10m
         - --watch-cache=true
         - --proxy-upstream-master=https://kubernetes
-        - --service-account-lookup=false
+        # ⚠️ 上游默认就是 true;kubezoo 曾主动关掉,三处都没写原因。
+        # 它**只管旧式(Secret 型)token** —— bound token(pod 用的投影 token)走的是
+        # 另一个认证器,getter 无条件传入,每次都查 SA 是否还在、UID 是否匹配。
+        # 所以关掉它省不下 pod 热路径的任何开销(那条路的 issuer 不是 LegacyIssuer,
+        # 根本不进 legacy 认证器),省下的只有旧式 token 那一次查询 ——
+        # 代价是删掉 SA 之后,手工建的 kubernetes.io/service-account-token
+        # **永不失效**(那种 token 没有过期时间)。取证吊销场景下这是个真口子。
+        - --service-account-lookup=true
         - --api-audiences=kubezoo
         - --v=4
         ports:

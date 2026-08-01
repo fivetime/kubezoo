@@ -26,6 +26,42 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/request"
 )
 
+// TestPlatformAPIRefusesAPodToo covers the identity a tenant's *workload* carries,
+// which is not the one its human carries.
+//
+// ⚠️ A tenant's pods reach kubezoo too -- the endpoint policy injects
+// KUBERNETES_SERVICE_HOST, and a podspec env overrides kubelet's -- but they
+// authenticate with a projected ServiceAccount token, not the tenant's client
+// certificate. WithTenantInfo derives the tenant from the ServiceAccount's
+// namespace prefix, so the guard does cover them; this test says so out loud,
+// because the case it covers and the case above look nothing alike at the wire.
+func TestPlatformAPIRefusesAPodToo(t *testing.T) {
+	handler := WithPlatformAPIGuard(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// What WithTenantInfo produces for system:serviceaccount:111111-default:builder.
+	ctx := request.WithUser(context.Background(), &user.DefaultInfo{
+		Name:   "system:serviceaccount:111111-default:builder",
+		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:111111-default"},
+		Extra:  map[string][]string{"tenant": {"111111"}},
+	})
+	ctx = request.WithRequestInfo(ctx, &request.RequestInfo{
+		IsResourceRequest: true,
+		APIGroup:          "tenant.kubezoo.io",
+		Resource:          "tenants",
+		Verb:              "list",
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/apis", nil).WithContext(ctx))
+
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("a tenant's pod read the tenant API: status %d, want %d -- every other tenant's "+
+			"kubeconfig, private key included, is in there", recorder.Code, http.StatusForbidden)
+	}
+}
+
 // TestPlatformAPIIsNotATenantsToRead guards the one thing standing between a
 // tenant and every other tenant's credentials.
 //
