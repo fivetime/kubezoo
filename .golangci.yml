@@ -13,6 +13,13 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+    # ⚠️ Separate from staticcheck in golangci-lint v2: enabling staticcheck's
+    # "all" does NOT turn on U1000. Its absence let a fix ship that was written
+    # and never called -- the commit message said both endpoints now refused,
+    # the audit doc listed the leak as closed, and neither was true, because an
+    # unused package-level function compiles and every test stayed green. It
+    # also found a port that kept a destroy method and lost its one caller.
+    - unused
   settings:
     govet:
       disable:
@@ -41,7 +48,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/kubewharf/kubezoo
+        - github.com/fivetime/kubezoo-gateway
 
 issues:
   max-issues-per-linter: 0

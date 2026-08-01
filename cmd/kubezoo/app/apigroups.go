@@ -1,7 +1,6 @@
 package app
 
 import (
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsapiv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
@@ -38,6 +37,8 @@ import (
 	"k8s.io/kubernetes/pkg/apis/node"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/rbac"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 )
 
 var legacyGroup = apiconfig.APIGroupConfig{

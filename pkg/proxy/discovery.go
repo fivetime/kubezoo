@@ -143,6 +143,13 @@ func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupR
 // notATenantsGroup refuses a group that is neither one this build serves nor one
 // of the tenant's own CRD groups.
 //
+// ⚠️⚠️ This helper was added once before and NEVER CALLED. The commit message
+// said both endpoints now refuse, docs/isolation-audit-cn.md listed the leak as
+// fixed, and neither was true of the shipped code: an unused package-level
+// function compiles, so build, vet and every test stayed green while the leak
+// below was wide open. Three independent audit dimensions found it. If you are
+// changing this file, check the call sites, not the helper.
+//
 // ⚠️ These two endpoints used to fall through to upstream with whatever group the
 // client typed, and with kubezoo's own credential rather than the tenant's
 // impersonated identity -- so upstream RBAC did not apply either. The group list
@@ -164,8 +171,13 @@ func (dp *discoveryProxy) ServerVersionsForGroup(tenantID, group string) (*metav
 	}
 	grm := util.NewCustomGroupResourcesMap(crds)
 	customResourceUpstreamGroup := util.AddTenantIDPrefix(tenantID, group)
-	if grm.HasGroup(customResourceUpstreamGroup) {
+	switch {
+	case grm.HasGroup(customResourceUpstreamGroup):
 		group = customResourceUpstreamGroup
+	case dp.servedGroups[group]:
+		// A native group this build installs storage for.
+	default:
+		return nil, notATenantsGroup(group)
 	}
 
 	g := &metav1.APIGroup{}
@@ -184,8 +196,13 @@ func (dp *discoveryProxy) ServerResourcesForGroupVersion(tenantID, group, versio
 	}
 	grm := util.NewCustomGroupResourcesMap(crds)
 	customResourceUpstreamGroup := util.AddTenantIDPrefix(tenantID, group)
-	if grm.HasGroupVersion(customResourceUpstreamGroup, version) {
+	switch {
+	case grm.HasGroupVersion(customResourceUpstreamGroup, version):
 		group = customResourceUpstreamGroup
+	case dp.servedGroups[group]:
+		// A native group this build installs storage for.
+	default:
+		return nil, notATenantsGroup(group)
 	}
 	resourceList, err := dp.discoveryClient.ServerResourcesForGroupVersion(group + "/" + version)
 	if err != nil {

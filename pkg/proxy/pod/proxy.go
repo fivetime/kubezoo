@@ -81,7 +81,12 @@ func (r *ProxyREST) Connect(ctx context.Context, id string, opts runtime.Object,
 		paths := strings.Split(u.Path, "/")
 		for i, p := range paths {
 			if p == Namespace && i+1 < len(paths) {
-				paths[i+1] = util.AddTenantIDPrefix(tenant, paths[i+1])
+				// Idempotent, like the connecter proxy next door -- which
+				// documents the measured failure this one still had: an
+				// in-cluster workload addresses its own namespace by the upstream
+				// name, so prefixing a second time turned services/proxy and
+				// pods/proxy into a NotFound for 111111-111111-default.
+				paths[i+1] = util.UpstreamNamespace(tenant, paths[i+1])
 				//namespaceTransformed = true
 				break
 			}
@@ -111,6 +116,9 @@ func (r *ProxyREST) Connect(ctx context.Context, id string, opts runtime.Object,
 		if req.Header == nil {
 			req.Header = make(map[string][]string)
 		}
+		// Anything the client sent goes first; only what kubezoo sets may reach
+		// upstream. See proxy.DropClientImpersonation.
+		util.DropClientImpersonation(req.Header)
 		req.Header[authenticationv1.ImpersonateUserHeader] = []string{userInfo.GetName()}
 		req.Header[authenticationv1.ImpersonateGroupHeader] = util.ImpersonationGroups(
 			req.Context(), userInfo.GetName(), userInfo.GetGroups())

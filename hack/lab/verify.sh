@@ -441,6 +441,13 @@ rules:
     verbs: ["*"]
 EOF
 # Scoped to RBAC: a tenant may perfectly well have other objects by that name.
+#
+# ⚠️ Not hostPath, which is what this used to use for brevity. The volume source
+# is incidental here -- the assertion is about the NAME -- but a hostPath PV is
+# now refused outright, because binding one through a PVC walks past restricted
+# Pod Security's volume checks and mounts the node's filesystem into a tenant
+# container. NFS names nothing inside the cluster and keeps this measuring what
+# it says it measures.
 expect_allowed "an object of another kind may still be called admin" \
   $T apply -f - <<EOF
 apiVersion: v1
@@ -449,7 +456,7 @@ metadata: {name: admin}
 spec:
   capacity: {storage: 1Gi}
   accessModes: [ReadWriteOnce]
-  hostPath: {path: /tmp/reserved-name-check}
+  nfs: {server: 192.0.2.1, path: /exports/reserved-name-check}
 EOF
 
 # A ClusterRole over shared resources is now writable on purpose -- it is what

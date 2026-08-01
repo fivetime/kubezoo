@@ -17,7 +17,6 @@ limitations under the License.
 package proxy
 
 import (
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +29,8 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	master "k8s.io/kubernetes/pkg/controlplane/apiserver"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 )
 
 type RESTStorageProvider struct {

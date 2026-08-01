@@ -173,8 +173,6 @@ func (r *ClusterResourceQuotaReconciler) syncStatus(ctx context.Context, cluster
 func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx context.Context, clusterquota *quotav1alpha1.ClusterResourceQuota, namespace string, quotas []*corev1.ResourceQuota) (*corev1.ResourceQuota, error) {
 	var matchedquota *corev1.ResourceQuota
 
-	ownerDirty := false
-
 	for i := range quotas {
 		quota := quotas[i]
 		rqKey := client.ObjectKeyFromObject(quota).String()
@@ -188,8 +186,25 @@ func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx cont
 			continue
 		}
 		if owner == nil {
-			// need to add owner
-			ownerDirty = true
+			// ⚠️ Not adopted. A tenant is admin in its own namespaces, so it can
+			// CREATE an ordinary ResourceQuota carrying this label and no
+			// ownerReferences -- and adopting it was an escape: name it so it
+			// sorts first, and the loop below deletes the platform's own quota as
+			// a duplicate, adopts the decoy, and never puts the autoupdate label
+			// on it. The webhook selects on that label, so the tenant's aggregate
+			// quota stops being enforced. It is the rule config/policy/README.md
+			// already states: never select tenant namespaces on a label the
+			// tenant can write.
+			//
+			// The platform always sets the ownerReference at creation, so an
+			// unowned quota was written by somebody else. Treated like a quota
+			// owned by something else: the label goes, and it is left alone.
+			delete(quota.Labels, quotav1alpha1.ClusterResourceQuotaCreatedby)
+			r.Logger.Info("resource quota carries the createdBy label but no ClusterResourceQuota owner; "+
+				"it was not created by kubezoo, so the label is being removed rather than the quota adopted",
+				"resourceQuota", rqKey)
+			r.Client.Update(ctx, quota) //nolint
+			continue
 		}
 		if matchedquota == nil {
 			matchedquota = quota
@@ -221,17 +236,10 @@ func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx cont
 
 	specDirty := !apiequality.Semantic.DeepEqual(clusterquota.Spec.ResourceQuotaSpec, matchedquota.Spec)
 
-	// update owner or spec
-	if ownerDirty || specDirty {
+	if specDirty {
 		r.Logger.Info("sync resource quota in namespace", "resourceQuota", client.ObjectKeyFromObject(matchedquota).String(), "clusterResourceQuota", clusterquota.Name)
 		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, ObjectUpdater(r.Client), matchedquota, func() error {
-			if ownerDirty {
-				owner := metav1.NewControllerRef(clusterquota, quotav1alpha1.SchemeGroupVersion.WithKind(ClusterResourceQuotaKind))
-				matchedquota.OwnerReferences = append(matchedquota.OwnerReferences, *owner)
-			}
-			if specDirty {
-				matchedquota.Spec = clusterquota.Spec.ResourceQuotaSpec
-			}
+			matchedquota.Spec = clusterquota.Spec.ResourceQuotaSpec
 			return nil
 		})
 		if err != nil {

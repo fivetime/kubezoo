@@ -3051,11 +3051,94 @@ manifest 给 CRD 只有 get/list/watch(注释还写着"只读"),namespace 没有
 - **per-group discovery 逐字转发**:`/apis/{group}` 和 `/apis/{group}/{version}` 直接拿客户端输入的组去问上游,
   **而且用的是 kubezoo 自己的证书**(上游 RBAC 也不生效)⇒ 租户 A 问 `/apis/<B的组>/v1`
   拿到租户 B 的完整 `APIResourceList`。`/apis` 列表是过滤过的,这两个直接寻址的端点没有
+
+  ⚠️⚠️ **本条当时并没有修好,而这一节曾把它写成已修复。** 拒绝函数写了却
+  **一个调用点都没接**,是死代码;build/vet/测试全绿,因为 Go 不为未使用的包级函数报错。
+  第七轮由三个维度各自独立发现。真正的修复见 §BC
 - **租户的 ClusterResourceQuota 从不被删除**:拆除调的是 `syncClusterResourceQuota`,
   而它只在 Tenant 已 NotFound 的分支里删 —— 拆除时 finalizer 还在,Tenant 当然还在,
   且函数在 `DeletionTimestamp != nil` 时直接 return。**做了零件事却报告成功**
 - `events.k8s.io/v1` Event **没有 convertor**:引用从不翻译,而 core Event 与它共用同一批存储对象
   ⇒ 一条这样的 event 会让该 namespace 的**整个 core/v1 event 列表**读取失败
+
+## BC. ✅ 第七轮复审:一个假修复、两条七轮没走到的 HIGH
+
+### ⚠️⚠️⚠️ 上一轮的 discovery 修复**从来没接上** —— 是死代码
+
+```
+$ git show ef21ea3 -- pkg/proxy/discovery.go     →  +18/−0,只加了两个 import 和一个函数
+$ grep -rn notATenantsGroup                       →  两处命中,全在定义里
+```
+
+`notATenantsGroup` 写了,**一个调用点都没改**。而 commit message 写的是
+「Both endpoints now refuse a group that is neither served by this build nor one of the tenant's own」,
+上一节 §BB 把它列进了**已修复** —— **两句话对着 shipped 的代码都是假的**。
+Go 不会为未使用的包级函数报错,所以 build、vet、全部测试一路绿。**三个互不相干的审计维度各自独立发现了它。**
+
+这比"修好实例却断言修好类"更糟:那至少代码是活的。教训是 **commit message 和文档不是证据,只有会红的测试是**。
+现已接上两个调用点,并加 `TestPerGroupDiscoveryRefusesAnotherTenantsGroup`(经 mutation 验证会红)。
+
+### ⭐ PV 的整个 spec 从不转换(HIGH,跨租户)
+
+`pkg/convert/pv.go` 只动 `spec.claimRef.Namespace` 一个字段,而 `ClusterScopedRules` 授予租户 PV 全量 CRUD,
+理由白纸黑字:「Prefixed by the convertor, so tenants cannot collide or reach each other's」——
+**对名字成立,对 spec 完全不成立**。验证者把它**往更严重的方向纠正**:
+
+| 变体 | 需要什么 |
+|---|---|
+| `hostPath: {path: /}` 绑自己的 PVC 再挂进 pod | **什么都不需要**。restricted PSA 在 `volume.PersistentVolumeClaim != nil` 时 `continue` 跳过卷源检查 ⇒ **节点根目录(含其他租户的 pod 卷和 kubelet 凭据)进租户容器** |
+| CSI `nodePublishSecretRef.namespace` 指向别的租户 | 装了 CSI 驱动。kubelet **用自己的凭据**去取,上游 RBAC 不在这条路径上 |
+
+修法是 **spec 的白名单**而不是再补几个 namespace 改写 —— 光 `CSIPersistentVolumeSource` 就有五个
+`*SecretReference`,加上 CephFS/RBD/ISCSI/ScaleIO/StorageOS/Flex/AzureFile,漏一个就是静默跨租户。
+k8s 自己也把"带 namespace 的 secret 引用"当管理员构造:`csi_mounter.go` 在 inline 路径上强制 `ns := c.pod.Namespace`。
+
+### ⭐ 集群级 list 把上游的 continue token 原样透传(HIGH,跨租户)
+
+集群级 list **先取后滤**,而 `FilterUnstructuredList` 用 `Object: utdList.Object` 逐字保留 —— `continue`
+和 `remainingItemCount` 就住在那张 map 里。上游的 token **不是不透明的**:
+
+```
+GET /api/v1/persistentvolumes?limit=1
+→ items=0, remainingItemCount=918
+→ continue 解出 {"v":"meta.k8s.io/v1","rv":4242,"start":"222222-payroll-db\x00"}
+```
+
+client-go **自动跟着 token 翻页** ⇒ 一次一个对象走遍全集群,拿到所有租户的集群级对象名、活跃租户 ID、CRD 组名。
+
+⚠️ **不能简单地把 `Continue` 置空** —— 这条路径滤在取之后,一页合法地返回空却仍有后续,置空会**静默截断**,比泄漏更糟。
+改成用 kubezoo 自己的游标**包住**上游 token(`clusterscopedcursor.go`),并丢掉 `remainingItemCount`(它是全集群量级)。
+`design-list-fanout-cn.md` §3.1③ 早写明"自己的 token 必须与上游区分开",只是从没应用到**响应侧**。
+
+### ⭐ 任何租户能永久打死 quota webhook(HIGH,全租户拒服务)
+
+`webhook.go` 拿 `GetControllerOf(quota)` 后**没有 nil 检查**(同仓库另一处有)。
+租户在自己 namespace 建一个带 autoupdate 标签、无 ownerReferences 的普通 ResourceQuota 即可。
+
+⚠️ panic **不在 webhook handler 里**,controller-runtime 的 recover 够不着 —— 它在上游 evaluator 的
+**worker goroutine** 里,被 `HandleCrashWithContext` 包着而那个**默认 re-panic** ⇒ 进程死;
+单副本 + `failurePolicy: Fail` ⇒ **所有租户**的 pod 创建全被拒;攻击租户自己的 ReplicaSet 控制器会把每次重启再打死一次。
+
+同族的还有**配额认领**:`ensureResourceQuotaInNamespace` 会**认领无 owner 的配额**,
+于是租户 CREATE 一个只带 `createdby` 标签、名字排在前面的诱饵 ⇒ 平台自己的配额被当重复项删掉、诱饵被认领、
+而诱饵永远没有 autoupdate 标签 ⇒ webhook 选不中它,**聚合配额停止生效**。
+这正是 `config/policy/README.md` 已写明的规则:**禁止用租户能写的标签选租户的东西**。改成不认领无 owner 的配额。
+
+### 其余
+
+- **`AddTenantIDToUserInfo` 往 token cache 共享的 Extra map 里写** ⇒ 同一 pod 的两个并发请求
+  `fatal error: concurrent map writes`,**运行时 throw,`WithPanicRecovery` 抓不住**,整个网关死。
+  **本代码库同一形状的第三次**(前两次是 `recordProgress`、`genCertAndKubeconfig`):**改了别人拥有的对象**
+- `genCertAndKubeconfig` 改的是 **informer 缓存对象** ⇒ 一次 Update 失败后,重试从缓存看到注解已在、
+  走"已生成"早返回并**报告成功**。租户建好了却永远拿不到凭据,唯一痕迹是一条 Warning
+- `generateName` 只在上行加前缀、**下行不 trim** ⇒ 每次 patch/annotate/label/edit 都**累积 7 字节**(实测 40 次涨到 291 字符)
+- 引用型 namespace 用**非幂等**的 `AddTenantIDPrefix`:in-cluster 客户端从 SA token 文件读到的是**上游拼写**,
+  于是 SSAR 变成 `<tid>-<tid>-default` ⇒ **200 OK 且 allowed:false**,operator 以为自己没权限而关掉功能
+- 拆除的 finalizer 清扫遇 Forbidden 直接中止 ⇒ 上一轮把 403 从第一步挪到了第五步而已
+- exec/logs/proxy 把客户端的 `Impersonate-Uid` 和 `Impersonate-Extra-*` **原样转发**给上游(kubezoo 用的是
+  cluster-admin 证书,上游会认)⇒ 租户可以**写平台的审计记录**
+- 带 `generateName` 的 ClusterRoleBinding 用的是**创建前**的名字去投影 ⇒ 内联副本一个都没写
+- `pods/services + proxy` 仍用非幂等前缀(它的孪生 `connecterproxy.go` 早就改了并写明了实测失败)
 
 ## 尚未覆盖
 

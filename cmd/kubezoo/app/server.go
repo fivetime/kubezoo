@@ -23,16 +23,18 @@ import (
 	"context"
 	stdx509 "crypto/x509"
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
-	"k8s.io/apimachinery/pkg/util/managedfields"
-	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
-	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/managedfields"
+	openapibuilder3 "k8s.io/kube-openapi/pkg/builder3"
+	openapiutil "k8s.io/kube-openapi/pkg/util"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"github.com/spf13/cobra"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -88,7 +90,6 @@ import (
 	"k8s.io/kubernetes/pkg/serviceaccount"
 
 	ownedopenapi "github.com/fivetime/kubezoo-contract/pkg/apis/generated/openapi"
-	proxiedopenapi "github.com/fivetime/kubezoo-gateway/pkg/apis/openapi"
 	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
 	_ "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/install"
 	"github.com/fivetime/kubezoo-contract/pkg/common"
@@ -98,7 +99,9 @@ import (
 	"github.com/fivetime/kubezoo-contract/pkg/generated/informers/externalversions"
 	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
+
 	"github.com/fivetime/kubezoo-gateway/cmd/kubezoo/app/options"
+	proxiedopenapi "github.com/fivetime/kubezoo-gateway/pkg/apis/openapi"
 	"github.com/fivetime/kubezoo-gateway/pkg/convert"
 	tenantfilters "github.com/fivetime/kubezoo-gateway/pkg/filters"
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy"

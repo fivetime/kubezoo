@@ -74,7 +74,7 @@ func (t *AccessReviewTransformer) Forward(obj runtime.Object, tenantID string) (
 		return review, nil
 	case *authzinternal.SelfSubjectRulesReview:
 		if len(review.Spec.Namespace) > 0 {
-			review.Spec.Namespace = util.AddTenantIDPrefix(tenantID, review.Spec.Namespace)
+			review.Spec.Namespace = util.UpstreamNamespace(tenantID, review.Spec.Namespace)
 		}
 		return review, nil
 	default:
@@ -122,7 +122,18 @@ func forwardResourceAttributes(attributes *authzinternal.ResourceAttributes, ten
 		return
 	}
 	if len(attributes.Namespace) > 0 {
-		attributes.Namespace = util.AddTenantIDPrefix(tenantID, attributes.Namespace)
+		// ⚠️ Idempotent, and it has to be. An in-cluster client reads its own
+		// namespace from the projected serviceaccount/namespace file, which
+		// carries the UPSTREAM spelling -- so a SelfSubjectAccessReview from an
+		// operator asking about its own namespace arrived already prefixed, and
+		// the unconditional concatenation made it <tid>-<tid>-default. Upstream
+		// RBAC is genuinely per-namespace now, so that answers allowed:false with
+		// 200 OK and no error: the operator concludes it lacks a permission it
+		// actually has and switches the feature off. This transformer's own doc
+		// comment says it exists because "can-i create pods" answered no while
+		// the create succeeded; that was fixed for the tenant's spelling and left
+		// broken for the upstream one.
+		attributes.Namespace = util.UpstreamNamespace(tenantID, attributes.Namespace)
 	}
 	if len(attributes.Group) > 0 && !util.IsNativeAPIGroup(attributes.Group) {
 		attributes.Group = util.AddTenantIDPrefix(tenantID, attributes.Group)
@@ -171,7 +182,7 @@ func backwardSubject(spec *authzinternal.SubjectAccessReviewSpec, tenantID strin
 
 func forwardUsername(username, tenantID string) (string, error) {
 	if namespace, name, err := sa.SplitUsername(username); err == nil {
-		return sa.MakeUsername(util.AddTenantIDPrefix(tenantID, namespace), name), nil
+		return sa.MakeUsername(util.UpstreamNamespace(tenantID, namespace), name), nil
 	}
 	if strings.HasPrefix(username, "system:") {
 		return "", errors.Errorf("user %q belongs to the cluster itself, not to tenant %s; "+
@@ -197,7 +208,7 @@ func forwardGroup(group, tenantID string) (string, error) {
 		return group, nil
 	}
 	if namespace, ok := serviceAccountsGroupNamespace(group); ok {
-		return sa.MakeNamespaceGroupName(util.AddTenantIDPrefix(tenantID, namespace)), nil
+		return sa.MakeNamespaceGroupName(util.UpstreamNamespace(tenantID, namespace)), nil
 	}
 	if strings.HasPrefix(group, "system:") {
 		return "", errors.Errorf("group %q belongs to the cluster itself, not to tenant %s; "+

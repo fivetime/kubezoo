@@ -20,9 +20,10 @@ limitations under the License.
 package app
 
 import (
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"net/http"
 	"time"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
@@ -249,6 +250,14 @@ func createKubeAPIExtensionsServer(apiextensionsConfig *apiextensionsapiserver.C
 	if err != nil {
 		return nil, err
 	}
+	// ⚠️ Registered, as upstream does at apiserver.go's RegisterDestroyFunc. The
+	// fork carried the destroy method across and dropped its one call site, so
+	// nothing released the per-CRD storages on shutdown. Harmless as things
+	// stand -- kubezoo's custom-resource storage is a proxy whose Destroy is a
+	// no-op -- but a storage that ever does hold something would have leaked it
+	// silently, and this is the third place in this codebase where a port kept
+	// the function and lost the caller.
+	s.GenericAPIServer.RegisterDestroyFunc(crdHandler.destroy)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", crdHandler)
 	s.GenericAPIServer.Handler.NonGoRestfulMux.HandlePrefix("/apis/", crdHandler)
 

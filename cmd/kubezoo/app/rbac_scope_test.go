@@ -17,9 +17,10 @@ limitations under the License.
 package app
 
 import (
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"sort"
 	"testing"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 )

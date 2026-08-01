@@ -124,6 +124,9 @@ func (cp *ConnecterProxy) connect(req *http.Request, w http.ResponseWriter) {
 	if req.Header == nil {
 		req.Header = make(map[string][]string)
 	}
+	// Anything the client sent goes first; only what kubezoo sets may reach
+	// upstream. See util.DropClientImpersonation.
+	util.DropClientImpersonation(req.Header)
 	req.Header[authenticationv1.ImpersonateUserHeader] = []string{userInfo.GetName()}
 	req.Header[authenticationv1.ImpersonateGroupHeader] = util.ImpersonationGroups(
 		req.Context(), userInfo.GetName(), userInfo.GetGroups())

@@ -20,12 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"strings"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy/pod"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -194,11 +194,6 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		return proxy, nil
 	}
 	return &tenantProxyWithLister{*proxy}, nil
-}
-
-// isCustomResourceDefinition checks whether the kind is a CRD or not.
-func isCustomResourceDefinition(kind schema.GroupVersionKind) bool {
-	return kind.GroupKind() == apiextensionsv1.Kind("CustomResourceDefinition")
 }
 
 func (tp *tenantProxy) GroupVersionKind(containingGV schema.GroupVersion) schema.GroupVersionKind {
@@ -721,11 +716,26 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 		if err != nil {
 			return nil, err
 		}
+		// A cluster-scoped list filters after fetching, so it reads over the
+		// whole cluster's range and upstream's cursor names somebody else's
+		// object. See clusterscopedcursor.go.
+		if !tp.namespaceScoped && proxyOptions.Continue != "" {
+			upstreamToken, err := decodeClusterScopedContinue(proxyOptions.Continue)
+			if err != nil {
+				return nil, err
+			}
+			proxyOptions.Continue = upstreamToken
+		}
 		utdList, err = client.List(ctx, *proxyOptions)
 		if err != nil {
 			return nil, util.TrimTenantIDFromError(err, tenantID)
 		}
 		utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
+		if !tp.namespaceScoped {
+			if err := hideUpstreamListCursor(utdList); err != nil {
+				return nil, err
+			}
+		}
 	}
 	utdList = tp.hideProjections(utdList)
 
@@ -927,6 +937,12 @@ func (tp *tenantProxy) DeleteCollection(ctx context.Context, _ rest.ValidateObje
 		return nil, util.TrimTenantIDFromError(err, tenantID)
 	}
 	utdList = util.FilterUnstructuredList(utdList, tenantID, tp.namespaceScoped)
+	if !tp.namespaceScoped {
+		// Same leak as the list path: the response carries upstream's cursor.
+		if err := hideUpstreamListCursor(utdList); err != nil {
+			return nil, err
+		}
+	}
 	// ⚠️ The one verb that operates on a whole collection was also the one verb
 	// with no guard on the names kubezoo hides. Get returns NotFound for them and
 	// List drops them, so a tenant is told the projection records do not exist --

@@ -28,18 +28,6 @@ import (
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
-type emptyWatch struct {
-	resultChan chan watch.Event
-}
-
-// Stop implements Interface
-func (ew *emptyWatch) Stop() {}
-
-// ResultChan implements Interface
-func (ew *emptyWatch) ResultChan() <-chan watch.Event {
-	return ew.resultChan
-}
-
 // proxyWatch implements the proxy for watch method, including
 // the converting between tenant object and upstream object.
 type proxyWatch struct {

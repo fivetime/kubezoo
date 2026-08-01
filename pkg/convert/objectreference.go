@@ -59,7 +59,7 @@ func (t *objectReferenceTransformer) Forward(or *internal.ObjectReference, tenan
 		// APIVersion and Kind of objectReference may be empty, in such cases we can't tell whether it is namespaced,
 		// so just add tenantID prefix if namespace or name is not empty.
 		if len(or.Namespace) != 0 {
-			or.Namespace = util.AddTenantIDPrefix(tenantID, or.Namespace)
+			or.Namespace = util.UpstreamNamespace(tenantID, or.Namespace)
 		} else if len(or.Name) != 0 {
 			or.Name = util.AddTenantIDPrefix(tenantID, or.Name)
 		}
@@ -69,7 +69,7 @@ func (t *objectReferenceTransformer) Forward(or *internal.ObjectReference, tenan
 		or.Name = util.AddTenantIDPrefix(tenantID, or.Name)
 	}
 	if namespaced && len(or.Namespace) != 0 {
-		or.Namespace = util.AddTenantIDPrefix(tenantID, or.Namespace)
+		or.Namespace = util.UpstreamNamespace(tenantID, or.Namespace)
 	}
 	if customResourceGroup && len(or.APIVersion) != 0 {
 		or.APIVersion = util.AddTenantIDPrefix(tenantID, or.APIVersion)

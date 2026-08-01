@@ -29,8 +29,8 @@ import (
 	"k8s.io/apiserver/pkg/storage"
 	"k8s.io/apiserver/pkg/storage/names"
 
-	"github.com/fivetime/kubezoo-contract/pkg/util"
 	tenantv1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/tenant/v1alpha1"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // NewStrategy creates and returns a tenantStrategy instance

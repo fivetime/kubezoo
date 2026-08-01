@@ -18,10 +18,10 @@ package app
 
 import (
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"reflect"
 	"testing"
 
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 )
 
 // subresourcesWithTheirOwnBody lists the subresources whose request body is not

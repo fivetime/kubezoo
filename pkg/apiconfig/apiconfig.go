@@ -17,10 +17,11 @@ limitations under the License.
 package apiconfig
 
 import (
-	"github.com/fivetime/kubezoo-contract/pkg/common"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 	"net/http"
 	"net/url"
+
+	"github.com/fivetime/kubezoo-contract/pkg/common"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"

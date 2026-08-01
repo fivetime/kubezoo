@@ -17,9 +17,10 @@ limitations under the License.
 package app
 
 import (
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"sort"
 	"testing"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	master "k8s.io/kubernetes/pkg/controlplane"

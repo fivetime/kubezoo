@@ -18,15 +18,15 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
@@ -86,6 +86,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
+
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy"
 )
 
@@ -202,13 +203,18 @@ func NewCustomResourceDefinitionHandler(
 		maxRequestBodyBytes: maxRequestBodyBytes,
 		upstreamConfig:      upstreamConfig,
 	}
-	crdInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	// Checked, because a registration that fails leaves this handler serving
+	// stale storage for every CRD the tenant creates afterwards, and silently:
+	// AddEventHandler returns an error when the informer has already stopped.
+	if _, err := crdInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    ret.createCustomResourceDefinition,
 		UpdateFunc: ret.updateCustomResourceDefinition,
 		DeleteFunc: func(obj interface{}) {
 			ret.removeDeadStorage()
 		},
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("watching custom resource definitions: %w", err)
+	}
 	crConverterFactory, err := conversion.NewCRConverterFactory(serviceResolver, authResolverWrapper)
 	if err != nil {
 		return nil, err
@@ -1544,39 +1550,6 @@ func buildOpenAPIModelsForApply(staticOpenAPISpec map[string]*spec.Schema, crd *
 		return nil, err
 	}
 	return mergedOpenAPI.Components.Schemas, nil
-}
-
-// forbidCreateAdmission is an admission.Interface wrapper that prevents a
-// CustomResource from being created while its CRD is terminating.
-type forbidCreateAdmission struct {
-	delegate admission.Interface
-}
-
-func (f *forbidCreateAdmission) Handles(operation admission.Operation) bool {
-	if operation == admission.Create {
-		return true
-	}
-	return f.delegate.Handles(operation)
-}
-
-func (f *forbidCreateAdmission) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
-	if a.GetOperation() == admission.Create {
-		return apierrors.NewForbidden(a.GetResource().GroupResource(), a.GetName(), errors.New("create not allowed while custom resource definition is terminating"))
-	}
-	if delegate, ok := f.delegate.(admission.MutationInterface); ok {
-		return delegate.Admit(ctx, a, o)
-	}
-	return nil
-}
-
-func (f *forbidCreateAdmission) Validate(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
-	if a.GetOperation() == admission.Create {
-		return apierrors.NewForbidden(a.GetResource().GroupResource(), a.GetName(), errors.New("create not allowed while custom resource definition is terminating"))
-	}
-	if delegate, ok := f.delegate.(admission.ValidationInterface); ok {
-		return delegate.Validate(ctx, a, o)
-	}
-	return nil
 }
 
 // getScaleColumnsForVersion returns 2 columns for the desired and actual number of replicas.

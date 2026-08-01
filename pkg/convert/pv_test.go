@@ -150,3 +150,85 @@ func TestPVTranformerBackward(t *testing.T) {
 		})
 	}
 }
+
+// TestPVSourceAllowlist guards the widest cross-tenant hole found in seven
+// rounds.
+//
+// ⚠️ Only spec.claimRef.namespace was rewritten; the rest of the spec was never
+// looked at, while tenants hold full CRUD on persistentvolumes because the name
+// is prefixed. Two escapes, both without any driver installed:
+//   - hostPath: / bound by the tenant's own PVC and mounted in a pod. Restricted
+//     Pod Security skips the volume-source check when the volume is a PVC, so
+//     the node's root filesystem -- other tenants' pod volumes, the kubelet's
+//     credentials -- mounts into a tenant container.
+//   - a CSI secret ref naming another tenant's namespace, which the kubelet
+//     resolves with its OWN credentials, so upstream RBAC never applies.
+func TestPVSourceAllowlist(t *testing.T) {
+	transformer := NewPVTransformer()
+
+	refused := map[string]internal.PersistentVolumeSource{
+		"hostPath reaches the node": {
+			HostPath: &internal.HostPathVolumeSource{Path: "/"},
+		},
+		"a CSI secret ref names a namespace": {
+			CSI: &internal.CSIPersistentVolumeSource{
+				Driver: "d", VolumeHandle: "h",
+				NodePublishSecretRef: &internal.SecretReference{Name: "creds", Namespace: "222222-default"},
+			},
+		},
+		"a local volume is a node path too": {
+			Local: &internal.LocalVolumeSource{Path: "/"},
+		},
+		"an ISCSI secret ref names a namespace, unlike the inline form": {
+			ISCSI: &internal.ISCSIPersistentVolumeSource{
+				TargetPortal: "p", IQN: "q", Lun: 0,
+				SecretRef: &internal.SecretReference{Name: "chap", Namespace: "222222-default"},
+			},
+		},
+		"a CSI secret ref in its own namespace is still refused": {
+			CSI: &internal.CSIPersistentVolumeSource{
+				Driver: "d", VolumeHandle: "h",
+				NodeStageSecretRef: &internal.SecretReference{Name: "creds", Namespace: "111111-default"},
+			},
+		},
+	}
+	for what, source := range refused {
+		t.Run("refused: "+what, func(t *testing.T) {
+			pv := &internal.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "vol"},
+				Spec:       internal.PersistentVolumeSpec{PersistentVolumeSource: source},
+			}
+			if _, err := transformer.Forward(pv, "111111"); err == nil {
+				t.Error("accepted a volume source that reaches outside the tenant")
+			}
+		})
+	}
+
+	allowed := map[string]internal.PersistentVolumeSource{
+		"a plain CSI volume": {
+			CSI: &internal.CSIPersistentVolumeSource{Driver: "d", VolumeHandle: "h"},
+		},
+		"NFS": {NFS: &internal.NFSVolumeSource{Server: "s", Path: "/x"}},
+		"ISCSI without a secret ref": {
+			ISCSI: &internal.ISCSIPersistentVolumeSource{TargetPortal: "p", IQN: "q", Lun: 0},
+		},
+	}
+	for what, source := range allowed {
+		t.Run("allowed: "+what, func(t *testing.T) {
+			pv := &internal.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "vol"},
+				Spec: internal.PersistentVolumeSpec{
+					PersistentVolumeSource: source,
+					ClaimRef:               &internal.ObjectReference{Namespace: "default", Name: "c"},
+				},
+			}
+			out, err := transformer.Forward(pv, "111111")
+			if err != nil {
+				t.Fatalf("refused a volume source a tenant may safely write: %v", err)
+			}
+			if got := out.(*internal.PersistentVolume).Spec.ClaimRef.Namespace; got != "111111-default" {
+				t.Errorf("claimRef namespace = %q, want 111111-default", got)
+			}
+		})
+	}
+}

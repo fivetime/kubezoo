@@ -20,13 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/fivetime/kubezoo-contract/pkg/util"
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
+
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
+	"github.com/fivetime/kubezoo-contract/pkg/util"
 
 	"github.com/stretchr/testify/assert"
 

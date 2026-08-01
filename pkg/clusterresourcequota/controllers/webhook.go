@@ -167,7 +167,19 @@ func (a *quotaAccessor) GetQuotas(namespace string) ([]corev1.ResourceQuota, err
 	for i := range quotaList.Items {
 		quota := &quotaList.Items[i]
 		owner := metav1.GetControllerOf(quota)
-		if owner.Kind != ClusterResourceQuotaKind {
+		// ⚠️ The nil check is not defensive tidiness -- it is what stops any
+		// tenant from taking the whole gateway down. A tenant is admin in its own
+		// namespaces, so it can create an ordinary ResourceQuota carrying the
+		// autoupdate label and no ownerReferences; this selector finds it and
+		// GetControllerOf returns nil. The panic does not surface in the webhook
+		// handler either: the upstream quota evaluator calls GetQuotas from a
+		// worker goroutine wrapped in runtime.HandleCrashWithContext, which
+		// RE-PANICS by default, so the process dies. One replica plus
+		// failurePolicy: Fail means every tenant's pod creation is refused while
+		// it is down, and the attacking tenant's own retrying ReplicaSet
+		// controller kills each restart. The sibling loop in
+		// clusterresourcequota_controller.go has had this check all along.
+		if owner == nil || owner.Kind != ClusterResourceQuotaKind {
 			continue
 		}
 		var clusterquota quotav1alpha1.ClusterResourceQuota

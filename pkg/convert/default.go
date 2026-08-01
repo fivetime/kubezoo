@@ -98,6 +98,16 @@ func (c *DefaultConvertor) ConvertUpstreamObjectToTenantObject(obj runtime.Objec
 		name := accessor.GetName()
 		trimmed := util.TrimTenantIDPrefix(tenantID, name)
 		accessor.SetName(trimmed)
+		// ⚠️ generateName is trimmed too, or the prefix accumulates. Forward adds
+		// it; nothing used to take it off, so the tenant was handed back
+		// generateName="111111-vol-" and every later write re-prefixed whatever it
+		// sent. That is not only read-modify-write: a patch goes through
+		// guaranteedUpdate, which re-fetches the tenant view -- already prefixed
+		// -- applies the patch and forwards it, so kubectl annotate, label, edit
+		// or a Helm upgrade each add seven bytes. Measured against a real 1.36
+		// apiserver: forty updates grew it to 291 characters, all accepted,
+		// because ValidateObjectMetaAccessorUpdate never looks at generateName.
+		accessor.SetGenerateName(util.TrimTenantIDPrefix(tenantID, accessor.GetGenerateName()))
 	}
 	ownerReferences := accessor.GetOwnerReferences()
 	for i := range ownerReferences {

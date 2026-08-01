@@ -57,8 +57,22 @@ func (t *EventsV1Transformer) Forward(obj runtime.Object, tenantID string) (runt
 }
 
 // Backward transforms upstream object references to tenant object references.
+//
+// ⚠️ Tolerant on the way back, deliberately. The reference transformer errors on
+// a namespace that carries no tenant prefix, and a list returns on the first item
+// that fails -- so one such event would make `kubectl get events` fail wholesale
+// for the namespace and terminate every watch on it, with the object impossible
+// to delete because it could not be listed. That is the same "one object poisons
+// the whole list" shape already fixed for RoleBinding subjects and roleRefs. An
+// event written before this convertor existed, or by anything that reached
+// upstream another way, is exactly such an object. Reading it back as it stands
+// shows the tenant what is really there; refusing hides everything else too.
 func (t *EventsV1Transformer) Backward(obj runtime.Object, tenantID string) (runtime.Object, error) {
-	return t.rewrite(obj, tenantID, t.objectRefTransformer.Backward)
+	out, err := t.rewrite(obj, tenantID, t.objectRefTransformer.Backward)
+	if err != nil {
+		return obj, nil
+	}
+	return out, nil
 }
 
 type refRewriter func(*internal.ObjectReference, string) (*internal.ObjectReference, error)

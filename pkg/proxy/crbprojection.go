@@ -19,9 +19,10 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"strings"
 	"sync"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -267,7 +268,16 @@ func (p *clusterRoleBindingProjection) Create(ctx context.Context, obj runtime.O
 	if err != nil {
 		return nil, asClusterRoleBindingError(err, obj.(*rbac.ClusterRoleBinding).Name)
 	}
-	p.project(ctx, record.(*rbac.RoleBinding).Name)
+	// ⚠️ The name upstream resolved, not the one we sent. A ClusterRoleBinding
+	// written with generateName reaches here with an empty Name -- only
+	// GenerateName is set -- so projecting the pre-create record asked to read
+	// back an object called "" and the dynamic client refused before issuing a
+	// request. The record itself existed and granted in the tenant's kube-system,
+	// but the copies in its other namespaces were never written inline; only the
+	// controller's watch put them there.
+	if createdBinding, ok := created.(*rbac.RoleBinding); ok {
+		p.project(ctx, createdBinding.Name)
+	}
 	return asClusterRoleBinding(created)
 }
 
