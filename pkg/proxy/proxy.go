@@ -108,6 +108,10 @@ type tenantProxy struct {
 	// and which it has retired, so that a create can be refused before it
 	// provisions anything. Nil on every resource but persistentvolumeclaims.
 	publishedStorageClasses publishedclass.Set
+	// publishedVolumeAttributesClasses is the same for
+	// spec.volumeAttributesClassName -- a field the tenant may CHANGE on a bound
+	// claim, so its check is not create-only.
+	publishedVolumeAttributesClasses publishedclass.Set
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -201,10 +205,11 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		typeConverter: config.TypeConverter,
 		dynamicClient: config.DynamicClient,
 
-		publishedStorageClasses: config.PublishedStorageClasses,
-		convertor:               config.Convertor,
-		groupVersionKindFunc:    config.GroupVersionKindFunc,
-		tableConvertor:          tc,
+		publishedStorageClasses:          config.PublishedStorageClasses,
+		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
+		convertor:                        config.Convertor,
+		groupVersionKindFunc:             config.GroupVersionKindFunc,
+		tableConvertor:                   tc,
 	}
 	if config.NewListFunc == nil {
 		return proxy, nil
@@ -429,6 +434,12 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err != nil {
 		return nil, false, err
 	}
+	// Checked here rather than in update(), which is the one place on this path
+	// that has the stored claim to compare against -- the whole rule is "only
+	// when the value changes".
+	if err := tp.refuseUnpublishedVolumeAttributesClass(obj, original); err != nil {
+		return nil, false, err
+	}
 	return tp.update(ctx, obj, options)
 }
 
@@ -584,6 +595,10 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// the path `kubectl apply --server-side` takes for an object that does not
 	// exist yet, and it is the common way PVCs get created.
 	if err := tp.refuseUnpublishedStorageClass(obj); err != nil {
+		return nil, err
+	}
+	// nil: there is no stored claim, so any class named here is newly named.
+	if err := tp.refuseUnpublishedVolumeAttributesClass(obj, nil); err != nil {
 		return nil, err
 	}
 
@@ -992,6 +1007,83 @@ func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 	return nil
 }
 
+// refuseUnpublishedVolumeAttributesClass refuses a claim that names a
+// VolumeAttributesClass the platform is not offering.
+//
+// A VolumeAttributesClass carries the CSI driver's IOPS and throughput
+// parameters, so naming one asks for a performance tier -- something a platform
+// sells rather than something a tenant picks. Nothing validated this field
+// before; it reached upstream untranslated, exactly as spec.storageClassName did
+// before that was closed. The gate is GA and LockToDefault in 1.36, so it is live
+// and cannot be switched off.
+//
+// ⚠️ NOT create-only, and copying the storage class rule here would be wrong.
+// spec.volumeAttributesClassName is MUTABLE after the claim is bound -- the API
+// says so in as many words and ValidatePersistentVolumeClaimUpdate excludes it
+// from the immutability comparison for a Bound claim -- so a tenant can raise its
+// own performance tier on an existing claim, and a create-only check would miss
+// every such change.
+//
+// ⚠️ But only when the value CHANGES. old is the stored claim, nil on a create.
+// Refusing on every update instead would fail each later write to a claim that
+// already names the class -- a GitOps controller reapplying an unchanged manifest
+// among them -- which is the reconcile loop the storage class rule exists to
+// avoid. Withdrawing a class therefore leaves the claims already on it alone,
+// same as there.
+func (tp *tenantProxy) refuseUnpublishedVolumeAttributesClass(obj, old runtime.Object) error {
+	if tp.publishedVolumeAttributesClasses == nil {
+		return nil
+	}
+	pvc, ok := obj.(*core.PersistentVolumeClaim)
+	if !ok {
+		return nil
+	}
+	name := derefClass(pvc.Spec.VolumeAttributesClassName)
+	// Empty means no class is applied, which is the default and always allowed.
+	// Unlike storageClassName nothing fills this in upstream, so empty really is
+	// "none" rather than "the default one".
+	if name == "" {
+		return nil
+	}
+	if oldPVC, ok := old.(*core.PersistentVolumeClaim); ok &&
+		derefClass(oldPVC.Spec.VolumeAttributesClassName) == name {
+		// Unchanged. Whatever the platform has done with the class since, this
+		// write is not what put the tenant on it.
+		return nil
+	}
+	// Same reasoning as the storage class check: an empty cache is
+	// indistinguishable from "the platform published nothing", so answer
+	// Unavailable and let the client retry rather than refuse or wave it through.
+	if !tp.publishedVolumeAttributesClasses.HasSynced() {
+		return apierrors.NewServiceUnavailable(
+			"the list of available volume attributes classes is still loading; retry shortly")
+	}
+	invalid := func(detail string) error {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}, pvc.Name,
+			field.ErrorList{field.Invalid(
+				field.NewPath("spec", "volumeAttributesClassName"), name, detail)})
+	}
+	if !tp.publishedVolumeAttributesClasses.Visible(name) {
+		return invalid(fmt.Sprintf("no volume attributes class %q is available to you; "+
+			"the ones that are can be listed with `kubectl get volumeattributesclass`, "+
+			"and leaving this field unset applies none.", name))
+	}
+	if tp.publishedVolumeAttributesClasses.Retired(name) {
+		return invalid(fmt.Sprintf("volume attributes class %q is being retired and is not "+
+			"accepting new claims; claims already using it keep working -- this refuses "+
+			"only new references to it.", name))
+	}
+	return nil
+}
+
+func derefClass(name *string) string {
+	if name == nil {
+		return ""
+	}
+	return *name
+}
+
 func (tp *tenantProxy) refuseReservedName(tenantID, upstreamName string) error {
 	if tp.namespaceScoped || tp.kind.Group != "rbac.authorization.k8s.io" {
 		return nil
@@ -1311,6 +1403,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return created, true, nil
 		}
 
+		if err := tp.refuseUnpublishedVolumeAttributesClass(updated, original); err != nil {
+			return nil, false, err
+		}
 		got, created, err := tp.update(ctx, updated, options)
 		if errors.IsConflict(err) && strings.Contains(err.Error(), genericregistry.OptimisticLockErrorMsg) {
 			// retry update on optimistic lock conflict

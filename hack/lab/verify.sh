@@ -1779,6 +1779,111 @@ else
   bad "unpublishing leaves an existing PVC alone" "the PVC's storageClassName is now '${still:-<gone>}'"
 fi
 
+echo
+echo "== a volume attributes class is a tier the platform sells, not one a tenant takes =="
+# ⭐ spec.volumeAttributesClassName reached upstream untranslated and unvalidated,
+# exactly as spec.storageClassName did. A VolumeAttributesClass carries the CSI
+# driver's IOPS and throughput parameters, so naming one is asking for a
+# performance tier. The gate is GA and LockToDefault in 1.36 -- live, and it
+# cannot be switched off.
+#
+# ⚠️ Nothing is published by default here, unlike storage classes. With no class
+# labelled no tenant can set the field at all, which is the useful default for
+# something a platform sells.
+$K apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata: {name: vac-gold}
+driverName: lab.example.com
+parameters: {iops: "9000"}
+---
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata: {name: vac-platform-only}
+driverName: lab.example.com
+parameters: {iops: "99000"}
+EOF
+$K label volumeattributesclass vac-gold volumeattributesclass.kubezoo.io/published=true --overwrite >/dev/null 2>&1
+for _ in $(seq 20); do
+  [ "$($T get volumeattributesclass --no-headers 2>/dev/null | wc -l)" != 0 ] && break
+  sleep 1
+done
+
+vacseen=$($T get volumeattributesclass --no-headers 2>&1 | awk '{print $1}' | sort | tr '\n' ' ')
+if [ "$(echo $vacseen)" = "vac-gold" ]; then
+  ok "a tenant sees only the volume attributes classes the platform published"
+else
+  bad "a tenant sees only the published volume attributes classes" \
+      "got '$vacseen', want 'vac-gold'"
+fi
+
+# ⚠️ No storageClassName on purpose: this section runs after the storage-class
+# section has withdrawn its label, so naming one here would be refused by THAT
+# guard and every assertion below would fail for the wrong reason -- which is
+# exactly what happened the first time. Leaving it unset asks for the default
+# class and is never refused.
+mkvac() { # $1 = claim name, $2 = attributes class ("" for none)
+  if [ -z "$2" ]; then
+    $T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: $1}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Mi}}
+EOF
+  else
+    $T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: $1}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeAttributesClassName: $2
+  resources: {requests: {storage: 1Mi}}
+EOF
+  fi
+}
+
+out=$(mkvac "vac-ok-$$" vac-gold)
+if grep -qE "created|configured|unchanged" <<<"$out"; then
+  ok "a claim naming a published tier is accepted"
+else
+  bad "a claim naming a published tier is accepted" "$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+fi
+
+out=$(mkvac "vac-bad-$$" vac-platform-only)
+if grep -q "no volume attributes class" <<<"$out"; then
+  ok "and one naming a tier the platform kept to itself is refused"
+else
+  bad "a claim naming an unpublished tier is refused" "$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+fi
+
+# ⭐ The mutable half, which a create-only check would miss entirely: this field
+# can be changed on a bound claim, and changing it is how a tenant would raise its
+# own tier after the fact.
+out=$($T patch persistentvolumeclaims "vac-ok-$$" --type=merge \
+        -p '{"spec":{"volumeAttributesClassName":"vac-platform-only"}}' 2>&1)
+if grep -q "no volume attributes class" <<<"$out"; then
+  ok "and raising the tier on an existing claim is refused too, not only at create"
+else
+  bad "raising the tier on an existing claim is refused" "$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+fi
+
+# ⚠️ ...while a write that does not touch the class must go through. Refusing
+# these is the reconcile loop the whole "only when it changes" rule exists to
+# avoid: a GitOps controller reapplying an unchanged manifest would fail forever.
+out=$($T patch persistentvolumeclaims "vac-ok-$$" --type=merge \
+        -p '{"metadata":{"annotations":{"probe":"unchanged"}}}' 2>&1)
+if grep -qE "patched|unchanged" <<<"$out"; then
+  ok "while a write that leaves the tier alone still goes through"
+else
+  bad "a write leaving the tier alone goes through" "$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+fi
+
+$T delete pvc "vac-ok-$$" "vac-bad-$$" >/dev/null 2>&1
+$K delete volumeattributesclass vac-gold vac-platform-only >/dev/null 2>&1
+
 $T delete pvc sc-probe >/dev/null 2>&1
 $K delete storageclass platform-internal >/dev/null 2>&1
 $K label storageclass standard storageclass.kubezoo.io/published- >/dev/null 2>&1

@@ -310,3 +310,106 @@ func TestRetiredCheckIsInertWithoutASet(t *testing.T) {
 		t.Errorf("a proxy with no published set refused a claim: %v", err)
 	}
 }
+
+// TestRefuseUnpublishedVolumeAttributesClass pins the rule that differs from the
+// storage class one.
+//
+// ⚠️ spec.volumeAttributesClassName is MUTABLE on a bound claim -- it is how a
+// tenant asks for a different IOPS tier -- so the check cannot be create-only the
+// way the storage class check is. But it must fire only when the value CHANGES,
+// or every later write to a claim already naming the class fails, a GitOps
+// controller reapplying an unchanged manifest among them.
+func TestRefuseUnpublishedVolumeAttributesClass(t *testing.T) {
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	for name, value := range map[string]string{
+		"gold":   common.PublishedTrue,
+		"silver": common.PublishedDeprecated,
+	} {
+		if err := store.Add(&storagev1.VolumeAttributesClass{ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{common.VolumeAttributesClassPublishedLabelKey: value},
+		}}); err != nil {
+			t.Fatalf("seeding the store: %v", err)
+		}
+	}
+	proxy := &tenantProxy{publishedVolumeAttributesClasses: publishedclass.New(
+		"volumeattributesclass", common.VolumeAttributesClassPublishedLabelKey,
+		store, func() bool { return true }, nil)}
+
+	claim := func(class *string) *core.PersistentVolumeClaim {
+		return &core.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "team"},
+			Spec:       core.PersistentVolumeClaimSpec{VolumeAttributesClassName: class},
+		}
+	}
+	name := func(s string) *string { return &s }
+
+	for _, tc := range []struct {
+		what    string
+		new     *core.PersistentVolumeClaim
+		old     runtime.Object // nil = create
+		refused bool
+	}{
+		{"creating with a published class", claim(name("gold")), nil, false},
+		{"creating with an unpublished class", claim(name("platform-nvme")), nil, true},
+		{"creating with a retired class", claim(name("silver")), nil, true},
+		// Empty means no class applied. Unlike storageClassName nothing upstream
+		// fills it in, so empty really is "none".
+		{"creating with none", claim(nil), nil, false},
+		{"creating with the empty string", claim(name("")), nil, false},
+
+		// ⭐ The mutable half. Raising your own tier on an existing claim is the
+		// escape a create-only check would miss entirely.
+		{"raising the tier on an existing claim", claim(name("platform-nvme")),
+			claim(name("gold")), true},
+		{"switching to a published tier", claim(name("gold")),
+			claim(name("silver")), false},
+
+		// ⚠️ And the half that must NOT fire. These are what make withdrawing a
+		// class survivable for the tenants already on it.
+		{"rewriting a claim without touching the class", claim(name("platform-nvme")),
+			claim(name("platform-nvme")), false},
+		{"reapplying an unchanged manifest on a retired class", claim(name("silver")),
+			claim(name("silver")), false},
+		{"dropping the class from a claim that had an unpublished one", claim(nil),
+			claim(name("platform-nvme")), false},
+	} {
+		err := proxy.refuseUnpublishedVolumeAttributesClass(tc.new, tc.old)
+		if tc.refused && err == nil {
+			t.Errorf("%s: accepted, want refused", tc.what)
+		}
+		if !tc.refused && err != nil {
+			t.Errorf("%s: refused with %v, want accepted", tc.what, err)
+		}
+		if tc.refused && err != nil && !apierrors.IsInvalid(err) {
+			t.Errorf("%s: refused with %T, want an Invalid naming the field", tc.what, err)
+		}
+	}
+}
+
+// TestVolumeAttributesClassUnsyncedAsksForARetry -- same startup window as the
+// storage class check, same answer, for the same reason.
+func TestVolumeAttributesClassUnsyncedAsksForARetry(t *testing.T) {
+	proxy := &tenantProxy{publishedVolumeAttributesClasses: publishedclass.New(
+		"volumeattributesclass", common.VolumeAttributesClassPublishedLabelKey,
+		cache.NewStore(cache.MetaNamespaceKeyFunc), func() bool { return false }, nil)}
+
+	class := "gold"
+	err := proxy.refuseUnpublishedVolumeAttributesClass(&core.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		Spec:       core.PersistentVolumeClaimSpec{VolumeAttributesClassName: &class},
+	}, nil)
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Errorf("refused with %v, want ServiceUnavailable so the client retries", err)
+	}
+
+	// An unchanged value must not wait on the cache either -- it is not this
+	// write that put the tenant on the class.
+	same := &core.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		Spec:       core.PersistentVolumeClaimSpec{VolumeAttributesClassName: &class},
+	}
+	if err := proxy.refuseUnpublishedVolumeAttributesClass(same, same.DeepCopy()); err != nil {
+		t.Errorf("an unchanged class was held up by the cache: %v", err)
+	}
+}

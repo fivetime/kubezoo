@@ -972,6 +972,20 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					NewFunc:         func() runtime.Object { return &storage.StorageClass{} },
 					NewListFunc:     func() runtime.Object { return &storage.StorageClassList{} },
 				},
+				// Same storage, same reasoning, different default: nothing is
+				// published unless an operator labels it, and naming an
+				// unpublished one is refused rather than merely undiscoverable.
+				// A VolumeAttributesClass carries the CSI driver's IOPS and
+				// throughput parameters, so it is a performance tier a platform
+				// sells rather than a choice a tenant makes freely.
+				"volumeattributesclasses": {
+					Kind:            storagev1.SchemeGroupVersion.WithKind("VolumeAttributesClass"),
+					Resource:        "volumeattributesclasses",
+					ShortNames:      []string{"vac"},
+					NamespaceScoped: false,
+					NewFunc:         func() runtime.Object { return &storage.VolumeAttributesClass{} },
+					NewListFunc:     func() runtime.Object { return &storage.VolumeAttributesClassList{} },
+				},
 			},
 		},
 	},
@@ -980,7 +994,8 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 	// group: storage.k8s.io
 	// kinds: CSIDriver, CSINode, VolumeAttachment
 	//
-	// StorageClass is served above, read-only and allowlisted.
+	// StorageClass and VolumeAttributesClass are served above, read-only and
+	// narrowed to what the platform published.
 
 	// group: scheduling.k8s.io
 	// kinds: PriorityClass

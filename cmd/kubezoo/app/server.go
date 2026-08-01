@@ -415,13 +415,15 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 			func(context genericapiserver.PostStartHookContext) error {
 				proxyConfig.classInformers.Start(context.Done())
 				proxyConfig.ingressClassInformers.Start(context.Done())
+				proxyConfig.volumeAttributesClassInformers.Start(context.Done())
 				return nil
 			})
 		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("published-class-informers-synced",
 			func(context genericapiserver.PostStartHookContext) error {
 				return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 					return proxyConfig.publishedStorageClasses.HasSynced() &&
-						proxyConfig.publishedIngressClasses.HasSynced(), nil
+						proxyConfig.publishedIngressClasses.HasSynced() &&
+						proxyConfig.publishedVolumeAttributesClasses.HasSynced(), nil
 				}, context.Done())
 			})
 	}
@@ -601,11 +603,16 @@ type ProxyConfig struct {
 	// have IngressClasses of its own, so what the label decides there is which
 	// names pass through unprefixed.
 	publishedIngressClasses publishedclass.Set
+	// publishedVolumeAttributesClasses is the third: consumed both by the
+	// read-only view and by the PVC endpoint, which refuses a claim naming one
+	// that is not published.
+	publishedVolumeAttributesClasses publishedclass.Set
 	// classInformers backs both. Started and waited for in a post-start hook, so
 	// that no tenant is told a published class does not exist because the cache
 	// was still filling.
-	classInformers        informers.SharedInformerFactory
-	ingressClassInformers informers.SharedInformerFactory
+	classInformers                 informers.SharedInformerFactory
+	ingressClassInformers          informers.SharedInformerFactory
+	volumeAttributesClassInformers informers.SharedInformerFactory
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -625,6 +632,9 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	if config.Kind.Group == "storage.k8s.io" && config.Resource == "storageclasses" {
 		config.PublishedClasses = c.publishedStorageClasses
 	}
+	if config.Kind.Group == "storage.k8s.io" && config.Resource == "volumeattributesclasses" {
+		config.PublishedClasses = c.publishedVolumeAttributesClasses
+	}
 	// ⚠️ A different field, on a different resource, doing a different thing:
 	// this leaves the PVC endpoint an ordinary tenant proxy and only lets it
 	// refuse a CREATE that names a retired class. Assigning PublishedClasses here
@@ -635,6 +645,7 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
 		config.Subresource == "" {
 		config.PublishedStorageClasses = c.publishedStorageClasses
+		config.PublishedVolumeAttributesClasses = c.publishedVolumeAttributesClasses
 	}
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport
@@ -721,6 +732,14 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 				common.IngressClassPublishedLabelKey).String()
 		}))
 	ingressClassInformer := ingressClassInformers.Networking().V1().IngressClasses().Informer()
+	// A third, for the same reason as the second: one factory carries one tweak,
+	// and these three resources carry three different labels.
+	volumeAttributesClassInformers := informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = publishedclass.PublishedSelector(
+				common.VolumeAttributesClassPublishedLabelKey).String()
+		}))
+	volumeAttributesClassInformer := volumeAttributesClassInformers.Storage().V1().VolumeAttributesClasses().Informer()
 
 	publishedStorageClasses := publishedclass.New("storageclass",
 		common.StorageClassPublishedLabelKey,
@@ -728,6 +747,12 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	publishedIngressClasses := publishedclass.New("ingressclass",
 		common.IngressClassPublishedLabelKey,
 		ingressClassInformer.GetStore(), ingressClassInformer.HasSynced, o.PublicIngressClasses)
+	// ⭐ No flag counterpart, deliberately: there is nothing to stay compatible
+	// with, because nothing validated this field before. Publishing none is the
+	// default and means no tenant can set spec.volumeAttributesClassName at all.
+	publishedVolumeAttributesClasses := publishedclass.New("volumeattributesclass",
+		common.VolumeAttributesClassPublishedLabelKey,
+		volumeAttributesClassInformer.GetStore(), volumeAttributesClassInformer.HasSynced, nil)
 
 	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses)
 
@@ -766,10 +791,12 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		proxyTransport:  proxyTransport,
 		upstreamMaster:  upstreamMaster,
 
-		publishedStorageClasses: publishedStorageClasses,
-		publishedIngressClasses: publishedIngressClasses,
-		classInformers:          classInformers,
-		ingressClassInformers:   ingressClassInformers,
+		publishedStorageClasses:          publishedStorageClasses,
+		publishedIngressClasses:          publishedIngressClasses,
+		publishedVolumeAttributesClasses: publishedVolumeAttributesClasses,
+		classInformers:                   classInformers,
+		ingressClassInformers:            ingressClassInformers,
+		volumeAttributesClassInformers:   volumeAttributesClassInformers,
 	}, nil
 }
 

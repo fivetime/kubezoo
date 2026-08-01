@@ -111,6 +111,29 @@ manifest 都改不了,所以下线一个存储类必须给迁移窗口,而不是
 ⚠️ IngressClass 这边**不需要**同样的拦截:未发布的 ingress class 不是被拒,而是被
 **前缀化进租户自己的名字空间**,只能由租户自己跑的控制器来服务 —— 机制不同,本来就是安全的。
 
+### ⭐ VolumeAttributesClass:同一套机制,但默认什么都不发布
+
+`spec.volumeAttributesClassName` 装的是 CSI 驱动的 IOPS / 吞吐参数 —— 它是**平台卖的性能档**,
+不是租户随便挑的东西。这个字段在 1.36 是 **GA + LockToDefault**(关不掉),而在此之前
+kubezoo **完全不校验它**,租户写一个平台内部的 VAC 名字就能拿到那档性能。
+
+```bash
+kubectl label volumeattributesclass gold volumeattributesclass.kubezoo.io/published=true
+```
+
+与存储类的**三点差异**:
+
+1. **默认一个都不发布**,而不是靠 flag 兼容 —— 因为以前压根没有校验,没有存量行为要兼容。
+   不打标签 = **租户根本设不了这个字段**,这正是"平台卖的东西"该有的默认。
+2. **这个字段可变**(存储类不可变)。租户可以在已绑定的 PVC 上改档位 —— 所以校验
+   **不能只拦 CREATE**,UPDATE 也拦。
+3. 但 **只在值真的改变时拦**。不碰这个字段的写入照常放行,否则 GitOps 重放一份没变的
+   manifest 会永远失败 —— 和存储类那条铁律是同一个道理。
+
+⭐ 因此**撤掉一个 VAC 的标签,不会影响已经在用它的 PVC** —— 只有新引用和改档位会被拒。
+
+⚠️ 与存储类不同,这里留空是**真的"不套用任何档位"**,没有 `setdefault` 那样的上游插件会替它填。
+
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,
 于是三条策略永远不就绪,**`pods` 的 webhook 根本没注册**,

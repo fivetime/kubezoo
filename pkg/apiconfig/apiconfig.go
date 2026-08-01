@@ -92,6 +92,14 @@ type StorageConfig struct {
 	// into a read-only list of storage classes.
 	PublishedStorageClasses publishedclass.Set
 
+	// PublishedVolumeAttributesClasses does the same for
+	// spec.volumeAttributesClassName. Nil disables the check.
+	//
+	// ⚠️ That field is MUTABLE after the claim is bound, so unlike the storage
+	// class the refusal cannot be create-only -- it fires whenever the value
+	// changes. See tenantProxy.refuseUnpublishedVolumeAttributesClass.
+	PublishedVolumeAttributesClasses publishedclass.Set
+
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL
 	GroupVersionKindFunc GroupVersionKindFunc
