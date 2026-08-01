@@ -24,7 +24,16 @@ type ProxyOptions struct {
 	UpstreamMaster string
 	// PublicIngressClasses are the IngressClass names that reach the platform's
 	// own ingress controller, and through it the public internet.
-	PublicIngressClasses  []string
+	PublicIngressClasses []string
+	// PublicStorageClasses are the StorageClass names the platform publishes to
+	// every tenant, read-only and under their real names.
+	//
+	// A tenant can already NAME a StorageClass -- pkg/convert/pvc.go passes
+	// spec.storageClassName through untranslated, so dynamic provisioning works
+	// -- but storage.k8s.io is not served, so it has no way to find out which
+	// names exist. Empty publishes nothing, which is the safe default: an
+	// operator who has not chosen classes has not offered any.
+	PublicStorageClasses  []string
 	ServiceAccountKeyFile string
 }
 
@@ -55,6 +64,11 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"A tenant naming one of these is asking to be exposed; every other class it names is prefixed with "+
 			"its tenant id and can only be served by a controller the tenant runs itself. Empty by default, "+
 			"which leaves every tenant Ingress internal.")
+	fs.StringSliceVar(&o.PublicStorageClasses, "public-storage-classes", o.PublicStorageClasses,
+		"StorageClass names published to every tenant, read-only and under their real names, so that a "+
+			"tenant can discover what it may put in a PersistentVolumeClaim's storageClassName. The "+
+			"reference already works without this; what it adds is the ability to find out. Empty by "+
+			"default, which publishes none and leaves tenants reliant on being told out of band.")
 }
 
 func (o *ProxyOptions) Validate() []error {

@@ -73,6 +73,12 @@ type StorageConfig struct {
 
 	TableConvertor rest.TableConvertor
 
+	// PublishedNames turns this into a read-only view of a fixed set of the
+	// platform's OWN cluster-scoped objects, served to every tenant under their
+	// real names. Nil means the ordinary tenant proxy. See
+	// pkg/proxy/publicclass.go.
+	PublishedNames []string
+
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL
 	GroupVersionKindFunc GroupVersionKindFunc

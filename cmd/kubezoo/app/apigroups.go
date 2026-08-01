@@ -21,6 +21,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/node"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/rbac"
+	"k8s.io/kubernetes/pkg/apis/storage"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 )
@@ -943,9 +945,40 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 		},
 	},
 
+	{
+		storagev1.GroupName,
+		map[string]map[string]*apiconfig.StorageConfig{
+			"v1": {
+				// ⭐ Read-only, and only the names --public-storage-classes
+				// publishes. A StorageClass is the PLATFORM's object: a tenant
+				// already references one successfully -- pkg/convert/pvc.go passes
+				// spec.storageClassName through untranslated -- but before this it
+				// had no way to discover which names exist, because this whole
+				// group was unserved. pkg/convert/pv.go even refuses a volume
+				// source and tells the tenant to "Use a StorageClass", naming a
+				// resource it could not enumerate.
+				//
+				// Not the tenant proxy: no name prefixing (the tenant must see the
+				// name that works in a PVC), visibility by allowlist rather than by
+				// tenant prefix, and no write verbs at all. See publicclass.go for
+				// why that is a separate storage rather than three conditionals.
+				"storageclasses": {
+					Kind:            storagev1.SchemeGroupVersion.WithKind("StorageClass"),
+					Resource:        "storageclasses",
+					ShortNames:      []string{"sc"},
+					NamespaceScoped: false,
+					NewFunc:         func() runtime.Object { return &storage.StorageClass{} },
+					NewListFunc:     func() runtime.Object { return &storage.StorageClassList{} },
+				},
+			},
+		},
+	},
+
 	// the following kinds should not be available to serverless kubernetes users, so the api configs are skipped.
 	// group: storage.k8s.io
-	// kinds: CSIDriver, CSINode, StorageClass, VolumeAttachment
+	// kinds: CSIDriver, CSINode, VolumeAttachment
+	//
+	// StorageClass is served above, read-only and allowlisted.
 
 	// group: scheduling.k8s.io
 	// kinds: PriorityClass

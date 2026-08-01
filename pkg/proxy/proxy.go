@@ -160,6 +160,12 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		config.Kind.Group == "rbac.authorization.k8s.io" {
 		return newClusterRoleBindingProjection(config)
 	}
+	// Some cluster-scoped resources are the platform's, not the tenant's: they
+	// are published read-only under their real names so a tenant can discover
+	// what it may reference. See publicclass.go.
+	if config.PublishedNames != nil {
+		return NewPublicClassStorage(config, config.PublishedNames)
+	}
 
 	if config.NewFunc == nil && config.NewListFunc == nil {
 		return nil, fmt.Errorf("both NewFunc and NewListFunc is nil")

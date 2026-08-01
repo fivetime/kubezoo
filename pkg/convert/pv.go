@@ -106,8 +106,9 @@ func refuseUnsafePVSource(spec *internal.PersistentVolumeSpec, name string) erro
 		} {
 			if ref != nil {
 				return errors.Errorf("persistentvolume %s: spec.csi.%s names a namespace, which the "+
-					"kubelet resolves with its own credentials rather than yours; ask the platform "+
-					"operator for a StorageClass instead", name, field)
+					"kubelet resolves with its own credentials rather than yours. A StorageClass "+
+					"carries those credentials on the platform's behalf: see "+
+					"kubectl get storageclass", name, field)
 			}
 		}
 		return nil
@@ -145,7 +146,8 @@ func refuseUnsafePVSource(spec *internal.PersistentVolumeSpec, name string) erro
 	}
 	return errors.Errorf("persistentvolume %s: this volume source is not one tenants may write; "+
 		"it either names an object in another namespace or reaches the node directly. "+
-		"Use a StorageClass, or ask the platform operator", name)
+		"Use one of the storage classes the platform publishes -- kubectl get storageclass -- "+
+		"or ask the platform operator", name)
 }
 
 // Backward transforms upstream object reference to tenant object reference.

@@ -146,6 +146,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=true \
   --api-audiences=$UPSTREAM_SA_ISSUER \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
+  --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-standard} \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do

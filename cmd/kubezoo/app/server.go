@@ -564,6 +564,12 @@ type ProxyConfig struct {
 
 	proxyTransport http.RoundTripper
 	upstreamMaster *url.URL
+
+	// publicStorageClasses is what --public-storage-classes named. Never nil once
+	// the config is built: an empty slice publishes nothing, and nil would send
+	// storageclasses down the tenant-proxy path, which would prefix names that
+	// belong to the platform.
+	publicStorageClasses []string
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -576,6 +582,13 @@ func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
 
 func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
+	// The platform's own classes, published read-only. Set even when the operator
+	// published none: a non-nil empty slice is what makes the storage serve the
+	// resource and show nothing, rather than falling through to the tenant proxy
+	// and prefixing names that are not the tenant's.
+	if config.Kind.Group == "storage.k8s.io" && config.Resource == "storageclasses" {
+		config.PublishedNames = c.publicStorageClasses
+	}
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport
 	config.UpstreamMaster = c.upstreamMaster
@@ -646,6 +659,10 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		return util.ListCRDsForTenant(tenantID, crdLister)
 	})
 	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, o.PublicIngressClasses)
+	publicStorageClasses := o.PublicStorageClasses
+	if publicStorageClasses == nil {
+		publicStorageClasses = []string{}
+	}
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)
@@ -681,6 +698,8 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		customConvertor: customConvertor,
 		proxyTransport:  proxyTransport,
 		upstreamMaster:  upstreamMaster,
+
+		publicStorageClasses: publicStorageClasses,
 	}, nil
 }
 

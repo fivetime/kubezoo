@@ -1537,6 +1537,84 @@ done
 [ "$round_trip" = yes ] && ok "every class reads back exactly as the tenant wrote it"
 
 echo
+echo "== the platform publishes storage classes, and only those =="
+# ⭐ A tenant could always NAME a StorageClass -- pkg/convert/pvc.go passes
+# spec.storageClassName through untranslated, so dynamic provisioning worked --
+# but storage.k8s.io was not served at all, so it had no way to discover which
+# names exist. pkg/convert/pv.go even refused a volume source and told the tenant
+# to "use a StorageClass", naming a resource it could not enumerate.
+#
+# kind ships "standard"; the lab publishes exactly that one and creates a second
+# class the platform keeps to itself.
+$K apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: platform-internal}
+provisioner: kubernetes.io/no-provisioner
+EOF
+
+published=$($T get storageclass --no-headers 2>&1 | awk '{print $1}' | sort | tr '\n' ' ')
+if [ "$(echo $published)" = "standard" ]; then
+  ok "a tenant sees exactly the classes the platform published"
+else
+  bad "a tenant sees exactly the published classes" "got '$published', want 'standard'"
+fi
+
+# Under the real name, because that is the name that has to work in a PVC.
+if $T get storageclass standard >/dev/null 2>&1; then
+  ok "and reads one by the name that works in a PersistentVolumeClaim"
+else
+  bad "a published class is readable by its real name" \
+      "$($T get storageclass standard 2>&1 | tr '\n' ' ' | cut -c1-120)"
+fi
+
+# An unpublished class is NotFound, not Forbidden: the tenant is not told what it
+# may not use.
+unpublished=$($T get storageclass platform-internal 2>&1)
+if grep -q -i "notfound\|not found" <<<"$unpublished"; then
+  ok "an unpublished class reads as NotFound, so the tenant is not told it exists"
+else
+  bad "an unpublished class is hidden" "got: $(tr '\n' ' ' <<<"$unpublished" | cut -c1-120)"
+fi
+
+# It is the platform's object; a tenant may not write it.
+expect_denied_any() {
+  local what=$1; shift
+  if "$@" >/dev/null 2>&1; then
+    bad "$what" "the write was accepted"
+  else
+    ok "$what"
+  fi
+}
+expect_denied_any "and a tenant cannot create a storage class of its own" \
+  $T create -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: mine}
+provisioner: kubernetes.io/no-provisioner
+EOF
+expect_denied_any "nor delete the platform's" $T delete storageclass standard
+
+# And the reference the whole feature exists for still works.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: sc-probe}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources: {requests: {storage: 1Gi}}
+EOF
+stored=$($K -n "$NS" get pvc sc-probe -o jsonpath='{.spec.storageClassName}' 2>/dev/null)
+if [ "$stored" = standard ]; then
+  ok "and a PVC naming a published class reaches upstream with that exact name"
+else
+  bad "a PVC naming a published class" "upstream stored storageClassName='${stored:-<empty>}', want standard"
+fi
+$T delete pvc sc-probe >/dev/null 2>&1
+$K delete storageclass platform-internal >/dev/null 2>&1
+
+echo
 echo "== a tenant can only claim host names under its own subdomain =="
 # spec.rules host is a free-form DNS name that kubezoo cannot rewrite -- prefixing
 # a domain destroys what it is for -- so without this any tenant could claim any
