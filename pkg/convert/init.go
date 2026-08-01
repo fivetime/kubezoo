@@ -60,6 +60,10 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Kind:  "Event",
 		}: NewCrossReferenceConverter(defaultConvertor, NewEventTransformer(objectReferenceTransformer)),
 		{
+			Group: "events.k8s.io",
+			Kind:  "Event",
+		}: NewCrossReferenceConverter(defaultConvertor, NewEventsV1Transformer(objectReferenceTransformer)),
+		{
 			Group: "apiextensions.k8s.io",
 			Kind:  "CustomResourceDefinition",
 		}: NewCRDConvertor(ownerReferenceTransformer),

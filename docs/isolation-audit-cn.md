@@ -2990,6 +2990,73 @@ instance**: a convertor added later cannot reintroduce it.」
 WaitGroup 那半(补 `TestAPendingJoinHoldsTheStreamOpen`);
 `recordProgress` 原先在**发送之前**记录,使水位线变成"看见过"而非"已交付",已移到发送之后。
 
+## BB. ✅ 第六轮复审:两条 high 在没人看的角落,一条 fatal 是我自己修出来的
+
+问的还是那两个反复出现的毛病。答案:**`injectedPaths` 机制关的是类**(`forwardApply` 无条件并入任何 storage 的声明,
+边界注释事实正确),**十条新守卫也都通过了各自的 mutation 检查** —— 但模式 (B) 换了形状:
+**两处修复只守住了 commit 声称修复的一半**,而漏掉的那一半恰好是会静默回归的那一半。
+
+### ⚠️⚠️ 我上一轮的"顺手修复"引入了会杀进程的 data race
+
+第五轮把 `recordProgress` 移到发送**之后**,理由(水位线该是"已交付")是对的,
+但 **`m.result` 是无缓冲的:发送是 rendezvous 不是交棒**,那一刻起对象归消费者。
+`proxyWatch` 就地转换它 —— CR 走 `SetUnstructuredContent(utd.UnstructuredContent())`,**共享同一张 map 不复制** ——
+随后写入租户 namespace。于是发送后再读 `event.Object` 就是并发读写同一张 map,
+⇒ **`fatal error: concurrent map read and map write`,recover 不了,进程直接死**。
+触发条件:任何租户对自己的 CR 开 cluster-wide watch,也就是 controller-runtime 默认的 manager cache。
+
+**修法**:revision 在发送**之前**读(那时还归自己),发送**之后**才记录。两个性质都要,且互不冲突。
+`recordProgress(namespace, event)` 改成 `recordRevision(namespace, revision)` —— **签名收成一个数字**,
+让"发送后不许再碰对象"变成类型层面的事实。守卫:`TestForwarderDoesNotTouchTheEventAfterHandingItOn`(`-race` 下跑)。
+
+### ⭐ 处理链里没有授权过滤器,而 Tenant API 是本地服务的
+
+`NewBuildHandlerChanFunc` 手工搭链,**没装 `WithAuthorization`** ⇒ 建出来的 authorizer 从不被咨询,
+`--authorization-mode` 是死的。对**代理**的资源这没问题(上游会授权),
+对 `tenant.kubezoo.io` 和 `quota.kubezoo.io` **完全不成立** —— 它们服务自 kubezoo **自己的 etcd**,
+store 不做任何租户作用域。实测:租户只拿自己的证书,
+
+```
+kubectl get --raw /apis/tenant.kubezoo.io/v1alpha1/tenants
+→ 读到别的租户的 kubeconfig(客户端证书 + 私钥),它就是那个租户
+DELETE 同路径 → 控制器摧毁那个租户的全部资产
+```
+
+discovery 会把这个组从租户的 `/apis` 里滤掉,所以不带 `--raw` 的 kubectl 会失败 —— **那是隐藏不是控制**。
+⚠️ 顺带更正:`docs/deployment-and-comparison-cn.md:263`「它把授权完全交给上游,不是漏配」
+**对这两个组事实上是错的**,它们没有上游可交。修法见 `pkg/filters/platformapi.go`。
+
+### ⭐ 仓库里 shipped 的 controller RBAC 根本做不了拆除
+
+manifest 给 CRD 只有 get/list/watch(注释还写着"只读"),namespace 没有 delete
+⇒ `deleteResources` 第一步就 403 ⇒ **finalizer 永不摘,Tenant 永远 Terminating**;
+运维手工剥掉 finalizer 之后**什么都不会被清理**,而六位 id 一旦复用,
+新租户**直接看到前一个租户的 namespace、secret 和 CR**。
+
+两处都要改:
+1. **manifest 补权限**,并加守卫 `TestShippedRBACCanTearDownWhatTenantsCanCreate` 把它和
+   `ClusterScopedRules` 绑死 —— 判据从规则本身推导(**能 create 且能 list 的**才需要能删,
+   TokenReview 这类只 create 不存储的自动排除),所以以后哪边多授一种资源,另一边不跟上就会红。
+2. **扫描必须容忍 Forbidden**:它故意遍历上游宣告的**每一个**集群级资源
+   (nodes/apiservices/storageclasses……),而控制器**有意不是 cluster-admin**。
+   envtest 普查:26 种里只有 2 种既可列又可删 —— 原先第一个 Forbidden 就中止整个拆除。
+   列不出来 → V(4) 跳过;**属于该租户却删不掉 → Warning 并继续**(不能让一个资源卡死全部清理)。
+
+### 其余
+
+- `generateName` 建的**集群级**对象不带前缀 ⇒ 上游给它起名 `foo-abcde`,**在租户的名字空间之外**:
+  租户拿到这个名字却再也寻址不到(之后每次请求都会加前缀 → 404)、LIST 丢掉它、拆除找不到它;
+  还能让一个租户把名字**种进另一个租户的名字空间**。ClusterRoleBinding 投影更糟:
+  `generateName` 被清空、名字变成裸前缀 `kubezoo:clusterrolebinding:`,**所有 generateName 绑定塌成同一个对象**
+- **per-group discovery 逐字转发**:`/apis/{group}` 和 `/apis/{group}/{version}` 直接拿客户端输入的组去问上游,
+  **而且用的是 kubezoo 自己的证书**(上游 RBAC 也不生效)⇒ 租户 A 问 `/apis/<B的组>/v1`
+  拿到租户 B 的完整 `APIResourceList`。`/apis` 列表是过滤过的,这两个直接寻址的端点没有
+- **租户的 ClusterResourceQuota 从不被删除**:拆除调的是 `syncClusterResourceQuota`,
+  而它只在 Tenant 已 NotFound 的分支里删 —— 拆除时 finalizer 还在,Tenant 当然还在,
+  且函数在 `DeletionTimestamp != nil` 时直接 return。**做了零件事却报告成功**
+- `events.k8s.io/v1` Event **没有 convertor**:引用从不翻译,而 core Event 与它共用同一批存储对象
+  ⇒ 一条这样的 event 会让该 namespace 的**整个 core/v1 event 列表**读取失败
+
 ## 尚未覆盖
 
 诚实列出,不算做完:

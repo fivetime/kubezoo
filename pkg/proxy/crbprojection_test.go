@@ -21,6 +21,11 @@ import (
 
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/kubernetes/pkg/apis/rbac"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 )
 
 // TestProjectedFieldSelectorNamesTheRecord guards the one call site the
@@ -85,5 +90,41 @@ func TestProjectedFieldSelectorNamesTheRecord(t *testing.T) {
 				t.Error("the record label selector was lost")
 			}
 		})
+	}
+}
+
+// TestTheProjectionDeclaresWhatItInjects guards the DECLARATION, not the
+// mechanism.
+//
+// ⚠️ forwardApply honouring tenantProxy.injectedPaths is guarded in apply_test.go,
+// but that test builds the proxy by hand and sets the field itself. Deleting the
+// one production line that sets it -- crbprojection.go's
+// `lister.injectedPaths = projectionLabelPath()` -- left every package green
+// while the defect it fixes came all the way back: a server-side-applied
+// ClusterRoleBinding created with no projection label, invisible to the
+// tenant's own list and to the controller. One line, no compiler signal, silent
+// at runtime. This is the guard on that line.
+func TestTheProjectionDeclaresWhatItInjects(t *testing.T) {
+	storage, err := NewTenantProxy(apiconfig.StorageConfig{
+		Kind:     schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
+		Resource: "clusterrolebindings",
+		NewFunc:  func() runtime.Object { return &rbac.ClusterRoleBinding{} },
+	})
+	if err != nil {
+		t.Fatalf("building the projection: %v", err)
+	}
+	projection, ok := storage.(*clusterRoleBindingProjection)
+	if !ok {
+		t.Fatalf("expected the ClusterRoleBinding projection, got %T", storage)
+	}
+
+	declared := projection.inner.injectedPaths
+	if declared == nil || declared.Empty() {
+		t.Fatal("the projection injects its label above the inner storage and does not declare it; " +
+			"a forwarded server-side apply will create the record unlabelled, which makes it " +
+			"invisible to the tenant's own list and to every controller sync")
+	}
+	if !declared.Equals(projectionLabelPath()) {
+		t.Errorf("the projection declares %v, not the label it actually injects", declared)
 	}
 }

@@ -260,8 +260,19 @@ return strings.HasPrefix(accessor.GetName(), tenantID+"-")
   §5 改写层的正确性**。#82 的审计里 PersistentVolume、准入 webhook、Node 三条
   都是这条路上的实际缺口。
 
-再加上示例部署中 KubeZoo 自身是 `--authorization-mode=AlwaysAllow`
-(它把授权完全交给上游,不是漏配)。评估该方案时,**集群级资源无兜底**这一条应当排在首位。
+再加上示例部署中 KubeZoo 自身是 `--authorization-mode=AlwaysAllow`。
+
+⚠️ **这里原先写着"它把授权完全交给上游,不是漏配"。对被代理的资源成立,对
+`tenant.kubezoo.io` 和 `quota.kubezoo.io` 完全不成立** —— 这两个组**没有上游可交**,
+它们由 KubeZoo 自己的 etcd 提供服务,store 不做任何租户作用域。而且处理链是手工搭的,
+根本没装 `WithAuthorization`,所以那个 flag 即使改成 RBAC 也不生效。
+
+实测(修复前):租户只拿自己的证书,`kubectl get --raw /apis/tenant.kubezoo.io/v1alpha1/tenants`
+就能读到**别的租户的 kubeconfig,含私钥**,DELETE 同一路径会让控制器摧毁那个租户的全部资产。
+discovery 把这个组从租户的 `/apis` 里滤掉了,所以不带 `--raw` 的 kubectl 会失败 —— **那是隐藏,不是控制**。
+现在由 `pkg/filters/platformapi.go` 挡住:凡携带租户 ID 的身份,一律拒绝这两个组。
+
+评估该方案时,**集群级资源无兜底**这一条应当排在首位。
 
 ### 6.2 Node 曾对所有租户可见(与 FAQ 冲突)—— **已修复**
 

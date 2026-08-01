@@ -501,8 +501,22 @@ func asRoleBinding(obj runtime.Object) (runtime.Object, error) {
 		RoleRef:    crb.RoleRef,
 		Subjects:   crb.Subjects,
 	}
-	record.Name = util.ProjectedBindingName(crb.Name)
-	record.GenerateName = ""
+	// ⚠️ generateName has to survive, prefixed like the name. Turning it into a
+	// name here produced the record "kubezoo:clusterrolebinding:" -- the bare
+	// prefix, which rbac validation accepts -- so every generateName binding a
+	// tenant created collapsed onto that one object, silently overwriting the
+	// last, and came back to the tenant with an empty name. The upstream
+	// apiserver is what resolves generateName for everything kubezoo proxies;
+	// clearing it was the only reason this resource behaved differently.
+	if crb.Name != "" {
+		record.Name = util.ProjectedBindingName(crb.Name)
+		record.GenerateName = ""
+	} else if crb.GenerateName != "" {
+		record.Name = ""
+		record.GenerateName = util.ProjectedBindingName(crb.GenerateName)
+	} else {
+		return nil, apierrors.NewBadRequest("a ClusterRoleBinding needs a name or a generateName")
+	}
 	record.Namespace = canonicalNamespace
 	if record.Labels == nil {
 		record.Labels = map[string]string{}
@@ -523,6 +537,9 @@ func asClusterRoleBinding(obj runtime.Object) (runtime.Object, error) {
 		Subjects:   record.Subjects,
 	}
 	crb.Name = util.TrimProjectedBindingName(record.Name)
+	if record.GenerateName != "" {
+		crb.GenerateName = util.TrimProjectedBindingName(record.GenerateName)
+	}
 	crb.Namespace = ""
 	delete(crb.Labels, common.ProjectedClusterRoleBindingLabelKey)
 	if len(crb.Labels) == 0 {

@@ -404,3 +404,61 @@ func TestConvertUpstreamObjectToTenantObject(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateNameIsPrefixedForClusterScoped guards a name that escapes the
+// tenant's namespace of names entirely.
+//
+// ⚠️ kubezoo is not a genericregistry.Store, so rest.BeforeCreate never runs and
+// generateName is resolved by the upstream apiserver. Unprefixed, upstream named
+// the object foo-abcde: the tenant was handed that name back and could never
+// address it again, because every later request prefixes it and 404s; LIST
+// dropped it, because ownership is decided by the prefix; and teardown never
+// deleted it, for the same reason. It also let one tenant plant a name inside
+// another's space.
+func TestGenerateNameIsPrefixedForClusterScoped(t *testing.T) {
+	convertor := NewDefaultConvertor(NewOwnerReferenceTransformer(
+		func(group, kind, tenantID string, forward bool) (bool, bool, error) {
+			return false, false, nil
+		}))
+
+	cases := []struct {
+		what             string
+		namespaceScoped  bool
+		name             string
+		generateName     string
+		wantName         string
+		wantGenerateName string
+	}{
+		{
+			what: "a cluster-scoped object with generateName", namespaceScoped: false,
+			generateName: "foo-", wantGenerateName: "111111-foo-",
+		},
+		{
+			what: "a cluster-scoped object with an explicit name", namespaceScoped: false,
+			name: "foo", wantName: "111111-foo",
+		},
+		{
+			what: "a namespaced object's generateName is left alone", namespaceScoped: true,
+			generateName: "foo-", wantGenerateName: "foo-",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.what, func(t *testing.T) {
+			object := &v1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.name, GenerateName: tc.generateName},
+			}
+			if err := convertor.ConvertTenantObjectToUpstreamObject(object, "111111", tc.namespaceScoped); err != nil {
+				t.Fatalf("converting: %v", err)
+			}
+			if object.Name != tc.wantName {
+				t.Errorf("name = %q, want %q", object.Name, tc.wantName)
+			}
+			if object.GenerateName != tc.wantGenerateName {
+				t.Errorf("generateName = %q, want %q -- upstream will name this object outside "+
+					"the tenant's prefix, where the tenant cannot reach it and teardown cannot find it",
+					object.GenerateName, tc.wantGenerateName)
+			}
+		})
+	}
+}

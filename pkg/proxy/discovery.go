@@ -24,7 +24,9 @@ import (
 
 	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	v1 "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	"k8s.io/kube-openapi/pkg/validation/spec"
@@ -136,6 +138,22 @@ func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupR
 		}
 	}
 	return filtered
+}
+
+// notATenantsGroup refuses a group that is neither one this build serves nor one
+// of the tenant's own CRD groups.
+//
+// ⚠️ These two endpoints used to fall through to upstream with whatever group the
+// client typed, and with kubezoo's own credential rather than the tenant's
+// impersonated identity -- so upstream RBAC did not apply either. The group list
+// at /apis is filtered (see filterAPIGroupList), but /apis/{group} and
+// /apis/{group}/{version} are addressed directly: tenant 111111 asking for
+// /apis/222222-acme.io/v1 was handed tenant 222222's whole APIResourceList --
+// every plural, singular, kind and short name of every CRD that tenant had
+// installed. It also advertised native groups kubezoo installs no storage for,
+// so a tenant found resources in api-resources that error on every call.
+func notATenantsGroup(group string) error {
+	return apierrors.NewNotFound(schema.GroupResource{Group: group, Resource: "apigroup"}, group)
 }
 
 // ServerVersionsForGroup returns the supported versions and the preferred version of a group for tenant.

@@ -285,3 +285,46 @@ func TestAPendingJoinHoldsTheStreamOpen(t *testing.T) {
 		t.Error("the join did not give up after Stop")
 	}
 }
+
+// TestForwarderDoesNotTouchTheEventAfterHandingItOn is the guard on a fatal
+// regression: not a wrong answer, a dead process.
+//
+// ⚠️ m.result is unbuffered, so the send is a rendezvous rather than a handoff.
+// From that instant the consumer owns the object, and proxyWatch converts it in
+// place -- for a custom resource convertUnstructuredToOutput aliases the same map
+// instead of copying it, and the convertor writes the tenant's namespace into it.
+// Reading the object's revision after the send was therefore a concurrent map
+// read and write, which Go reports as a fatal error that no recover can catch.
+// One cluster-wide watch on a tenant's own custom resources -- the default
+// controller-runtime manager cache -- was enough to take the gateway down.
+//
+// Run under -race, which is what the repository's own test target uses.
+func TestForwarderDoesNotTouchTheEventAfterHandingItOn(t *testing.T) {
+	m, watchers := newTestMux(t, metav1.ListOptions{ResourceVersion: "1000"}, "111111-a")
+
+	converted := make(chan struct{})
+	go func() {
+		defer close(converted)
+		for event := range m.ResultChan() {
+			if event.Type != watch.Added {
+				continue
+			}
+			// What proxyWatch does to the very object it was handed: rewrite the
+			// namespace in place, on the same map the forwarder came from.
+			object := event.Object.(*unstructured.Unstructured)
+			for i := 0; i < 200; i++ {
+				object.SetNamespace("default")
+				object.SetResourceVersion("1001")
+			}
+			return
+		}
+	}()
+
+	go watchers["111111-a"].Add(objectAt("1001"))
+
+	select {
+	case <-converted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the consumer never received the event")
+	}
+}

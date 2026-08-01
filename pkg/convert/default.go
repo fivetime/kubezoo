@@ -50,9 +50,25 @@ func (c *DefaultConvertor) ConvertTenantObjectToUpstreamObject(obj runtime.Objec
 	if isNamespaceScoped && accessor.GetNamespace() != "" {
 		prefixed := util.UpstreamNamespace(tenantID, accessor.GetNamespace())
 		accessor.SetNamespace(prefixed)
-	} else if !isNamespaceScoped && accessor.GetName() != "" {
-		prefixed := util.AddTenantIDPrefix(tenantID, accessor.GetName())
-		accessor.SetName(prefixed)
+	} else if !isNamespaceScoped {
+		if accessor.GetName() != "" {
+			accessor.SetName(util.AddTenantIDPrefix(tenantID, accessor.GetName()))
+		}
+		// ⚠️ generateName needs the prefix too, and used to get nothing. kubezoo
+		// is not a genericregistry.Store, so rest.BeforeCreate never runs here and
+		// the name is resolved by the *upstream* apiserver -- which is why
+		// generateName works at all for a proxied resource. Unprefixed, upstream
+		// named the object foo-abcde, outside the tenant's namespace of names
+		// entirely: the tenant was handed that name back and could never address
+		// it again, because every later request prefixes it and 404s; LIST dropped
+		// it, because ownership is decided by the prefix; and teardown never
+		// deleted it, for the same reason. It also let a tenant plant a name
+		// inside another tenant's space -- generateName "111111-" sent by tenant
+		// 222222 -- which refuseReservedName catches on the explicit-name path and
+		// could not see here.
+		if accessor.GetGenerateName() != "" {
+			accessor.SetGenerateName(util.AddTenantIDPrefix(tenantID, accessor.GetGenerateName()))
+		}
 	}
 	ownerReferences := accessor.GetOwnerReferences()
 	for i := range ownerReferences {

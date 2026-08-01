@@ -1074,6 +1074,15 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		// discover the API and read the refusal, and inside WithTenantInfo,
 		// which is what puts the tenant on the context.
 		handler = tenantfilters.WithTenantSuspension(handler, tenants)
+		// ⚠️ Inside WithTenantInfo, because it needs the tenant on the context,
+		// and it is not optional: this chain installs no authorization filter, so
+		// the authorizer built below is never consulted and --authorization-mode
+		// does nothing. That is defensible for everything kubezoo proxies, since
+		// upstream authorizes those. tenant.kubezoo.io and quota.kubezoo.io have
+		// no upstream -- they are served from kubezoo's own etcd -- so without
+		// this a tenant could read every other tenant's kubeconfig, private key
+		// included, and delete any tenant it liked.
+		handler = tenantfilters.WithPlatformAPIGuard(handler)
 		handler = tenantfilters.WithTenantInfo(handler)
 		// Carries the apply force flag, which is a query parameter the storage
 		// layer never sees. See tenantfilters.WithApplyForce.

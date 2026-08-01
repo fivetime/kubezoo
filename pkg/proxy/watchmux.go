@@ -253,26 +253,40 @@ func (m *watchMux) forward(namespace string, w watch.Interface) {
 				m.onBookmark(namespace, event)
 				continue
 			}
-			// ⚠️ Recorded after the send, not before. The watermark is meant to
-			// be a revision through which every stream has *delivered*, and
-			// recording it first made it a revision every stream had merely
-			// *seen*: another stream's bookmark could then be computed from it,
-			// restamped and delivered while this event was still queued, so the
-			// client's resume point reached a revision it had not been given the
-			// event for. One event, silently, on any interleaving.
+			// Read here, recorded after the send. Both halves matter and they
+			// pull in opposite directions.
+			//
+			// Recorded after, because the watermark has to be a revision every
+			// stream has *delivered*, not one it has merely seen: otherwise
+			// another stream's bookmark can be computed from this revision,
+			// restamped and handed to the client while this event is still
+			// queued, so the resume point passes an event the client never got.
+			//
+			// ⚠️ Read before, because m.result is unbuffered: the send is a
+			// rendezvous, not a handoff, and from that instant the consumer owns
+			// the object. proxyWatch converts it in place -- for a custom
+			// resource convertUnstructuredToOutput aliases the very same map
+			// rather than copying it, and the convertor then writes the tenant's
+			// namespace into it. Touching event.Object after the send was a
+			// concurrent map read and write, which Go turns into a fatal error
+			// that no recover can catch: one cluster-wide watch on a tenant's own
+			// CRs -- the default controller-runtime manager cache -- takes the
+			// gateway down.
+			revision := eventRevision(event)
 			select {
 			case m.result <- event:
 			case <-m.stop:
 				return
 			}
-			m.recordProgress(namespace, event)
+			m.recordRevision(namespace, revision)
 		}
 	}
 }
 
-// recordProgress notes how far one stream has got.
-func (m *watchMux) recordProgress(namespace string, event watch.Event) {
-	revision := eventRevision(event)
+// recordRevision notes how far one stream has got. It takes a number rather than
+// an event on purpose: the caller reads the revision off the object while it
+// still owns it, and calls this after the object has been handed on.
+func (m *watchMux) recordRevision(namespace string, revision uint64) {
 	if revision == 0 {
 		return
 	}
