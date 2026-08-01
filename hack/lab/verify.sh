@@ -1553,6 +1553,23 @@ metadata: {name: platform-internal}
 provisioner: kubernetes.io/no-provisioner
 EOF
 
+# ⭐ Published by LABELLING the object, with the gateway already running. That is
+# the whole point of the mechanism: it used to be a startup flag, which on the
+# shipped single-replica StatefulSet made "offer one more storage class" an
+# outage for every tenant's control plane, and made a typo in the flag silent.
+$K label storageclass standard storageclass.kubezoo.io/published=true --overwrite >/dev/null 2>&1
+# The informer has to notice. A second is generous; a watch event is immediate.
+for _ in $(seq 20); do
+  [ "$($T get storageclass --no-headers 2>/dev/null | wc -l)" != 0 ] && break
+  sleep 1
+done
+if [ "$($T get storageclass --no-headers 2>/dev/null | awk '{print $1}')" = standard ]; then
+  ok "labelling a class publishes it with no restart"
+else
+  bad "labelling a class publishes it with no restart" \
+      "after labelling, the tenant sees: $($T get storageclass --no-headers 2>&1 | tr '\n' ' ' | cut -c1-120)"
+fi
+
 published=$($T get storageclass --no-headers 2>&1 | awk '{print $1}' | sort | tr '\n' ' ')
 if [ "$(echo $published)" = "standard" ]; then
   ok "a tenant sees exactly the classes the platform published"
@@ -1611,8 +1628,39 @@ if [ "$stored" = standard ]; then
 else
   bad "a PVC naming a published class" "upstream stored storageClassName='${stored:-<empty>}', want standard"
 fi
+
+# Retiring is a distinct state: still visible -- so a tenant can explain a
+# reference it already has -- and marked as on the way out.
+$K label storageclass standard storageclass.kubezoo.io/published=deprecated --overwrite >/dev/null 2>&1
+for _ in $(seq 20); do
+  [ "$($T get storageclass standard -o jsonpath='{.metadata.labels.storageclass\.kubezoo\.io/published}' 2>/dev/null)" = deprecated ] && break
+  sleep 1
+done
+retired=$($T get storageclass standard -o jsonpath='{.metadata.labels.storageclass\.kubezoo\.io/published}' 2>/dev/null)
+if [ "$retired" = deprecated ]; then
+  ok "a retired class stays visible, and the tenant can read that it is retiring"
+else
+  bad "a retired class stays visible" "tenant sees published='${retired:-<gone>}', want deprecated"
+fi
+
+# ⚠️ Unpublishing must not break anything a tenant already has. Publishing is
+# discovery, not authorization -- see the flag help. The PVC written above keeps
+# its class and upstream keeps provisioning it.
+$K label storageclass standard storageclass.kubezoo.io/published- >/dev/null 2>&1
+for _ in $(seq 20); do
+  [ "$($T get storageclass --no-headers 2>/dev/null | wc -l)" = 0 ] && break
+  sleep 1
+done
+still=$($K -n "$NS" get pvc sc-probe -o jsonpath='{.spec.storageClassName}' 2>/dev/null)
+if [ "$still" = standard ]; then
+  ok "and unpublishing leaves an existing PVC's class untouched"
+else
+  bad "unpublishing leaves an existing PVC alone" "the PVC's storageClassName is now '${still:-<gone>}'"
+fi
+
 $T delete pvc sc-probe >/dev/null 2>&1
 $K delete storageclass platform-internal >/dev/null 2>&1
+$K label storageclass standard storageclass.kubezoo.io/published- >/dev/null 2>&1
 
 echo
 echo "== a tenant can only claim host names under its own subdomain =="

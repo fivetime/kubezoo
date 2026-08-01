@@ -21,15 +21,19 @@ import (
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
 // InitConvertors initialize native convertor and custom convertor.
 //
 // publicIngressClasses are the IngressClass names that reach the platform's own
 // controller, and so the public internet; every other class a tenant names is
-// prefixed and can only be served by something the tenant runs itself.
+// prefixed and can only be served by something the tenant runs itself. Which
+// ones those are comes from a label on the IngressClass, so the answer can
+// change without restarting -- see pkg/publishedclass.
 func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListTenantCRDsFunc,
-	publicIngressClasses []string) (nativeConvertor, customConvertor common.ObjectConvertor) {
+	publishedIngressClasses publishedclass.Set) (nativeConvertor, customConvertor common.ObjectConvertor) {
 	ownerReferenceTransformer := NewOwnerReferenceTransformer(checkGroupKind)
 	objectReferenceTransformer := NewObjectReferenceTransformer(checkGroupKind)
 	defaultConvertor := NewDefaultConvertor(ownerReferenceTransformer)
@@ -50,7 +54,7 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			// unreachable and the platform's was.
 			Group: "networking.k8s.io",
 			Kind:  "Ingress",
-		}: NewCrossReferenceConverter(defaultConvertor, NewIngressTransformer(publicIngressClasses)),
+		}: NewCrossReferenceConverter(defaultConvertor, NewIngressTransformer(publishedIngressClasses)),
 		{
 			Group: "discovery.k8s.io",
 			Kind:  "EndpointSlice",

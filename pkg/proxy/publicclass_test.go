@@ -31,6 +31,7 @@ import (
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
 // classFake serves a fixed set of upstream objects and records what was asked for.
@@ -71,7 +72,7 @@ func newClassStorage(t *testing.T, present []string, published []string) (rest.S
 		DynamicClient: fake,
 		NewFunc:       func() runtime.Object { return &storage.StorageClass{} },
 		NewListFunc:   func() runtime.Object { return &storage.StorageClassList{} },
-	}, published)
+	}, publishedclass.Static("storageclass", published))
 	if err != nil {
 		t.Fatalf("building the storage: %v", err)
 	}

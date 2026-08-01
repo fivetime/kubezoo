@@ -35,6 +35,7 @@ import (
 	openapiutil "k8s.io/kube-openapi/pkg/util"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 
 	"github.com/spf13/cobra"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -42,6 +43,7 @@ import (
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	externalinformer "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	util_net "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -62,6 +64,7 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3/preflight"
 	"k8s.io/apiserver/pkg/util/webhook"
 	clidiscovery "k8s.io/client-go/discovery"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -401,6 +404,28 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 		}, context.Done())
 	})
 
+	// The published-class caches, and a readiness gate on them. Without the
+	// gate a tenant listing storage classes during the first seconds after a
+	// restart is told, truthfully as far as the cache knows, that there are
+	// none -- and a tenant cannot tell that answer from "the platform published
+	// nothing". Reporting healthy only once the caches are filled is the same
+	// reasoning the CRD informer's gate is written for.
+	if proxyConfig.classInformers != nil {
+		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("start-published-class-informers",
+			func(context genericapiserver.PostStartHookContext) error {
+				proxyConfig.classInformers.Start(context.Done())
+				proxyConfig.ingressClassInformers.Start(context.Done())
+				return nil
+			})
+		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("published-class-informers-synced",
+			func(context genericapiserver.PostStartHookContext) error {
+				return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
+					return proxyConfig.publishedStorageClasses.HasSynced() &&
+						proxyConfig.publishedIngressClasses.HasSynced(), nil
+				}, context.Done())
+			})
+	}
+
 	return m, nil
 }
 
@@ -565,11 +590,22 @@ type ProxyConfig struct {
 	proxyTransport http.RoundTripper
 	upstreamMaster *url.URL
 
-	// publicStorageClasses is what --public-storage-classes named. Never nil once
-	// the config is built: an empty slice publishes nothing, and nil would send
-	// storageclasses down the tenant-proxy path, which would prefix names that
-	// belong to the platform.
-	publicStorageClasses []string
+	// publishedStorageClasses answers which storage classes the platform offers,
+	// from a label on the objects plus whatever --public-storage-classes named.
+	// Never nil once the config is built: publishing nothing is a real answer,
+	// and a nil would send storageclasses down the tenant-proxy path, which would
+	// prefix names that belong to the platform.
+	publishedStorageClasses publishedclass.Set
+	// publishedIngressClasses is the same for ingress classes, consumed by
+	// pkg/convert's ingress transformer rather than by a storage: a tenant may
+	// have IngressClasses of its own, so what the label decides there is which
+	// names pass through unprefixed.
+	publishedIngressClasses publishedclass.Set
+	// classInformers backs both. Started and waited for in a post-start hook, so
+	// that no tenant is told a published class does not exist because the cache
+	// was still filling.
+	classInformers        informers.SharedInformerFactory
+	ingressClassInformers informers.SharedInformerFactory
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -583,11 +619,11 @@ func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
 func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
 	// The platform's own classes, published read-only. Set even when the operator
-	// published none: a non-nil empty slice is what makes the storage serve the
-	// resource and show nothing, rather than falling through to the tenant proxy
-	// and prefixing names that are not the tenant's.
+	// published none: a non-nil Set is what makes the storage serve the resource
+	// and show nothing, rather than falling through to the tenant proxy and
+	// prefixing names that are not the tenant's.
 	if config.Kind.Group == "storage.k8s.io" && config.Resource == "storageclasses" {
-		config.PublishedNames = c.publicStorageClasses
+		config.PublishedClasses = c.publishedStorageClasses
 	}
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport
@@ -658,11 +694,31 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	listTenantCRDs := convert.ListTenantCRDsFunc(func(tenantID string) ([]*apiextensionsv1.CustomResourceDefinition, error) {
 		return util.ListCRDsForTenant(tenantID, crdLister)
 	})
-	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, o.PublicIngressClasses)
-	publicStorageClasses := o.PublicStorageClasses
-	if publicStorageClasses == nil {
-		publicStorageClasses = []string{}
-	}
+	// Label-selected, so each store holds exactly the published objects. The
+	// resync is long: the label is watched, and a resync is only a backstop.
+	classInformers := informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = publishedclass.PublishedSelector(
+				common.StorageClassPublishedLabelKey).String()
+		}))
+	storageClassInformer := classInformers.Storage().V1().StorageClasses().Informer()
+	// A second factory: the two resources carry different labels, and one
+	// factory has one tweak.
+	ingressClassInformers := informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = publishedclass.PublishedSelector(
+				common.IngressClassPublishedLabelKey).String()
+		}))
+	ingressClassInformer := ingressClassInformers.Networking().V1().IngressClasses().Informer()
+
+	publishedStorageClasses := publishedclass.New("storageclass",
+		common.StorageClassPublishedLabelKey,
+		storageClassInformer.GetStore(), storageClassInformer.HasSynced, o.PublicStorageClasses)
+	publishedIngressClasses := publishedclass.New("ingressclass",
+		common.IngressClassPublishedLabelKey,
+		ingressClassInformer.GetStore(), ingressClassInformer.HasSynced, o.PublicIngressClasses)
+
+	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses)
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)
@@ -699,7 +755,10 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		proxyTransport:  proxyTransport,
 		upstreamMaster:  upstreamMaster,
 
-		publicStorageClasses: publicStorageClasses,
+		publishedStorageClasses: publishedStorageClasses,
+		publishedIngressClasses: publishedIngressClasses,
+		classInformers:          classInformers,
+		ingressClassInformers:   ingressClassInformers,
 	}, nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/pflag"
+
+	"github.com/fivetime/kubezoo-contract/pkg/common"
 )
 
 // ProxyOptions runs a kubezoo proxy server
@@ -62,13 +64,20 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&o.PublicIngressClasses, "public-ingress-classes", o.PublicIngressClasses,
 		"IngressClass names that reach the platform's own ingress controller, and so the public internet. "+
 			"A tenant naming one of these is asking to be exposed; every other class it names is prefixed with "+
-			"its tenant id and can only be served by a controller the tenant runs itself. Empty by default, "+
-			"which leaves every tenant Ingress internal.")
+			"its tenant id and can only be served by a controller the tenant runs itself. "+
+			"Prefer labelling the IngressClass "+common.IngressClassPublishedLabelKey+"=true, which takes "+
+			"effect without a restart; this flag is unioned with those and kept so that an upgrade does not "+
+			"silently un-publish anything.")
 	fs.StringSliceVar(&o.PublicStorageClasses, "public-storage-classes", o.PublicStorageClasses,
 		"StorageClass names published to every tenant, read-only and under their real names, so that a "+
 			"tenant can discover what it may put in a PersistentVolumeClaim's storageClassName. The "+
-			"reference already works without this; what it adds is the ability to find out. Empty by "+
-			"default, which publishes none and leaves tenants reliant on being told out of band.")
+			"reference already works without this; what it adds is the ability to find out. "+
+			"Prefer labelling the StorageClass "+common.StorageClassPublishedLabelKey+"=true, which takes "+
+			"effect without a restart -- this flag can only be changed by restarting the gateway, which "+
+			"interrupts every tenant's API access, and a name misspelled here fails silently. Labelling it "+
+			"\""+common.PublishedDeprecated+"\" instead announces that the class is going away: it stays "+
+			"visible, so a tenant can see why its own PersistentVolumeClaim names it. This flag is unioned "+
+			"with the labelled set and kept so that an upgrade does not silently un-publish anything.")
 }
 
 func (o *ProxyOptions) Validate() []error {

@@ -28,6 +28,8 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
 type APIGroupConfig struct {
@@ -73,11 +75,11 @@ type StorageConfig struct {
 
 	TableConvertor rest.TableConvertor
 
-	// PublishedNames turns this into a read-only view of a fixed set of the
-	// platform's OWN cluster-scoped objects, served to every tenant under their
-	// real names. Nil means the ordinary tenant proxy. See
-	// pkg/proxy/publicclass.go.
-	PublishedNames []string
+	// PublishedClasses turns this into a read-only view of the platform's OWN
+	// cluster-scoped objects, served to every tenant under their real names and
+	// narrowed to the ones the platform publishes. Nil means the ordinary tenant
+	// proxy. See pkg/proxy/publicclass.go and pkg/publishedclass.
+	PublishedClasses publishedclass.Set
 
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL

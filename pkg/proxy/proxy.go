@@ -163,8 +163,8 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 	// Some cluster-scoped resources are the platform's, not the tenant's: they
 	// are published read-only under their real names so a tenant can discover
 	// what it may reference. See publicclass.go.
-	if config.PublishedNames != nil {
-		return NewPublicClassStorage(config, config.PublishedNames)
+	if config.PublishedClasses != nil {
+		return NewPublicClassStorage(config, config.PublishedClasses)
 	}
 
 	if config.NewFunc == nil && config.NewListFunc == nil {

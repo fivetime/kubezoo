@@ -48,9 +48,37 @@ ClusterRole 时断言它,写对象的动词仍来自租户自己的角色,所以
 但**任何持有它、同时又能 create clusterroles 的身份,可以写出任意内容的 ClusterRole**。
 和上面一样:发给租户的凭据不得携带任何 `kubezoo:` 开头的组。
 
-⚠️ 还有一个**不在策略里、在 kubezoo 启动参数上**的:
-`--public-ingress-classes=<平台的 IngressClass>`。**不设的话租户完全无法接入公网**
-(所有 class 都会被前缀化成租户私有的);设错则等于把公网入口的名字告诉错人。
+⚠️ 还有一个**不在策略里、在对象的标签上**的:平台自己的 IngressClass / StorageClass
+默认对租户**完全不存在**。要让租户能用,给对象打标签:
+
+```bash
+kubectl label ingressclass nginx    ingressclass.kubezoo.io/published=true
+kubectl label storageclass fast-ssd storageclass.kubezoo.io/published=true
+```
+
+- **不打的话租户完全无法接入公网**(所有 class 都会被前缀化成租户私有的),
+  StorageClass 那边则是 `kubectl get storageclass` 空空如也 —— 引用其实是通的
+  (`spec.storageClassName` 原样透传),但租户**没法知道有哪些名字可用**。
+- 打错则等于把公网入口的名字告诉错人。
+- **标签即时生效,不用重启网关。** 这点是承重的:网关是单副本 StatefulSet,
+  重启一次 = 所有租户的 API 中断 + 所有租户 operator 的 watch 断掉,
+  只为了改一行配置。老的 `--public-ingress-classes` / `--public-storage-classes`
+  两个 flag 仍然生效(与标签取**并集**,升级不会突然什么都看不见),但它们只能靠
+  重启修改,而且**拼错是完全静默的** —— 名字就是不出现,没有报错也没有日志。
+
+**三态**,不是开关:
+
+| 标签 | 租户看得见 | 能否新建引用 |
+|---|---|---|
+| 无标签 | ❌ | (看不见) |
+| `=true` | ✅ | ✅ |
+| `=deprecated` | ✅ | ❌ 计划中(第二步) |
+
+⭐ **`deprecated` 而不是直接摘标签**,是因为**摘标签必须是安全、可逆的动作**:
+已绑定 PVC 的 `spec.storageClassName` 是不可变字段,租户连自己的 manifest 都改不了。
+下线一个存储类要给租户留出迁移窗口,而不是让某个 StatefulSet 扩容时突然失败。
+反过来说:**摘掉标签不会动任何已存在的对象** —— 已有 PVC 照常供给,发布只是"能不能
+发现",不是授权。
 
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,

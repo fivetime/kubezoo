@@ -17,6 +17,7 @@ limitations under the License.
 package convert
 
 import (
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,7 +50,7 @@ func classOf(t *testing.T, obj interface{}) string {
 // the two never meet and a controller the tenant runs never matches its own
 // Ingresses.
 func TestTenantClassIsPrefixedBothWays(t *testing.T) {
-	transformer := NewIngressTransformer(nil)
+	transformer := NewIngressTransformer(publishedclass.Static("ingressclass", nil))
 
 	forward, err := transformer.Forward(ingressWithClass("internal", ""), "111111")
 	if err != nil {
@@ -72,7 +73,7 @@ func TestTenantClassIsPrefixedBothWays(t *testing.T) {
 // platform's controller is the only thing wired to the outside, so naming it
 // must reach it unchanged.
 func TestPublicClassPassesThrough(t *testing.T) {
-	transformer := NewIngressTransformer([]string{"octavia"})
+	transformer := NewIngressTransformer(publishedclass.Static("ingressclass", []string{"octavia"}))
 
 	forward, err := transformer.Forward(ingressWithClass("octavia", ""), "111111")
 	if err != nil {
@@ -94,7 +95,7 @@ func TestPublicClassPassesThrough(t *testing.T) {
 // upstream class used to be harmless only because no controller happened to be
 // watching for it. Prefixed, it cannot name anything that exists.
 func TestBorrowingAnotherTenantsClassMatchesNothing(t *testing.T) {
-	transformer := NewIngressTransformer([]string{"octavia"})
+	transformer := NewIngressTransformer(publishedclass.Static("ingressclass", []string{"octavia"}))
 
 	forward, err := transformer.Forward(ingressWithClass("222222-nginx", ""), "111111")
 	if err != nil {
@@ -108,7 +109,7 @@ func TestBorrowingAnotherTenantsClassMatchesNothing(t *testing.T) {
 // TestDeprecatedAnnotationIsRewrittenToo -- most controllers still honour it and
 // it wins over the field, so rewriting only the field leaves a way round.
 func TestDeprecatedAnnotationIsRewrittenToo(t *testing.T) {
-	transformer := NewIngressTransformer([]string{"octavia"})
+	transformer := NewIngressTransformer(publishedclass.Static("ingressclass", []string{"octavia"}))
 
 	forward, err := transformer.Forward(ingressWithClass("", "nginx"), "111111")
 	if err != nil {

@@ -132,6 +132,12 @@ echo "upstream SA issuer: $UPSTREAM_SA_ISSUER"
 pkill -f _output/local/bin/linux/amd64/kubezoo || true
 sleep 1
 PKI=$ZOO/_output/pki
+# ⭐ Note the asymmetry below, and do not tidy it away: ingress classes are
+# published here by --public-ingress-classes, storage classes by labelling the
+# object (verify.sh does the labelling). One lab run therefore exercises BOTH
+# halves of the union. Making the two consistent would silently drop coverage of
+# whichever one lost -- and the flag half is what keeps an upgrade from
+# un-publishing everything an operator already relies on.
 nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --allow-privileged=true --apiserver-count=1 --cors-allowed-origins='.*' --delete-collection-workers=1 \
   --etcd-prefix=/zoo --etcd-servers=http://127.0.0.1:2379 --event-ttl=1h0m0s \
@@ -146,7 +152,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=true \
   --api-audiences=$UPSTREAM_SA_ISSUER \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
-  --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-standard} \
+  --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-} \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do

@@ -17,13 +17,13 @@ limitations under the License.
 package convert
 
 import (
-	"strings"
-
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	internal "k8s.io/kubernetes/pkg/apis/networking"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
+
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
 // deprecatedIngressClassAnnotation still decides which controller serves an
@@ -53,21 +53,21 @@ const deprecatedIngressClassAnnotation = "kubernetes.io/ingress.class"
 // useless: 222222-nginx becomes 111111-222222-nginx and matches nothing. It used
 // to be harmless only because no controller happened to be watching for it.
 type IngressTransformer struct {
-	publicClasses map[string]bool
+	published publishedclass.Set
 }
 
 var _ ObjectTransformer = &IngressTransformer{}
 
 // NewIngressTransformer initiates an IngressTransformer which implements the
 // ObjectTransformer interfaces.
-func NewIngressTransformer(publicClasses []string) ObjectTransformer {
-	allowed := make(map[string]bool, len(publicClasses))
-	for _, name := range publicClasses {
-		if trimmed := strings.TrimSpace(name); trimmed != "" {
-			allowed[trimmed] = true
-		}
+func NewIngressTransformer(published publishedclass.Set) ObjectTransformer {
+	if published == nil {
+		// Publishing nothing is a real answer, and the same default the storage
+		// side takes. A nil here would otherwise be a panic on the first Ingress
+		// a tenant writes, which is a poor way to learn about a wiring mistake.
+		published = publishedclass.Static("ingressclass", nil)
 	}
-	return &IngressTransformer{publicClasses: allowed}
+	return &IngressTransformer{published: published}
 }
 
 // Forward transforms tenant object reference to upstream object reference.
@@ -104,7 +104,7 @@ func (t *IngressTransformer) Backward(obj runtime.Object, tenantID string) (runt
 
 // toUpstream prefixes a class name unless it is one the platform publishes.
 func (t *IngressTransformer) toUpstream(tenantID, class string) string {
-	if t.publicClasses[class] {
+	if t.published.Visible(class) {
 		return class
 	}
 	return util.AddTenantIDPrefix(tenantID, class)
@@ -117,7 +117,7 @@ func (t *IngressTransformer) toUpstream(tenantID, class string) string {
 // alone rather than rejected: it can only have got there from outside kubezoo,
 // and refusing to read the object would hide it from the tenant entirely.
 func (t *IngressTransformer) toTenant(tenantID, class string) string {
-	if t.publicClasses[class] {
+	if t.published.Visible(class) {
 		return class
 	}
 	return util.TrimTenantIDPrefix(tenantID, class)

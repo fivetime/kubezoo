@@ -35,6 +35,7 @@ import (
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
 // publicClassStorage serves a fixed set of the platform's own cluster-scoped
@@ -73,10 +74,11 @@ type publicClassStorage struct {
 	convertor      apiconfig.GroupVersionKindFunc
 
 	dynamicClient kubezoodynamic.Interface
-	// allowed is the set of names the platform publishes. Empty means the
-	// resource is served but nothing is visible, which is the safe default: an
-	// operator who has not chosen classes has not published any.
-	allowed map[string]bool
+	// published answers which names the platform offers, read from a label on
+	// the objects themselves so that publishing one needs no restart. Empty
+	// means the resource is served and nothing is visible, which is the safe
+	// default: an operator who has published nothing has offered nothing.
+	published publishedclass.Set
 }
 
 var (
@@ -91,15 +93,12 @@ var (
 
 // NewPublicClassStorage builds the read-only view of a published cluster-scoped
 // resource.
-func NewPublicClassStorage(config apiconfig.StorageConfig, allowed []string) (rest.Storage, error) {
+func NewPublicClassStorage(config apiconfig.StorageConfig, published publishedclass.Set) (rest.Storage, error) {
 	if config.NewFunc == nil || config.NewListFunc == nil {
 		return nil, fmt.Errorf("a published class needs both NewFunc and NewListFunc")
 	}
-	names := make(map[string]bool, len(allowed))
-	for _, name := range allowed {
-		if name != "" {
-			names[name] = true
-		}
+	if published == nil {
+		return nil, fmt.Errorf("a published class needs a set of published names")
 	}
 	return &publicClassStorage{
 		kind:           config.Kind,
@@ -110,7 +109,7 @@ func NewPublicClassStorage(config apiconfig.StorageConfig, allowed []string) (re
 		tableConvertor: config.TableConvertor,
 		convertor:      config.GroupVersionKindFunc,
 		dynamicClient:  config.DynamicClient,
-		allowed:        names,
+		published:      published,
 	}, nil
 }
 
@@ -153,7 +152,7 @@ func (s *publicClassStorage) client() kubezoodynamic.ResourceInterface {
 func (s *publicClassStorage) Get(ctx context.Context, name string,
 	options *metav1.GetOptions) (runtime.Object, error) {
 
-	if !s.allowed[name] {
+	if !s.published.Visible(name) {
 		return nil, apierrors.NewNotFound(s.groupResource(), name)
 	}
 	// Still impersonated as the tenant, so upstream RBAC applies as well as the
@@ -177,8 +176,9 @@ func (s *publicClassStorage) List(ctx context.Context,
 	// token over the whole cluster's range is exactly the leak
 	// clusterscopedcursor.go exists to stop. Each name is read individually.
 	out := s.newListFunc()
-	items := make([]unstructured.Unstructured, 0, len(s.allowed))
-	for name := range s.allowed {
+	names := s.published.Names()
+	items := make([]unstructured.Unstructured, 0, len(names))
+	for _, name := range names {
 		got, err := s.client().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -217,10 +217,24 @@ func (s *publicClassStorage) List(ctx context.Context,
 //
 // A real watch would have to be filtered, and a filtered watch hands the client
 // a revision it cannot safely resume from -- the problem watchmux.go documents
-// at length for the namespace fan-out. The published set changes when an
-// operator edits a flag and restarts, not while a client is watching, so a
-// client that lists and then watches sees the truth and simply never sees an
-// event. An informer over this stays correct; it just never has anything to do.
+// at length for the namespace fan-out.
+//
+// ⚠️ So this stream never reports a change. The published set CAN change while a
+// client is watching -- that is the entire point of publishing by label rather
+// than by a startup flag -- and this will not tell anyone. What bounds the
+// staleness is the request timeout, not anything here: the generic apiserver
+// wraps a watch in context.WithTimeout(opts.TimeoutSeconds) and client-go's
+// reflector always sets that field, randomised in [5min, 10min]. The watch is
+// therefore torn down and the informer re-lists, picking up the change. A client
+// that watches with no timeout at all does so against --min-request-timeout,
+// which the same code path applies.
+//
+// Eventually consistent within one watch timeout is the honest description, and
+// it is enough for what this serves: a tenant reads a class name to put in a PVC.
+// It is NOT enough for anything that must react to a class being retired the
+// moment it is retired, so nothing does -- refusing a new reference to a retired
+// class is decided on the write path, against this same Set, at the time of the
+// write.
 func (s *publicClassStorage) Watch(ctx context.Context,
 	options *metainternalversion.ListOptions) (watch.Interface, error) {
 
@@ -228,7 +242,7 @@ func (s *publicClassStorage) Watch(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	events := make(chan watch.Event, len(s.allowed)+1)
+	events := make(chan watch.Event, len(s.published.Names())+1)
 	if options == nil || options.ResourceVersion == "" || options.ResourceVersion == "0" {
 		// Only a watch that did not come from a list replays the set; one that
 		// resumes from a revision has already been told.

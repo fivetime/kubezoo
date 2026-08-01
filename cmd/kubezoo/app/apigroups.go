@@ -949,8 +949,10 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 		storagev1.GroupName,
 		map[string]map[string]*apiconfig.StorageConfig{
 			"v1": {
-				// ⭐ Read-only, and only the names --public-storage-classes
-				// publishes. A StorageClass is the PLATFORM's object: a tenant
+				// ⭐ Read-only, and only the classes the platform published --
+				// which it does by labelling them, so that offering one more does
+				// not mean restarting the gateway and interrupting every tenant.
+				// A StorageClass is the PLATFORM's object: a tenant
 				// already references one successfully -- pkg/convert/pvc.go passes
 				// spec.storageClassName through untranslated -- but before this it
 				// had no way to discover which names exist, because this whole
