@@ -189,14 +189,14 @@ func TestPublishedClassesAreReadOnly(t *testing.T) {
 	}
 }
 
-// TestRefuseRetiredStorageClass pins the three answers the guard has to give.
+// TestRefuseUnpublishedStorageClass pins the answers the guard has to give.
 //
-// The interesting one is the middle: an UNPUBLISHED class is still accepted.
-// Publication is discovery, not authorization, so removing a label has to stay a
-// safe and reversible act -- otherwise an operator tidying up would be what makes
-// some tenant's StatefulSet stop scaling, and a bound PVC's storageClassName is
-// immutable, so the tenant could not repair its own manifest.
-func TestRefuseRetiredStorageClass(t *testing.T) {
+// ⭐ An unpublished class is REFUSED. That is a deliberate reversal: publication
+// used to be discovery only, so a tenant that learned a platform-internal class
+// name out of band could still provision on it. The cost, accepted knowingly, is
+// that removing a label now stops new claims at once -- see the comment on
+// refuseUnpublishedStorageClass and the inventory step in docs/operations-cn.md.
+func TestRefuseUnpublishedStorageClass(t *testing.T) {
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	for name, value := range map[string]string{
 		"fast-ssd":        common.PublishedTrue,
@@ -227,24 +227,23 @@ func TestRefuseRetiredStorageClass(t *testing.T) {
 	}{
 		{"a published class", claim(name("fast-ssd")), false},
 		{"a retired class", claim(name("legacy-spinning")), true},
-		{"a class the platform never published", claim(name("platform-internal")), false},
+		{"a class the platform never published", claim(name("platform-internal")), true},
 		// Empty is not "names no class": it is a request for the default class,
 		// which the setdefault admission plugin fills in upstream. Refusing it
 		// would refuse most PVCs ever written.
 		//
-		// ⚠️ These two pin behaviour, not the line of code that implements it:
-		// the implementation gets them right for free today, because Retired("")
-		// is false anyway, and deleting its explicit empty check leaves both
-		// passing. They earn their keep on the edit that swaps Retired for
-		// !Visible, which would otherwise start refusing every PVC that does not
-		// name a class -- see the comment on refuseRetiredStorageClass.
+		// ⚠️ These two now guard the single line that keeps the check from
+		// refusing MOST PVCs ever written: Visible("") is false, so without the
+		// explicit empty short-circuit every claim leaving the class to the
+		// default would be turned away. They were vacuous while the check only
+		// looked at Retired; deleting that line now turns them red.
 		{"the default class, named by omission", claim(name("")), false},
 		{"the default class, named by a nil pointer", claim(nil), false},
 		// The guard runs on every create the proxy serves, so it has to be inert
 		// for everything that is not a claim.
 		{"something that is not a claim at all", &core.ConfigMap{}, false},
 	} {
-		err := proxy.refuseRetiredStorageClass(tc.object)
+		err := proxy.refuseUnpublishedStorageClass(tc.object)
 		if tc.refused && err == nil {
 			t.Errorf("%s: accepted, want refused", tc.what)
 		}
@@ -263,12 +262,49 @@ func TestRefuseRetiredStorageClass(t *testing.T) {
 	}
 }
 
+// TestUnsyncedCacheAsksForARetry pins the startup window this reversal opened.
+//
+// ⚠️ Before the informer fills, the store is legitimately empty, and empty reads
+// exactly like "the platform published nothing" -- so a naive check refuses every
+// claim for the first seconds after each restart. The readiness gate keeps
+// /readyz red until the informers sync, but a single-replica StatefulSet has
+// nothing draining traffic away from it in the meantime.
+//
+// Unavailable rather than Invalid, and rather than letting the claim through: the
+// tenant retries, which clients do; an operator can tell it from a real refusal;
+// and the boundary does not open for the one window an attacker can arrange.
+func TestUnsyncedCacheAsksForARetry(t *testing.T) {
+	proxy := &tenantProxy{publishedStorageClasses: publishedclass.New("storageclass",
+		common.StorageClassPublishedLabelKey, cache.NewStore(cache.MetaNamespaceKeyFunc),
+		func() bool { return false }, nil)}
+
+	class := "fast-ssd"
+	err := proxy.refuseUnpublishedStorageClass(&core.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		Spec:       core.PersistentVolumeClaimSpec{StorageClassName: &class},
+	})
+	if err == nil {
+		t.Fatal("a claim was accepted while the published set was still unknown")
+	}
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Errorf("refused with %v, want ServiceUnavailable so the client retries", err)
+	}
+
+	// A claim that names no class does not depend on the cache and must not be
+	// held up by it: it asks for the default, which the platform chose.
+	if err := proxy.refuseUnpublishedStorageClass(&core.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+	}); err != nil {
+		t.Errorf("a claim asking for the default class was held up by the cache: %v", err)
+	}
+}
+
 // TestRetiredCheckIsInertWithoutASet -- every other resource's proxy leaves the
 // field nil, and must not pay for or be affected by this.
 func TestRetiredCheckIsInertWithoutASet(t *testing.T) {
 	proxy := &tenantProxy{}
 	class := "legacy-spinning"
-	if err := proxy.refuseRetiredStorageClass(&core.PersistentVolumeClaim{
+	if err := proxy.refuseUnpublishedStorageClass(&core.PersistentVolumeClaim{
 		Spec: core.PersistentVolumeClaimSpec{StorageClassName: &class},
 	}); err != nil {
 		t.Errorf("a proxy with no published set refused a claim: %v", err)

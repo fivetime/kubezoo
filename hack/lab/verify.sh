@@ -1739,9 +1739,34 @@ else
 fi
 $T delete pvc "sc-default-$$" >/dev/null 2>&1
 
-# ⚠️ Unpublishing must not break anything a tenant already has. Publishing is
-# discovery, not authorization -- see the flag help. The PVC written above keeps
-# its class and upstream keeps provisioning it.
+# ⭐ And a class the platform never published is refused outright, not merely
+# hidden. Before this, spec.storageClassName passed through unvalidated: a tenant
+# that learned "platform-internal" out of band could provision on it while
+# `kubectl get storageclass` swore it did not exist. Publication is authorization
+# now, not only discovery.
+unpub=$($T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: sc-unpub-$$}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: platform-internal
+  resources: {requests: {storage: 1Mi}}
+EOF
+)
+if grep -q "no storage class" <<<"$unpub"; then
+  ok "a claim on a class the platform never published is refused, not just hidden"
+else
+  bad "a claim on an unpublished class is refused" \
+      "got: $(tr '\n' ' ' <<<"$unpub" | cut -c1-160)"
+fi
+$T delete pvc "sc-unpub-$$" >/dev/null 2>&1
+
+# ⚠️ Unpublishing stops NEW claims -- publication is authorization now -- but must
+# not disturb anything a tenant already has. The PVC written above keeps its class
+# and upstream keeps provisioning it, which is why withdrawing a class is still
+# survivable for the tenants already on it, and why "deprecated" exists to give
+# them warning before it happens.
 $K label storageclass standard storageclass.kubezoo.io/published- >/dev/null 2>&1
 for _ in $(seq 20); do
   [ "$($T get storageclass --no-headers 2>/dev/null | wc -l)" = 0 ] && break

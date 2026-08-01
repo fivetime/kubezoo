@@ -41,12 +41,20 @@ import (
 // deployed, a misspelling is impossible because the object has to exist to carry
 // it, and two replicas cannot disagree.
 type Set interface {
-	// Visible reports whether a tenant may see this class at all.
-	Visible(name string) bool
-	// Retired reports whether the class is published but on the way out.
-	// Visible stays true for these.
+	// Visible reports whether a tenant may see this class -- and, for storage
+	// classes, whether it may name one in a new PersistentVolumeClaim. Those are
+	// the same answer on purpose: publication is authorization, not only
+	// discovery, so a name learned out of band buys nothing.
 	//
-	// ⚠️ Read by tenantProxy.refuseRetiredStorageClass on the CREATE path ONLY,
+	// ⚠️ Which makes REMOVING A LABEL a breaking act, where it used to be a safe
+	// and reversible one. See tenantProxy.refuseUnpublishedStorageClass.
+	Visible(name string) bool
+	// Retired reports whether the class is published but on the way out. Visible
+	// stays true for these, which is the whole difference from removing the
+	// label: both stop new claims, and only this one leaves the tenant able to
+	// see the class and understand why its own claim references it.
+	//
+	// ⚠️ Read by tenantProxy.refuseUnpublishedStorageClass on the CREATE path ONLY,
 	// and that restriction is load-bearing. A PVC's spec.storageClassName is
 	// immutable once bound, so a tenant cannot edit its way off a retired class;
 	// checking on update would make every later write to an existing claim fail,

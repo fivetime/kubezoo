@@ -66,28 +66,50 @@ kubectl label storageclass fast-ssd storageclass.kubezoo.io/published=true
   两个 flag 仍然生效(与标签取**并集**,升级不会突然什么都看不见),但它们只能靠
   重启修改,而且**拼错是完全静默的** —— 名字就是不出现,没有报错也没有日志。
 
+⛔ **升级前必做:先盘点,再升级。** 发布现在是**授权**,不只是能否发现 ——
+**未打标签的存储类,租户建不了新 PVC**。升级前没把在用的类打上标签,存量租户会当场
+建不了 PVC(已有的 PVC 不受影响,照常供给)。
+
+```bash
+# 盘点:全集群 PVC 实际在用哪些存储类
+kubectl get pvc -A -o jsonpath='{range .items[*]}{.spec.storageClassName}{"\n"}{end}' \
+  | grep -v '^$' | sort -u
+# 把上面每一个都打上标签,然后再升级
+```
+
 **三态**,不是开关:
 
-| 标签 | 租户看得见 | 能否新建引用 |
+| 标签 | 租户看得见 | 能否新建 PVC |
 |---|---|---|
-| 无标签 | ❌ | ✅(见下) |
+| 无标签 | ❌ | ❌ |
 | `=true` | ✅ | ✅ |
-| `=deprecated` | ✅ | ❌ 新建 PVC 被拒 |
+| `=deprecated` | ✅ | ❌(但看得见,知道为什么) |
 
-⚠️ **"无标签"那一行的"能新建"不是笔误。** 发布只管**能不能发现**,不管**能不能用** ——
-`spec.storageClassName` 一直是原样透传的,租户只要知道名字就能引用。摘标签因此是安全可逆的
-(这正是要有 `deprecated` 的原因),但也意味着**它不是隔离边界**:一个从带外渠道知道
-`platform-internal` 这个名字的租户,现在仍然能用它建 PVC。
+⭐ 留空 `storageClassName` **永远不会被拒** —— 那是在要默认存储类,由上游的 `setdefault`
+准入插件填,而默认类是平台自己选的。大多数 PVC 都不写类名,拒掉它们等于全线停摆。
 
-要不要把"只暴露"升级成"只允许"(即拒绝一切未发布的类),是一个单独的决定,**没有做**:
-它会在升级那一刻打断所有正在用未打标签存储类的租户,所以必须先盘点存量引用、把在用的类
-全部打上标签,才谈得上开启。
+⛔ **由此带来一个必须知道的空隙:`setdefault` 跑在 kubezoo 之后。** 所以留空的 PVC 会落到
+带 `storageclass.kubernetes.io/is-default-class` 注解的那个类上 —— **不管它有没有发布、
+是不是 `deprecated`**。要下线默认存储类,**光打 `deprecated` 标签不够,必须同时把 default
+注解摘掉**,否则新 PVC 照样源源不断落上去:
 
-⭐ **`deprecated` 而不是直接摘标签**,是因为**摘标签必须是安全、可逆的动作**:
-已绑定 PVC 的 `spec.storageClassName` 是不可变字段,租户连自己的 manifest 都改不了。
-下线一个存储类要给租户留出迁移窗口,而不是让某个 StatefulSet 扩容时突然失败。
-反过来说:**摘掉标签不会动任何已存在的对象** —— 已有 PVC 照常供给,发布只是"能不能
-发现",不是授权。
+```bash
+kubectl label      storageclass old-default storageclass.kubezoo.io/published=deprecated --overwrite
+kubectl annotate   storageclass old-default storageclass.kubernetes.io/is-default-class-       # 别忘了这条
+kubectl annotate   storageclass new-default storageclass.kubernetes.io/is-default-class=true
+```
+
+⭐ **`deprecated` 而不是直接摘标签**:两者都会拦住新 PVC,区别在于 `deprecated`
+**仍然可见**,租户能看到这个类存在、正在下线,从而解释自己已有的 PVC 为什么引用它;
+摘标签则是直接消失。已绑定 PVC 的 `spec.storageClassName` 是不可变字段,租户连自己的
+manifest 都改不了,所以下线一个存储类必须给迁移窗口,而不是让某个 StatefulSet 扩容时
+突然失败。**两种情况下已存在的对象都不受影响。**
+
+⚠️ **摘标签不再是安全可逆的动作**了(以前是)。手滑摘掉一个在用的类 = 该类的新 PVC 立刻
+全拒。要下线走 `deprecated`,不要直接摘。
+
+⚠️ IngressClass 这边**不需要**同样的拦截:未发布的 ingress class 不是被拒,而是被
+**前缀化进租户自己的名字空间**,只能由租户自己跑的控制器来服务 —— 机制不同,本来就是安全的。
 
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,

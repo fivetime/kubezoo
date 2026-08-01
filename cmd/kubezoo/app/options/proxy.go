@@ -69,9 +69,11 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"effect without a restart; this flag is unioned with those and kept so that an upgrade does not "+
 			"silently un-publish anything.")
 	fs.StringSliceVar(&o.PublicStorageClasses, "public-storage-classes", o.PublicStorageClasses,
-		"StorageClass names published to every tenant, read-only and under their real names, so that a "+
-			"tenant can discover what it may put in a PersistentVolumeClaim's storageClassName. The "+
-			"reference already works without this; what it adds is the ability to find out. "+
+		"StorageClass names offered to every tenant: visible read-only under their real names, and the "+
+			"only ones a tenant may name in a PersistentVolumeClaim. A claim on anything else is refused, "+
+			"so publishing is authorization and not merely discovery -- and so an upgrade must label every "+
+			"class already in use BEFORE it lands, or existing tenants stop being able to create claims. "+
+			"Leaving storageClassName unset still asks for the cluster default and is never refused. "+
 			"Prefer labelling the StorageClass "+common.StorageClassPublishedLabelKey+"=true, which takes "+
 			"effect without a restart -- this flag can only be changed by restarting the gateway, which "+
 			"interrupts every tenant's API access, and a name misspelled here fails silently. Labelling it "+

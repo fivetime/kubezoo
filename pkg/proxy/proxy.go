@@ -583,7 +583,7 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// Before forwardApply, so that a server-side apply is refused too -- that is
 	// the path `kubectl apply --server-side` takes for an object that does not
 	// exist yet, and it is the common way PVCs get created.
-	if err := tp.refuseRetiredStorageClass(obj); err != nil {
+	if err := tp.refuseUnpublishedStorageClass(obj); err != nil {
 		return nil, err
 	}
 
@@ -899,30 +899,35 @@ func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID, req
 //
 // Scoped to RBAC. A tenant may perfectly well have a PersistentVolume called
 // admin; it is the roles kubezoo binds that must stay its own.
-// refuseRetiredStorageClass refuses a create that would newly reference a storage
-// class the platform has labelled as going away.
+// refuseUnpublishedStorageClass refuses a create that would reference a storage
+// class the platform is not offering.
 //
 // ⚠️ CREATE ONLY, and that is load-bearing rather than an omission. A bound PVC's
 // spec.storageClassName is immutable, so a tenant cannot repair its own manifest
-// once the class is retired. Checking on update would therefore fail every later
-// write to a PVC that already names it -- including a GitOps controller
-// reapplying a manifest it has not changed, which would turn retiring a class
+// once a class stops being offered. Checking on update would therefore fail every
+// later write to a PVC that already names it -- including a GitOps controller
+// reapplying a manifest it has not changed, which would turn withdrawing a class
 // into a reconcile loop the tenant has no way out of. Every create path funnels
 // through tenantProxy.Create: a POST arrives there directly, and a server-side
 // apply of an object that does not exist arrives via guaranteedUpdate, which
 // hands the missing case to Create rather than sending it as an update.
 //
-// This refuses only a RETIRED class, not an unpublished one. Publication is
-// discovery, not authorization -- pkg/publishedclass says so and hack/lab
-// asserts it -- so removing a label stays a safe, reversible act: an operator
-// tidying up, or fixing a typo, must not be what makes a tenant's StatefulSet
-// fail to scale.
+// ⭐ Publication is now authorization, not only discovery. It used to be only
+// discovery -- a tenant that learned a platform-internal class name out of band
+// could still provision on it -- and closing that is the point of this. The cost
+// is that REMOVING A LABEL IS NO LONGER A SAFE, REVERSIBLE ACT: an operator
+// tidying up, or fixing a typo, stops new claims on that class at once. That is
+// why "deprecated" exists and why docs/operations-cn.md leads with the inventory
+// step. Objects that already exist are untouched either way; only new claims are
+// refused.
 //
 // PersistentVolume is deliberately not covered. Its storageClassName declares
 // which class a volume already satisfies rather than asking for one to be
 // provisioned, so refusing it would block a tenant from statically providing
-// storage without protecting anything.
-func (tp *tenantProxy) refuseRetiredStorageClass(obj runtime.Object) error {
+// storage without protecting anything. IngressClass needs nothing here either:
+// an unpublished ingress class is not refused but PREFIXED into the tenant's own
+// namespace of names, so it can only be served by a controller the tenant runs.
+func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 	if tp.publishedStorageClasses == nil {
 		return nil
 	}
@@ -931,31 +936,60 @@ func (tp *tenantProxy) refuseRetiredStorageClass(obj runtime.Object) error {
 		return nil
 	}
 	// Empty is not "names no class": it means the default class, which the
-	// setdefault admission plugin fills in upstream.
+	// setdefault admission plugin fills in upstream, and which the platform chose.
 	//
-	// ⚠️ Redundant TODAY and kept deliberately. Retired("") is already false --
-	// nothing in the store is named "" -- so removing this line changes nothing
-	// right now, and a mutation test confirms that it does not. It is here for
-	// the edit that is obviously next: turning this guard from "refuse a retired
-	// class" into "refuse anything unpublished" means swapping Retired(name) for
-	// !Visible(name), and Visible("") is false, so that one-word change would
-	// start refusing every PVC that does not name a class explicitly -- which is
-	// most of them ever written.
+	// ⚠️ This line is what stops the check refusing MOST PVCs ever written --
+	// Visible("") is false, so without it every claim that leaves the class to the
+	// default would be turned away. It was already here, deliberately redundant,
+	// while the check only looked at Retired(); it is load-bearing now.
+	//
+	// ⛔ And it is a hole by construction, which is worth stating rather than
+	// papering over: setdefault runs UPSTREAM, after this, so a claim that names
+	// no class reaches whichever class carries
+	// storageclass.kubernetes.io/is-default-class -- published or not, retired or
+	// not. Retiring the default class therefore requires clearing that annotation
+	// too; the label alone does not stop new claims landing on it. Closing this
+	// here would mean refusing empty, which refuses most claims ever written.
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
 		return nil
 	}
 	name := *pvc.Spec.StorageClassName
-	if !tp.publishedStorageClasses.Retired(name) {
-		return nil
+	// ⚠️ Before the cache has filled, the store is legitimately empty, and empty
+	// is indistinguishable from "the platform published nothing" -- so answering
+	// from it would refuse every claim for the first seconds after each restart.
+	// Not a hypothetical: the readiness gate keeps /readyz red until the informers
+	// sync, but a single-replica StatefulSet has nothing draining traffic away
+	// from it in the meantime.
+	//
+	// Answered as Unavailable rather than Invalid, and rather than letting the
+	// claim through. A tenant sees "retry", which clients do; an operator can tell
+	// it apart from a real refusal; and the boundary does not open for the first
+	// seconds after every restart, which is the one window an attacker can arrange.
+	if !tp.publishedStorageClasses.HasSynced() {
+		return apierrors.NewServiceUnavailable(
+			"the list of available storage classes is still loading; retry shortly")
 	}
-	return apierrors.NewInvalid(
-		schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}, pvc.Name,
-		field.ErrorList{field.Invalid(
-			field.NewPath("spec", "storageClassName"), name,
-			fmt.Sprintf("storage class %q is being retired and is not accepting new claims; "+
-				"the ones still available are listed by `kubectl get storageclass`. "+
-				"Claims that already use it keep working -- this refuses only new ones.", name),
-		)})
+	if !tp.publishedStorageClasses.Visible(name) {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}, pvc.Name,
+			field.ErrorList{field.Invalid(
+				field.NewPath("spec", "storageClassName"), name,
+				fmt.Sprintf("no storage class %q is available to you; the ones that are "+
+					"can be listed with `kubectl get storageclass`, and leaving this field "+
+					"unset asks for the default one.", name),
+			)})
+	}
+	if tp.publishedStorageClasses.Retired(name) {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}, pvc.Name,
+			field.ErrorList{field.Invalid(
+				field.NewPath("spec", "storageClassName"), name,
+				fmt.Sprintf("storage class %q is being retired and is not accepting new claims; "+
+					"the ones still available are listed by `kubectl get storageclass`. "+
+					"Claims that already use it keep working -- this refuses only new ones.", name),
+			)})
+	}
+	return nil
 }
 
 func (tp *tenantProxy) refuseReservedName(tenantID, upstreamName string) error {
