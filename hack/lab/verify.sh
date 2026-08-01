@@ -927,6 +927,38 @@ else
   bad "the two names reach the same objects" \
       "upstream name gave $($T -n "$NS" get configmaps --no-headers 2>/dev/null | wc -l), tenant name gave $($T -n default get configmaps --no-headers 2>/dev/null | wc -l)"
 fi
+# ⭐ Writes too, not only reads. This used to be reads only, and the write half
+# was broken the whole time: kubezoo answered such a request with the object
+# relabelled "default", and rest.EnsureObjectNamespaceMatchesRequestNamespace --
+# which runs above kubezoo's storage, in the generic patch handler -- compared
+# that against the upstream name on the URL and refused with a BadRequest saying
+# nothing about namespaces being rewritten.
+#
+# ⚠️ It broke by client, which is why nothing noticed: `kubectl apply` survived
+# because its computed patch happened to carry metadata.namespace and overwrote
+# the answer, while `kubectl patch` and controller-runtime's MergeFrom omit an
+# unchanged namespace and did not. So an in-cluster controller -- which reads its
+# namespace from the projected service account file, where kubelet writes the
+# upstream name -- could list and create but not patch.
+$T create configmap nsverb --from-literal=a=1 >/dev/null 2>&1
+if $T -n "$NS" patch configmap nsverb -p '{"data":{"b":"2"}}' >/dev/null 2>&1; then
+  ok "and can be patched by that name, which is what an in-cluster controller does"
+else
+  bad "a patch by the upstream namespace name" \
+      "$($T -n "$NS" patch configmap nsverb -p '{"data":{"c":"3"}}' 2>&1 | tr '\n' ' ' | cut -c1-160)"
+fi
+# The object has to come back wearing the name that was asked for, or the client
+# writes it straight back and gets the same refusal.
+echoed=$($T -n "$NS" get configmap nsverb -o jsonpath='{.metadata.namespace}' 2>/dev/null)
+own=$($T get configmap nsverb -o jsonpath='{.metadata.namespace}' 2>/dev/null)
+if [ "$echoed" = "$NS" ] && [ "$own" = default ]; then
+  ok "and each name is answered in the spelling it was asked in"
+else
+  bad "each name is answered in its own spelling" \
+      "asked '$NS' got '${echoed:-<empty>}'; asked 'default' got '${own:-<empty>}'"
+fi
+$T delete configmap nsverb >/dev/null 2>&1
+
 other_ns=$($T -n 999999-default get configmaps 2>&1)
 if [ $? -ne 0 ]; then
   ok "while another tenant's namespace is still out of reach by either name"

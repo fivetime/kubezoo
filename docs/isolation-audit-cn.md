@@ -2760,6 +2760,7 @@ controller-runtime 的缓存**按对象的 namespace 建索引、按 env 里那�
 | `POD_NAMESPACE` / `WATCH_NAMESPACE` | ✅ 都是 `default`(租户视角) |
 | 同容器里 `spec.nodeName` 的变量、普通 `value` 变量 | ✅ 原样不动 |
 | 用上游名字 `-n 111111-default` 请求 | ✅ 与 `-n default` 返回**同一批对象** |
+| 用上游名字 `patch` / 写回 | ✅ 见下节(**原先是坏的**) |
 | `-n 999999-default` | ⛔ 仍然够不到 |
 | 建 namespace `111111-trap` | ⛔ 拒绝并说明原因 |
 
@@ -2778,11 +2779,40 @@ controller-runtime 的缓存**按对象的 namespace 建索引、按 env 里那�
 
 ⭐ ① 那次最危险:**Pod 正常启动,env 是空的**,没有任何报错。
 
-### ⛔ 还剩一条没做
+### ✅ 补完:第三条 —— 按调用方的方言回话
 
-`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 里仍是上游名字。
-读它的客户端靠 ② 兜底 —— **请求能通**,但对象里的 namespace 与它认为的不一致。
-彻底解决要给每个 namespace 生成一个 ConfigMap 并挂到那个路径上。**未做。**
+`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 里仍是上游名字,策略改不动
+(kubelet 写的)。这里原先记的是"读它的客户端靠 ② 兜底 —— **请求能通**,只是对象里的
+namespace 与它认为的不一致",并设想解法是给每个 namespace 生成 ConfigMap 挂到那个路径上。
+
+⛔ **"请求能通"是错的,已实测推翻**:能通的只有读、建、删和 `apply`;**`kubectl patch`
+和 `kubectl replace` 报 `BadRequest: the namespace of the provided object does not match
+the namespace sent on the request`**。
+
+根因是 ② 只做了一半:进来时两种名字都认,出去时 `ConvertUpstreamObjectToTenantObject`
+一律还原成租户名。而 `rest.EnsureObjectNamespaceMatchesRequestNamespace`
+(k8s `apiserver/pkg/registry/rest/meta.go:66`,由 `handlers/patch.go` 与 `handlers/update.go`
+调用)**跑在 kubezoo 存储之上**,拿"打完 patch 的对象 namespace"和"URL 上的 namespace"对比,
+一个是租户名一个是上游名,必然不等。
+
+⭐ **`apply` 之所以幸存纯属侥幸**:kubectl 算出的 merge patch 里恰好带了 `metadata.namespace`
+(文件里没写、由 `--namespace` 补上,与 live 对象不同),把对象 namespace 覆盖成上游名后就对上了。
+`kubectl patch -p '{"data":...}'` 不碰 namespace,controller-runtime 的 `MergeFrom` 在 namespace
+未变时也不带 ⇒ **能不能写成功取决于客户端有没有碰巧在 patch body 里塞 namespace**。
+这种"看客户端心情"的坏法比整条不通更难查,而它的受害者恰恰是租户自己跑的 controller ——
+**能 list、能 create,不能 patch**。
+
+解法比设想的轻得多,不需要 ConfigMap:**回答时用调用方问的那个名字**
+(`echoRequestNamespace`)。请求指名了某个 namespace 时,把返回对象的 namespace 换回调用方的拼法;
+只在两个名字确实指同一个 namespace 时才换,否则原样(跨 namespace 的 LIST/WATCH 请求
+namespace 为空,自然不动;ClusterRoleBinding 投影会用外层请求的 ctx 驱动内层 RoleBinding 代理,
+那里两者不一致,守卫挡住)。
+
+⚠️ 这个参数是**传进去的、不是从 ctx 里读的**,就是为了让编译器逼每个调用点表态 ——
+八个调用点漏掉一个,这个 bug 就原样回来。
+
+**守卫**:单测 3 个(变异检查:去掉回声 → 红;去掉"同一 namespace"校验 → 红)。
+lab 把这一段从只测 `get` 扩到了写路径,负向对照确认过撤掉修复会红。
 
 ## AY. ✅ 集群级授权分发给租户的 SA —— **只做了结构封闭的那一半**
 

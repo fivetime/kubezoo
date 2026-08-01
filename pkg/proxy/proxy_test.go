@@ -568,7 +568,7 @@ func TestTenantProxyWatch(t *testing.T) {
 	}
 
 	fakeWatcher := watch.NewFake()
-	w, err := newProxyWatch(fakeWatcher, proxy, tenantID)
+	w, err := newProxyWatch(fakeWatcher, proxy, tenantID, "")
 	if err != nil {
 		t.Errorf("failed to new proxy watch")
 	}

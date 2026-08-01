@@ -373,7 +373,7 @@ func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.Get
 	if err := tp.convertUnstructuredToOutput(utd, output); err != nil {
 		return nil, err
 	}
-	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID, tp.requestNamespace(ctx)); err != nil {
 		return nil, err
 	}
 
@@ -491,7 +491,7 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 			return nil, false, util.TrimTenantIDFromError(err, tenantID)
 		}
 		if applied != nil {
-			return tp.finishWrite(applied, tenantID, false)
+			return tp.finishWrite(applied, tenantID, tp.requestNamespace(ctx), false)
 		}
 	}
 	if subresource := tp.subresource; subresource == "" {
@@ -512,7 +512,7 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	}
 
 	// 5. convert got to tenant
-	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID, tp.requestNamespace(ctx)); err != nil {
 		return nil, false, err
 	}
 
@@ -599,7 +599,7 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 			return nil, util.TrimTenantIDFromError(applyErr, tenantID)
 		}
 		if applied != nil {
-			out, _, err := tp.finishWrite(applied, tenantID, true)
+			out, _, err := tp.finishWrite(applied, tenantID, tp.requestNamespace(ctx), true)
 			return out, err
 		}
 	}
@@ -642,7 +642,7 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 
 	// 5. convert the internal object to tenant
-	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID, tp.requestNamespace(ctx)); err != nil {
 		return nil, err
 	}
 
@@ -702,7 +702,7 @@ func (tp *tenantProxy) Delete(ctx context.Context, name string, _ rest.ValidateO
 		return nil, deleted, err
 	}
 
-	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID, tp.requestNamespace(ctx)); err != nil {
 		return nil, deleted, err
 	}
 
@@ -769,7 +769,7 @@ func (tp *tenantProxy) list(ctx context.Context, options *metainternalversion.Li
 			return nil, err
 		}
 		// convert to tenant
-		if err := tp.convertUpstreamObjectToTenantObject(oupObj, tenantID); err != nil {
+		if err := tp.convertUpstreamObjectToTenantObject(oupObj, tenantID, tp.requestNamespace(ctx)); err != nil {
 			return nil, err
 		}
 		// convert it back to unstructured and put it back to the unstructured list
@@ -874,13 +874,13 @@ func (tp *tenantProxy) refuseProjectedLabel(obj *unstructured.Unstructured) erro
 }
 
 // finishWrite turns what upstream returned into what the tenant should see.
-func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID string,
+func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID, requestNamespace string,
 	created bool) (runtime.Object, bool, error) {
 	output := tp.New()
 	if err := tp.convertUnstructuredToOutput(got, output); err != nil {
 		return nil, false, err
 	}
-	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID); err != nil {
+	if err := tp.convertUpstreamObjectToTenantObject(output, tenantID, requestNamespace); err != nil {
 		return nil, false, err
 	}
 	return output, created, nil
@@ -1058,7 +1058,7 @@ func (tp *tenantProxy) DeleteCollection(ctx context.Context, _ rest.ValidateObje
 			return nil, err
 		}
 		// convert to tenant
-		if err := tp.convertUpstreamObjectToTenantObject(oupObj, tenantID); err != nil {
+		if err := tp.convertUpstreamObjectToTenantObject(oupObj, tenantID, tp.requestNamespace(ctx)); err != nil {
 			return nil, err
 		}
 		// convert it back to unstructured and put it back to the unstructured list
@@ -1116,7 +1116,7 @@ func (tp *tenantProxy) Watch(ctx context.Context, options *metainternalversion.L
 			return nil, util.TrimTenantIDFromError(err, tenantID)
 		}
 	}
-	return newProxyWatch(w, tp, tenantID)
+	return newProxyWatch(w, tp, tenantID, tp.requestNamespace(ctx))
 }
 
 // convertTenantObjectToUpstreamObject converts tenant object to upstream object.
@@ -1130,15 +1130,91 @@ func (tp *tenantProxy) convertTenantObjectToUpstreamObject(obj runtime.Object, t
 	return tp.convertor.ConvertTenantObjectToUpstreamObject(obj, tenantID, tp.namespaceScoped)
 }
 
+// requestNamespace returns the namespace exactly as the caller spelled it, which
+// is not always the tenant's own name for it. Empty when the request names none.
+func (tp *tenantProxy) requestNamespace(ctx context.Context) string {
+	if !tp.namespaceScoped {
+		return ""
+	}
+	requestInfo, ok := apirequest.RequestInfoFrom(ctx)
+	if !ok {
+		return ""
+	}
+	return requestInfo.Namespace
+}
+
 // convertUpstreamObjectToTenantObject converts upstream object to tenant object.
-func (tp *tenantProxy) convertUpstreamObjectToTenantObject(obj runtime.Object, tenantID string) error {
+//
+// requestNamespace is the namespace as the CALLER spelled it, and answering in
+// that spelling is the point of the parameter rather than a nicety.
+//
+// ⚠️ A tenant may address a namespace by either name -- its own `default`, or the
+// upstream `<tid>-default` -- and the second is not a curiosity: a workload's
+// client-go reads its namespace out of the projected service account file, which
+// kubelet writes from the upstream apiserver's view, so every in-cluster
+// controller a tenant runs uses the upstream spelling. This used to answer such a
+// request with the object relabelled `default`, and then rest.EnsureObjectNamespace
+// MatchesRequestNamespace -- which runs ABOVE this storage, in the generic patch
+// and update handlers -- compared the two and refused the write with a BadRequest
+// that says nothing about namespaces being rewritten at all.
+//
+// The failure was worse than a plain one because it depended on the client:
+// `kubectl apply` survived by accident, its computed patch happening to carry
+// metadata.namespace and so overwriting the answer, while `kubectl patch` and
+// controller-runtime's MergeFrom -- which omit an unchanged namespace -- did not.
+// Reads, creates and deletes were unaffected throughout, so an in-cluster
+// controller could list and create but not patch.
+//
+// It is passed rather than read from a context here so that the compiler asks
+// every call site what the caller said. Forgetting one is how this comes back.
+func (tp *tenantProxy) convertUpstreamObjectToTenantObject(obj runtime.Object,
+	tenantID, requestNamespace string) error {
 	// if obj is of type unstructured, it should be custom resource, whose apiVersion is prefixed with tenant id
 	// (eg: 888888-stable.example.com), leave trimming of tenant id prefix to custom convertor
 	if _, ok := obj.(*unstructured.Unstructured); !ok {
 		// GVK for internal type object is always empty, set it with the right kind so that we can pick a convertor for it
 		obj.GetObjectKind().SetGroupVersionKind(tp.kind)
 	}
-	return tp.convertor.ConvertUpstreamObjectToTenantObject(obj, tenantID, tp.namespaceScoped)
+	if err := tp.convertor.ConvertUpstreamObjectToTenantObject(obj, tenantID, tp.namespaceScoped); err != nil {
+		return err
+	}
+	echoRequestNamespace(obj, tenantID, requestNamespace)
+	return nil
+}
+
+// echoRequestNamespace puts the namespace back into the spelling the caller used.
+//
+// Returns nothing: every reason to leave the object alone is a legitimate answer
+// rather than a failure, and an error nobody can act on would only invite a
+// caller to abort a request over one of them.
+func echoRequestNamespace(obj runtime.Object, tenantID, requestNamespace string) {
+	if requestNamespace == "" {
+		// A cluster-scoped request, or one spanning every namespace the tenant
+		// owns -- there is no single spelling to answer in, and the objects come
+		// from namespaces the caller never named.
+		return
+	}
+	accessor, err := meta.Accessor(obj)
+	if err != nil {
+		// Lists reach here too, and a list has no namespace of its own to fix.
+		// Its items are converted one at a time by the caller.
+		return
+	}
+	current := accessor.GetNamespace()
+	if current == requestNamespace {
+		return
+	}
+	// Only when the two names denote the SAME namespace. Anything else means the
+	// object did not come from where the caller asked -- the ClusterRoleBinding
+	// projection drives an inner RoleBinding proxy under the outer request's
+	// context, so this really happens -- and stamping the request's namespace onto
+	// it would hide that rather than surface it. This also covers an object
+	// carrying no namespace at all: UpstreamNamespace leaves "" alone, so it can
+	// never match a request that named one.
+	if util.UpstreamNamespace(tenantID, current) != util.UpstreamNamespace(tenantID, requestNamespace) {
+		return
+	}
+	accessor.SetNamespace(requestNamespace)
 }
 
 // guaranteedUpdate ensures a guaranteed updating.

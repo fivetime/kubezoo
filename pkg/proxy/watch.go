@@ -33,19 +33,25 @@ import (
 type proxyWatch struct {
 	tenantProxy *tenantProxy
 	tenantID    string
-	watch       watch.Interface
-	stopChan    chan struct{}
-	resultChan  chan watch.Event
+	// requestNamespace is the namespace as the watching client spelled it, kept
+	// as a string rather than a context so the stream does not outlive-and-hold
+	// the request's. Empty for a watch spanning every namespace the tenant owns,
+	// where there is no single spelling to answer in.
+	requestNamespace string
+	watch            watch.Interface
+	stopChan         chan struct{}
+	resultChan       chan watch.Event
 }
 
 // newProxyWatch return a watch proxy.
-func newProxyWatch(w watch.Interface, tenantProxy *tenantProxy, tenantID string) (*proxyWatch, error) {
+func newProxyWatch(w watch.Interface, tenantProxy *tenantProxy, tenantID, requestNamespace string) (*proxyWatch, error) {
 	pw := &proxyWatch{
-		watch:       w,
-		tenantProxy: tenantProxy,
-		stopChan:    make(chan struct{}),
-		resultChan:  make(chan watch.Event),
-		tenantID:    tenantID,
+		watch:            w,
+		tenantProxy:      tenantProxy,
+		stopChan:         make(chan struct{}),
+		resultChan:       make(chan watch.Event),
+		tenantID:         tenantID,
+		requestNamespace: requestNamespace,
 	}
 
 	go pw.proxy()
@@ -95,7 +101,7 @@ func (w *proxyWatch) proxy() {
 					return
 				}
 
-				if err := w.tenantProxy.convertUpstreamObjectToTenantObject(output, w.tenantID); err != nil {
+				if err := w.tenantProxy.convertUpstreamObjectToTenantObject(output, w.tenantID, w.requestNamespace); err != nil {
 					err := fmt.Errorf("failed to convert upstream object to tenant object, utd: %+v, err: %v", utd, err)
 					klog.Error(err)
 					w.send(newInternalErrorEvent(err))
