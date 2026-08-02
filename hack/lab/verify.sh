@@ -26,6 +26,33 @@
 # because kubectl's default deployment template is not compliant, which looked
 # exactly like the rule under test working.
 #
+# ⛔ A QUOTA FIXTURE MUST NOT LEAVE ITS MESS, AND USUALLY MUST GO LAST.
+# Learned the hard way, twice, in one afternoon. A section that fills a tenant to
+# a limit takes hostages: every later assertion that creates one of the capped
+# things fails, and the failures point ANYWHERE but at the fixture -- a
+# projection missing from a namespace that was never created, an operator
+# ServiceAccount seeing one namespace instead of two, a ServiceAccount denied a
+# grant it demonstrably has.
+#
+# Two distinct traps, and the second is not fixed by fixing the first:
+#   1. Objects left behind hold the tenant at its limit. Delete them, and WAIT
+#      for the count to come back down.
+#   2. Churn outlives the objects. Creating and deleting twenty ClusterRoleBindings
+#      is hundreds of writes through the projection, and the upstream authorizer
+#      serves stale answers while its RBAC cache catches up. Deleting and waiting
+#      did not help; only moving the section to the end did.
+#
+# ⚠️ And a cap set in up.sh has to leave headroom for everything this file does,
+# not just for the section testing it.
+#
+# ⭐ ANY ASSERTION CLAIMING TO VERIFY KUBEZOO'S OWN LAYER NEEDS A NEGATIVE CONTROL.
+# With the policies healthy both layers usually produce the same outcome, so a
+# green assertion proves nothing about which one did the work. One assertion here
+# was found to be entirely vacuous that way -- see the note in the placement
+# section. What can distinguish the two: a path the policy structurally does not
+# cover (it matches operations: [CREATE] only), or a request that goes around
+# kubezoo straight to upstream. Everything else belongs in a unit test.
+#
 # Run against a lab that is already up:
 #   WORKERS=2 hack/lab/up.sh && hack/lab/verify.sh
 set -uo pipefail
@@ -1143,6 +1170,11 @@ fi
 # ⛔ Deleted before anything else runs. See the note above: leaving them costs
 # three later assertions, and the failures do not point here.
 for ns in $nscap_made; do $T delete namespace "$ns" --wait=false >/dev/null 2>&1; done
+for _ in $(seq 30); do
+  [ "$($T get namespaces --no-headers 2>/dev/null | wc -l)" -le "$nscap_before" ] && break
+  sleep 2
+done
+
 for _ in $(seq 30); do
   [ "$($T get namespaces --no-headers 2>/dev/null | wc -l)" -le "$nscap_before" ] && break
   sleep 2
@@ -2343,6 +2375,69 @@ else
 fi
 $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
+
+echo
+echo "== the platform caps how many cluster role bindings a tenant may own =="
+# ⛔ THIS RUNS SECOND-TO-LAST, immediately before the section that takes the
+# tenant's RoleBinding away -- which has to stay last, so this cannot be after it. Filling a
+# tenant to its ClusterRoleBinding limit means creating and then deleting roughly
+# twenty of them, and each one is a RoleBinding in every namespace the tenant owns
+# -- hundreds of writes through the projection. The upstream authorizer serves
+# stale answers while its RBAC cache catches up with that churn, so a section
+# scheduled after this one can find a ServiceAccount denied a grant it
+# demonstrably has.
+#
+# ⚠️ Measured, not assumed. This section originally sat in the middle of the file
+# and took "an operator ServiceAccount reads across the tenant's namespaces" down
+# with it -- twice, once with the guard wired and once without, which is what
+# showed the fixture rather than the negative control was at fault. Deleting the
+# bindings and waiting for the count to come back down did NOT fix it: the count
+# was never the problem.
+
+# ⭐ The second multiplier. A tenant's ClusterRoleBinding is stored as one
+# RoleBinding in EVERY namespace it owns, so the object count is bindings times
+# namespaces -- capping namespaces alone leaves this dimension unbounded. RBAC
+# authorization walks every binding in a namespace, so a large count slows every
+# authorization decision made there, not only the tenant's own.
+#
+# ⭐ Single-layer, like the namespace cap: no policy counts anything.
+#
+# ⚠️ This is also what proves the guard is WIRED. The unit tests call it
+# directly, so removing the call from Create leaves them green -- exactly the
+# "defined but never called" shape this repository has been bitten by before.
+crbcap_before=$($T get clusterrolebindings --no-headers 2>/dev/null | wc -l)
+crbcap_out=""
+crbcap_made=""
+for i in $(seq 1 $((24 - crbcap_before + 1))); do
+  crbcap_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: crbcap-$i}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{kind: ServiceAccount, name: default, namespace: default}]
+EOF
+) || break
+  grep -qE "created|configured|unchanged" <<<"$crbcap_out" || break
+  crbcap_made="$crbcap_made crbcap-$i"
+done
+if grep -q "limit is 24" <<<"$crbcap_out"; then
+  ok "a tenant cannot own more cluster role bindings than the platform allows"
+else
+  bad "the cluster role binding cap refuses" \
+      "got: $(tr '\n' ' ' <<<"$crbcap_out" | cut -c1-160)"
+fi
+# ⛔ Deleted AND waited for, not just deleted. This fixture fills the tenant to
+# exactly the cap, so until the count comes back down every later section that
+# creates a ClusterRoleBinding of its own is refused -- and the failure surfaces
+# as that section's own assertion, saying nothing about a quota. It cost the
+# "operator ServiceAccount reads across the tenant's namespaces" check twice
+# before this loop existed, once with the guard wired and once without, which is
+# what showed it was the fixture rather than the negative control.
+for crb in $crbcap_made; do $T delete clusterrolebinding "$crb" >/dev/null 2>&1; done
+for _ in $(seq 30); do
+  [ "$($T get clusterrolebindings --no-headers 2>/dev/null | wc -l)" -le "$crbcap_before" ] && break
+  sleep 2
+done
 
 echo
 echo "== a request into a namespace the tenant does not have reads as NotFound =="

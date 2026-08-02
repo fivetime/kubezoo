@@ -39,7 +39,10 @@ type ProxyOptions struct {
 	// MaxNamespacesPerTenant caps how many namespaces one tenant may own. Zero
 	// means no cap, which is what an upgrade gets.
 	MaxNamespacesPerTenant int
-	ServiceAccountKeyFile  string
+	// MaxClusterRoleBindingsPerTenant caps how many ClusterRoleBindings one
+	// tenant may own. Zero means no cap.
+	MaxClusterRoleBindingsPerTenant int
+	ServiceAccountKeyFile           string
 }
 
 // NewProxyOptions creates a new ProxyOptions object
@@ -94,6 +97,14 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"can fill a page. Count what tenants have today before setting it -- "+
 			"`kubectl get ns -L kubezoo.io/tenant` -- because the limit refuses new "+
 			"namespaces the moment it is below what a tenant already owns.")
+	fs.IntVar(&o.MaxClusterRoleBindingsPerTenant, "max-cluster-role-bindings-per-tenant",
+		o.MaxClusterRoleBindingsPerTenant,
+		"the most ClusterRoleBindings one tenant may own, or 0 for no limit, which is the "+
+			"default. The second multiplier beside --max-namespaces-per-tenant, and they "+
+			"multiply each other: a tenant's ClusterRoleBinding is stored as one RoleBinding in "+
+			"every namespace it owns, so the objects come to bindings times namespaces. RBAC "+
+			"authorization walks every binding in a namespace, so a large count slows down every "+
+			"authorization decision made there, not just the tenant's own.")
 }
 
 func (o *ProxyOptions) Validate() []error {

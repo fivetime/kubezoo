@@ -17,8 +17,12 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -126,5 +130,83 @@ func TestTheProjectionDeclaresWhatItInjects(t *testing.T) {
 	}
 	if !declared.Equals(projectionLabelPath()) {
 		t.Errorf("the projection declares %v, not the label it actually injects", declared)
+	}
+}
+
+// crbCountFake stands in for the inner RoleBinding proxy's List.
+type crbCountFake struct {
+	*tenantProxyWithLister
+	count  int
+	err    error
+	listed bool
+}
+
+func (f *crbCountFake) List(context.Context, *metainternalversion.ListOptions) (runtime.Object, error) {
+	f.listed = true
+	if f.err != nil {
+		return nil, f.err
+	}
+	list := &rbac.RoleBindingList{}
+	for i := 0; i < f.count; i++ {
+		list.Items = append(list.Items, rbac.RoleBinding{})
+	}
+	return list, nil
+}
+
+// TestRefuseTooManyClusterRoleBindings caps the second multiplier.
+//
+// ⚠️ A tenant's ClusterRoleBinding is stored as one RoleBinding in EVERY
+// namespace it owns, so the object count is bindings times namespaces -- and the
+// namespace cap alone leaves this dimension unbounded. RBAC authorization walks
+// every binding in a namespace, so a large count slows down every authorization
+// decision made there, not only the tenant's own.
+func TestRefuseTooManyClusterRoleBindings(t *testing.T) {
+	withCount := func(max, owned int) (*clusterRoleBindingProjection, *crbCountFake) {
+		fake := &crbCountFake{count: owned}
+		return &clusterRoleBindingProjection{maxBindings: max, counter: fake.List}, fake
+	}
+
+	proxy, _ := withCount(3, 2)
+	if err := proxy.refuseTooManyBindings(context.TODO()); err != nil {
+		t.Errorf("a tenant below the limit was refused: %v", err)
+	}
+
+	proxy, _ = withCount(3, 3)
+	err := proxy.refuseTooManyBindings(context.TODO())
+	if err == nil {
+		t.Fatal("a tenant at the limit was allowed another binding")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("refused with %T, want a Forbidden", err)
+	}
+	if !strings.Contains(err.Error(), "times") {
+		t.Errorf("the refusal does not explain the multiplier: %v", err)
+	}
+
+	// ⭐ Zero is no cap, and must not even count -- the count is a LIST.
+	//
+	// ⚠️ Asserted by whether the counter RAN, not by making it fail: this guard
+	// fails open on a count error, so an erroring counter and one that was never
+	// called are indistinguishable. That mistake made two assertions vacuous in
+	// the namespace cap before a mutation check caught it.
+	proxy, fake := withCount(0, 99)
+	if err := proxy.refuseTooManyBindings(context.TODO()); err != nil {
+		t.Errorf("no cap configured, yet: %v", err)
+	}
+	if fake.listed {
+		t.Error("with no cap configured the bindings were counted anyway")
+	}
+}
+
+// TestClusterRoleBindingCountFailureDoesNotRefuse -- an upstream blip must not
+// look like a quota to a tenant, which cannot tell the two apart.
+func TestClusterRoleBindingCountFailureDoesNotRefuse(t *testing.T) {
+	fake := &crbCountFake{err: fmt.Errorf("upstream is having a moment")}
+	proxy := &clusterRoleBindingProjection{maxBindings: 1, counter: fake.List}
+	if err := proxy.refuseTooManyBindings(context.TODO()); err != nil {
+		t.Errorf("a failed count refused the binding: %v", err)
+	}
+	if !fake.listed {
+		t.Error("the counter was never called, so this proves nothing about failure")
 	}
 }

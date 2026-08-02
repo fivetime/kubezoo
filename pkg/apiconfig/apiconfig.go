@@ -104,6 +104,10 @@ type StorageConfig struct {
 	// cap. Set only on the namespaces resource.
 	MaxNamespaces int
 
+	// MaxClusterRoleBindings caps how many a tenant may own. Zero means no cap.
+	// Set only on the clusterrolebindings resource.
+	MaxClusterRoleBindings int
+
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL
 	GroupVersionKindFunc GroupVersionKindFunc

@@ -84,6 +84,12 @@ type clusterRoleBindingProjection struct {
 	newFunc        func() runtime.Object
 	newListFunc    func() runtime.Object
 	tableConvertor rest.TableConvertor
+
+	// maxBindings caps how many a tenant may own; zero means no cap.
+	maxBindings int
+	// counter reads the records, so the cap can be tested without an upstream.
+	// Defaults to inner.List.
+	counter func(context.Context, *metainternalversion.ListOptions) (runtime.Object, error)
 }
 
 var _ = rest.StandardStorage(&clusterRoleBindingProjection{})
@@ -130,6 +136,8 @@ func newClusterRoleBindingProjection(config apiconfig.StorageConfig) (rest.Stora
 		newFunc:        config.NewFunc,
 		newListFunc:    config.NewListFunc,
 		tableConvertor: tableConvertor,
+		maxBindings:    config.MaxClusterRoleBindings,
+		counter:        lister.List,
 	}, nil
 }
 
@@ -264,6 +272,9 @@ func (p *clusterRoleBindingProjection) Create(ctx context.Context, obj runtime.O
 	if err != nil {
 		return nil, err
 	}
+	if err := p.refuseTooManyBindings(ctx); err != nil {
+		return nil, err
+	}
 	created, err := p.inner.Create(inNamespace(ctx, canonicalNamespace), record, createValidation, options)
 	if err != nil {
 		return nil, asClusterRoleBindingError(err, obj.(*rbac.ClusterRoleBinding).Name)
@@ -279,6 +290,52 @@ func (p *clusterRoleBindingProjection) Create(ctx context.Context, obj runtime.O
 		p.project(ctx, createdBinding.Name)
 	}
 	return asClusterRoleBinding(created)
+}
+
+// refuseTooManyBindings caps how many ClusterRoleBindings one tenant may own.
+//
+// ⚠️ The second multiplier beside the namespace cap, and they multiply each
+// other: a tenant's ClusterRoleBinding is stored as one RoleBinding in every
+// namespace it owns, so the object count is bindings times namespaces. RBAC
+// authorization walks every binding in a namespace, so a large count slows every
+// authorization decision made there down -- not only the tenant's own.
+//
+// ⭐ The count is one namespaced LIST. The records all live in a single
+// namespace and the copies carry nothing the record does not, which is the same
+// reason List and Watch read only that namespace.
+//
+// ⚠️ CREATE only, and fail-open on a count error, for the same reasons as the
+// namespace cap: a tenant at the limit still has to be able to update and delete
+// what it owns, and an upstream blip must not look like a quota to someone who
+// cannot tell the two apart.
+func (p *clusterRoleBindingProjection) refuseTooManyBindings(ctx context.Context) error {
+	if p.maxBindings <= 0 {
+		return nil
+	}
+	scoped, err := withProjectedSelector(&metainternalversion.ListOptions{})
+	if err != nil {
+		return err
+	}
+	obj, err := p.counter(inNamespace(ctx, canonicalNamespace), scoped)
+	if err != nil {
+		klog.Errorf("counting cluster role bindings to apply "+
+			"--max-cluster-role-bindings-per-tenant: %v", err)
+		return nil
+	}
+	list, ok := obj.(*rbac.RoleBindingList)
+	if !ok {
+		klog.Errorf("counting cluster role bindings: expected a RoleBindingList, got %T", obj)
+		return nil
+	}
+	if len(list.Items) < p.maxBindings {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		rbac.Resource("clusterrolebindings"), "",
+		fmt.Errorf("this tenant already owns %d cluster role bindings and the limit is %d; "+
+			"each one is stored in every namespace you own, so they cost bindings times "+
+			"namespaces. Delete one you no longer need, or ask the platform to raise the limit",
+			len(list.Items), p.maxBindings))
 }
 
 func (p *clusterRoleBindingProjection) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo,

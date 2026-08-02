@@ -610,6 +610,9 @@ type ProxyConfig struct {
 	// maxNamespacesPerTenant is a ceiling on the fan-out amplifier: a tenant's
 	// cross-namespace list costs one upstream request per namespace it owns.
 	maxNamespacesPerTenant int
+	// maxClusterRoleBindingsPerTenant is the second multiplier: each binding is
+	// stored once per namespace the tenant owns.
+	maxClusterRoleBindingsPerTenant int
 	// classInformers backs both. Started and waited for in a post-start hook, so
 	// that no tenant is told a published class does not exist because the cache
 	// was still filling.
@@ -647,6 +650,10 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// carries the same Resource string, and a status write is not a claim.
 	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
 		config.MaxNamespaces = c.maxNamespacesPerTenant
+	}
+	if config.Kind.Group == "rbac.authorization.k8s.io" &&
+		config.Resource == "clusterrolebindings" && config.Subresource == "" {
+		config.MaxClusterRoleBindings = c.maxClusterRoleBindingsPerTenant
 	}
 	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
 		config.Subresource == "" {
@@ -801,6 +808,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		publishedIngressClasses:          publishedIngressClasses,
 		publishedVolumeAttributesClasses: publishedVolumeAttributesClasses,
 		maxNamespacesPerTenant:           o.MaxNamespacesPerTenant,
+		maxClusterRoleBindingsPerTenant:  o.MaxClusterRoleBindingsPerTenant,
 		classInformers:                   classInformers,
 		ingressClassInformers:            ingressClassInformers,
 		volumeAttributesClassInformers:   volumeAttributesClassInformers,
