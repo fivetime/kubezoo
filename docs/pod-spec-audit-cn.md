@@ -125,7 +125,7 @@ lab 对两条都有断言,断言通过掩盖了它们韧性不同这件事。
 不过这条在 ① 面前是次要的:Kyverno 挂了的话,就算 `nodeName` 被拦,
 注入也没发生,Pod 照样不受约束。
 
-### ⛔ ③ C 类的"第二层"**是由第一层安装的**
+### ✅ ③ C 类的"第二层"**是由第一层安装的** —— 已修
 
 `pin-psa-label` 把 `pod-security.kubernetes.io/enforce: restricted` 打在租户 namespace 上,
 之后由**原生 PSA(进程内)**执行 —— 这层确实独立于 Kyverno。
@@ -152,6 +152,20 @@ lab 对两条都有断言,断言通过掩盖了它们韧性不同这件事。
 
 两处都补上之后,C 类的第二层才**真正**独立于 Kyverno:标签由 kubezoo 自己写,
 执行由 apiserver 进程内的 PSA 做,全程不经过任何 webhook。
+
+**✅ 已做**:
+
+- 值定义在 contract(`PodSecurityLevel` / `PodSecurityVersion`),并有一个**双向**守卫测试
+  直接读 Kyverno 的 YAML 比对 —— 只看自己那个值的话,旁边写着 `enforce: privileged`
+  也会通过。变异检查:策略改弱成 baseline → 红;版本钉死到旧版 → 红。
+- `pkg/convert/namespace.go`:在已经盖 `kubezoo.io/tenant` 的同一处补盖 PSA 标签。
+- 控制器 `syncNamespaces`:创建时盖,并纳入已有的漂移修复回路(**只在真的漂了才写**,
+  否则每个租户 × 每个 namespace × 每轮 resync 都是一次写)。
+
+⭐ **是覆盖,不是拒绝** —— 和上面那个 tenant 标签相反,是有意的。拒绝读着更严,
+但更糟:一个真的被写弱了的 namespace(恰恰是在这次加固所针对的那种故障窗口里写弱的)
+会变成**它的租户再也写不进去**、只能等管理员救的 namespace。覆盖则在下一次写入时自动修好。
+tenant 标签之所以拒绝,是因为改它等于改**归属**;这个只是个级别,放回去不丢任何东西。
 
 ⚠️ 注意这仍然**不解决 ①** —— 落点隔离靠的是注入 `nodeSelector`,PSA 管不着。
 

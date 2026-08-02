@@ -972,6 +972,52 @@ expect_denied "a namespace whose name begins with the tenant's own prefix" "coul
 expect_allowed "while an ordinary namespace name is unaffected" \
   $T create namespace ns-probe-ok
 
+# ⭐ And it carries the Pod Security level, written by kubezoo itself rather than
+# by the Kyverno mutate that also writes it. That matters because Pod Security
+# Admission runs INSIDE the apiserver -- no webhook, no single point -- so this
+# label is what refuses host namespaces, privileged containers and host paths
+# with every webhook in the cluster gone.
+#
+# ⛔ It used to be written only by Kyverno, which meant the second layer was
+# installed by the first: a namespace created while that webhook was not
+# registered got no label and no enforcement at all. failurePolicy: Fail does not
+# cover it -- that covers a webhook which FAILS, not one which was never
+# REGISTERED, and the latter is the failure that actually happened here.
+psa=$($K get ns "$TID-ns-probe-ok" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
+if [ "$psa" = restricted ]; then
+  ok "a namespace the tenant creates carries the Pod Security level"
+else
+  bad "a tenant-created namespace carries the Pod Security level" \
+      "enforce='${psa:-<none>}', want restricted"
+fi
+
+# ⚠️ And a tenant cannot weaken it on its own namespace. One doing exactly this
+# is why config/policy/README.md exists.
+#
+# ⚠️ These three assert the OUTCOME, not which layer produced it: with Kyverno
+# healthy its mutate would put the label back too, so a green run here does not
+# by itself prove kubezoo's copy works. What pins that is the unit tests, which
+# drive NamespaceTransformer.Forward and syncNamespaces directly. Proving it
+# end-to-end would mean running the lab with Kyverno removed, which would take
+# most of the other assertions down with it.
+$T label namespace ns-probe-ok pod-security.kubernetes.io/enforce=privileged --overwrite >/dev/null 2>&1
+psa=$($K get ns "$TID-ns-probe-ok" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
+if [ "$psa" = restricted ]; then
+  ok "and a tenant asking for privileged on it gets restricted back"
+else
+  bad "a tenant cannot weaken its own namespace" "enforce is now '${psa:-<none>}', want restricted"
+fi
+
+# The namespaces the CONTROLLER creates never pass through the gateway, so they
+# are a separate path with the same requirement.
+psa=$($K get ns "$NS" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
+if [ "$psa" = restricted ]; then
+  ok "and so does one the controller created, which never went through kubezoo"
+else
+  bad "a controller-created namespace carries the Pod Security level" \
+      "enforce='${psa:-<none>}', want restricted"
+fi
+
 echo
 echo "== server-side apply works, which is how modern controllers write =="
 # Every apply was refused before this: Get answers a missing object with a nil

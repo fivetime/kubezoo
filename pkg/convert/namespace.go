@@ -55,7 +55,44 @@ func (t *NamespaceTransformer) Forward(obj runtime.Object, tenantID string) (run
 	} else {
 		ns.Labels[common.TenantNamespaceLabelKey] = tenantID
 	}
+	pinPodSecurity(ns)
 	return ns, nil
+}
+
+// pinPodSecurity stamps the Pod Security Admission level on a tenant namespace
+// and refuses a tenant's attempt to weaken it.
+//
+// ⭐ Stamped HERE, in Go, rather than left to the Kyverno policy that also
+// stamps it. Pod Security Admission runs inside the apiserver -- no webhook, no
+// single point -- so a namespace carrying this label refuses hostNetwork,
+// hostPID, privileged and hostPath even with every webhook in the cluster gone.
+// It is the only real depth in the whole pod surface.
+//
+// ⛔ But until now the label was put there by a Kyverno mutate, which meant the
+// second layer was installed by the first. A namespace created while Kyverno's
+// webhook was not registered carried no label and got no enforcement at all.
+// failurePolicy: Fail does not cover that -- it covers a webhook which fails,
+// not one which was never registered, and the latter is the failure that
+// actually happened: three policies never became ready, pods went through
+// unguarded, and the only symptom was READY=<none>. Stamping it on the way
+// through kubezoo needs nothing outside this process to be alive.
+//
+// A tenant owns its namespaces and can label them, and one setting
+// pod-security.kubernetes.io/enforce: privileged on its own is why
+// config/policy/README.md exists. Overwriting is what stops that.
+//
+// ⚠️ OVERWRITTEN, not refused, which is the opposite of what the tenant label
+// above does and is deliberate. Refusing reads stricter but is worse here: a
+// namespace that did end up with a weaker value -- written during the very
+// outage this hardening is for -- would become one its tenant could never write
+// to again, fixable only by an administrator. Overwriting repairs it on the next
+// write instead. It also keeps this identical to the Kyverno mutate rather than
+// a second, differently-behaving copy. The tenant label is refused because
+// changing it changes who OWNS the namespace; this one is only a level, and
+// putting it back loses nothing.
+func pinPodSecurity(ns *internal.Namespace) {
+	ns.Labels[common.PodSecurityEnforceLabelKey] = common.PodSecurityLevel
+	ns.Labels[common.PodSecurityEnforceVersionLabelKey] = common.PodSecurityVersion
 }
 
 func (t *NamespaceTransformer) Backward(obj runtime.Object, tenantID string) (runtime.Object, error) {
