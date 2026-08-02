@@ -1822,6 +1822,56 @@ for pair in "own:internal" "public:nginx" "borrowed:999999-nginx"; do
 done
 [ "$round_trip" = yes ] && ok "every class reads back exactly as the tenant wrote it"
 
+# ⛔ spec.tls[].hosts is a SECOND list of host names, and the hostname policy did
+# not mention tls at all -- it checked spec.rules[].host and stopped there. That
+# list decides which names the ingress controller presents a certificate for, so
+# leaving it open let a tenant name a domain it does not own: the controller
+# answers the TLS handshake for it, and where cert-manager is wired in a
+# certificate may be requested for it.
+#
+# ⭐ Single-layer: nothing else looks at tls hosts, so a pass here is the policy.
+expect_denied "an Ingress naming a foreign domain in spec.tls is refused" "tenant-ingress-hostnames" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: tls-foreign}
+spec:
+  tls: [{hosts: ["shop.someone-else.com"], secretName: s}]
+  rules:
+    - host: ok.$TID.apps.example.com
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+
+# ⚠️ ...while the ordinary shapes stay legal. An empty tls list is plain HTTP and
+# a tls entry without hosts means "use the default certificate"; requiring hosts
+# would refuse most Ingresses ever written.
+expect_allowed "while its own subdomain in spec.tls is accepted" \
+  $T -n default apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: tls-own}
+spec:
+  tls: [{hosts: ["ok.$TID.apps.example.com"], secretName: s}, {secretName: default-cert}]
+  rules:
+    - host: ok.$TID.apps.example.com
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+
+# ⚠️ And an Ingress with no rules at all, which is legal -- defaultBackend only.
+# The existing expression reads object.spec.rules with no has() guard, and this
+# policy runs with failurePolicy: Fail, so a CEL error on a missing field is a
+# denial. Whether that is what happens is measured here rather than assumed.
+expect_allowed "and an Ingress with only a defaultBackend, which names no host at all" \
+  $T -n default apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: default-backend-only}
+spec:
+  ingressClassName: nginx
+  defaultBackend: {service: {name: s, port: {number: 80}}}
+EOF
+$T -n default delete ingress tls-own default-backend-only >/dev/null 2>&1
+
 echo
 echo "== the platform publishes storage classes, and only those =="
 # ⭐ A tenant could always NAME a StorageClass -- pkg/convert/pvc.go passes
