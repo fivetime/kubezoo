@@ -601,6 +601,9 @@ EOF
 # Pod Security's volume checks and mounts the node's filesystem into a tenant
 # container. NFS names nothing inside the cluster and keeps this measuring what
 # it says it measures.
+#
+# ⚠️ The claimRef is required now and is incidental here too -- see the volume
+# section further down for why a PersistentVolume without one is refused.
 expect_allowed "an object of another kind may still be called admin" \
   $T apply -f - <<EOF
 apiVersion: v1
@@ -609,8 +612,54 @@ metadata: {name: admin}
 spec:
   capacity: {storage: 1Gi}
   accessModes: [ReadWriteOnce]
+  claimRef: {namespace: default, name: reserved-name-check}
   nfs: {server: 192.0.2.1, path: /exports/reserved-name-check}
 EOF
+
+# ⛔ A PersistentVolume is CLUSTER-SCOPED and the binder never looks at tenancy:
+# it matches on access modes, class, size and topology, and only provisions
+# dynamically when nothing matched -- so a static volume PRE-EMPTS the
+# provisioner. Offered without a claimRef, a tenant's volume is a volume ANY
+# tenant's claim can bind to, and whoever binds it mounts storage the offering
+# tenant controls.
+#
+# ⭐ Refusing the class name would not work: a tenant's own claim may only name a
+# published class, so its own static volume must carry one too. The legitimate
+# use and the attack are the same write. What separates them is the claimRef --
+# FindMatchingVolume skips a volume reserved for a different claim.
+expect_denied "a PersistentVolume offered to any tenant's claim is refused" "claimRef" -- \
+  $T apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: unreserved}
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  nfs: {server: 192.0.2.1, path: /exports/anyone}
+EOF
+
+# ...while one reserved for the tenant's own claim is fine, and lands upstream
+# pointing at the tenant's namespace rather than the name the tenant wrote.
+expect_allowed "while one reserved for its own claim is accepted" \
+  $T apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: reserved}
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  claimRef: {namespace: default, name: mine}
+  nfs: {server: 192.0.2.1, path: /exports/mine}
+EOF
+pv_ns=$($K get pv "$TID-reserved" -o jsonpath='{.spec.claimRef.namespace}' 2>/dev/null)
+if [ "$pv_ns" = "$NS" ]; then
+  ok "and the reservation names the tenant's own namespace upstream"
+else
+  bad "the reservation is prefixed" "upstream claimRef namespace is '${pv_ns:-<none>}', want '$NS'"
+fi
+$T delete pv reserved >/dev/null 2>&1
 
 # A ClusterRole over shared resources is now writable on purpose -- it is what
 # every operator chart ships, and it used to be refused because the escalation

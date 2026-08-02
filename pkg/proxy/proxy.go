@@ -970,10 +970,17 @@ func (tp *tenantProxy) finishWrite(got *unstructured.Unstructured, tenantID, req
 // step. Objects that already exist are untouched either way; only new claims are
 // refused.
 //
-// PersistentVolume is deliberately not covered. Its storageClassName declares
-// which class a volume already satisfies rather than asking for one to be
-// provisioned, so refusing it would block a tenant from statically providing
-// storage without protecting anything. IngressClass needs nothing here either:
+// ⛔ PersistentVolume is not covered HERE, and the reasoning that first said so
+// was wrong. It read: "refusing it would block a tenant from statically providing
+// storage without protecting anything." The last clause was false. A
+// PersistentVolume is cluster-scoped and the binder never looks at tenancy, so a
+// tenant's static volume carrying a published class can be bound by ANOTHER
+// tenant's claim -- and a static volume pre-empts dynamic provisioning, so it
+// wins. What closes that is not the class name but the claimRef, because a
+// tenant's own claim may only name a published class too: the legitimate use and
+// the attack are the same write. See refuseUnreservedPV in pkg/convert/pv.go.
+//
+// IngressClass needs nothing here either:
 // an unpublished ingress class is not refused but PREFIXED into the tenant's own
 // namespace of names, so it can only be served by a controller the tenant runs.
 func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {

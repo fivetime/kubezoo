@@ -18,6 +18,7 @@ package convert
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -230,5 +231,79 @@ func TestPVSourceAllowlist(t *testing.T) {
 				t.Errorf("claimRef namespace = %q, want 111111-default", got)
 			}
 		})
+	}
+}
+
+// TestUnreservedPVIsRefused closes a cross-tenant data path.
+//
+// ⛔ A PersistentVolume is cluster-scoped and the binder never looks at tenancy:
+// findByClaim matches on access modes, class, size and topology, and
+// pv_controller only provisions dynamically when nothing matched -- so a static
+// volume PRE-EMPTS the provisioner. Tenant A offers an NFS server it controls
+// under a published class; tenant B's claim binds to it; B's pods mount A's
+// storage.
+//
+// ⭐ The claimRef is what separates the legitimate use from the attack.
+// FindMatchingVolume skips a volume whose claimRef names a different claim, so a
+// reserved volume is invisible to everyone else. Refusing the class name would
+// not work: a tenant's own claim may only name a published class too, so the
+// legitimate use and the attack are the same write.
+func TestUnreservedPVIsRefused(t *testing.T) {
+	pv := func(ref *internal.ObjectReference) *internal.PersistentVolume {
+		return &internal.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "offered"},
+			Spec: internal.PersistentVolumeSpec{
+				ClaimRef:         ref,
+				StorageClassName: "standard",
+				PersistentVolumeSource: internal.PersistentVolumeSource{
+					NFS: &internal.NFSVolumeSource{Server: "192.0.2.1", Path: "/exports/x"},
+				},
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		what    string
+		ref     *internal.ObjectReference
+		refused bool
+	}{
+		{"no claimRef at all -- offered to every claim in the cluster", nil, true},
+		{"a claimRef with no namespace", &internal.ObjectReference{Name: "data"}, true},
+		{"a claimRef with no name -- matches nothing, reserves nothing",
+			&internal.ObjectReference{Namespace: "team"}, true},
+		{"reserved for one of the tenant's own claims",
+			&internal.ObjectReference{Namespace: "team", Name: "data"}, false},
+	} {
+		_, err := NewPVTransformer().Forward(pv(tc.ref), "111111")
+		if tc.refused && err == nil {
+			t.Errorf("%s: accepted", tc.what)
+		}
+		if !tc.refused && err != nil {
+			t.Errorf("%s: refused with %v", tc.what, err)
+		}
+		if tc.refused && err != nil && !strings.Contains(err.Error(), "claimRef") {
+			t.Errorf("%s: the refusal does not name the field to set: %v", tc.what, err)
+		}
+	}
+}
+
+// TestReservedPVNamespaceIsStillPrefixed -- the reservation has to land in the
+// tenant's own namespace, or it reserves the volume for somebody else's claim.
+func TestReservedPVNamespaceIsStillPrefixed(t *testing.T) {
+	pv := &internal.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "offered"},
+		Spec: internal.PersistentVolumeSpec{
+			ClaimRef: &internal.ObjectReference{Namespace: "team", Name: "data"},
+			PersistentVolumeSource: internal.PersistentVolumeSource{
+				NFS: &internal.NFSVolumeSource{Server: "192.0.2.1", Path: "/exports/x"},
+			},
+		},
+	}
+	got, err := NewPVTransformer().Forward(pv, "111111")
+	if err != nil {
+		t.Fatalf("converting: %v", err)
+	}
+	if ns := got.(*internal.PersistentVolume).Spec.ClaimRef.Namespace; ns != "111111-team" {
+		t.Errorf("the reservation names namespace %q, want the tenant's own", ns)
 	}
 }

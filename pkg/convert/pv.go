@@ -50,10 +50,55 @@ func (v *PVTranformer) Forward(obj runtime.Object, tenantID string) (runtime.Obj
 		return nil, err
 	}
 
+	if err := refuseUnreservedPV(pv); err != nil {
+		return nil, err
+	}
 	if pv.Spec.ClaimRef != nil && len(pv.Spec.ClaimRef.Namespace) > 0 {
 		pv.Spec.ClaimRef.Namespace = util.UpstreamNamespace(tenantID, pv.Spec.ClaimRef.Namespace)
 	}
 	return pv, nil
+}
+
+// refuseUnreservedPV stops a tenant offering storage that another tenant's claim
+// can bind to.
+//
+// ⛔ A PersistentVolume is CLUSTER-SCOPED and the binder does not care whose it
+// is. findByClaim matches on access modes, class, size and topology and never
+// looks at tenancy, and pv_controller only provisions dynamically when no
+// existing volume matched -- so a static volume PRE-EMPTS the provisioner. Every
+// link checked in the Kubernetes source rather than assumed.
+//
+// ⛔ Which makes this the shape of the attack: tenant A creates a PersistentVolume
+// with a published class name, a common size, and an NFS server A controls.
+// Tenant B's claim for that class binds to it, and B's pods mount A's storage. A
+// then reads everything B writes and serves B whatever it likes.
+//
+// ⚠️ Refusing the class name instead does not work, and the reason is worth
+// keeping: a tenant's own claim may only name a PUBLISHED class -- that is
+// tenantProxy.refuseUnpublishedStorageClass -- so a tenant's own static volume
+// has to carry a published class to be usable by its owner at all. The
+// legitimate use and the attack are the same write.
+//
+// ⭐ What separates them is the claimRef. FindMatchingVolume skips any volume
+// whose claimRef is set and does not name the claim being bound, so a volume
+// reserved for one claim is invisible to every other. Requiring one leaves
+// static provisioning working -- you name the claim you are providing for, which
+// is what reserving a volume means -- and closes the cross-tenant grab entirely.
+// The namespace is prefixed just below, and Backward refuses a claimRef pointing
+// outside the tenant, so the reservation cannot be aimed anywhere else.
+//
+// ⚠️ I had this wrong earlier and the comment that said so has been corrected:
+// "refusing it would block a tenant from statically providing storage without
+// protecting anything". The last clause was false.
+func refuseUnreservedPV(pv *internal.PersistentVolume) error {
+	if pv.Spec.ClaimRef != nil &&
+		len(pv.Spec.ClaimRef.Namespace) > 0 && len(pv.Spec.ClaimRef.Name) > 0 {
+		return nil
+	}
+	return errors.Errorf("persistentvolume %s must reserve itself for one of your own claims: "+
+		"set spec.claimRef to the namespace and name of the PersistentVolumeClaim it is for. "+
+		"Without a claimRef the volume is offered to every claim in the cluster, including "+
+		"other tenants', and whoever binds it first mounts your storage", pv.Name)
 }
 
 // refuseUnsafePVSource is an allowlist over the volume source of a
