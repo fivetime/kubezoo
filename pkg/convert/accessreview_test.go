@@ -44,6 +44,28 @@ func TestSelfSubjectAccessReviewAsksAboutTheTenantsNamespace(t *testing.T) {
 		t.Errorf("namespace = %q, want %q; asking upstream about %q asks about the platform's "+
 			"namespace of that name, and the answer is confidently wrong", got, want, got)
 	}
+
+	// ⭐ And the UPSTREAM spelling, which is what an in-cluster client sends: a
+	// workload's client-go reads its namespace from the projected service account
+	// file, which kubelet writes from the upstream apiserver's view. Prefixing it
+	// again would ask about 111111-111111-default, a namespace that does not
+	// exist -- and a can-i against a namespace that does not exist answers "no",
+	// confidently, with nothing to suggest the question was mangled.
+	inCluster := &authzinternal.SelfSubjectAccessReview{
+		Spec: authzinternal.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authzinternal.ResourceAttributes{
+				Namespace: testTenant + "-default", Verb: "create", Resource: "pods",
+			},
+		},
+	}
+	out, err = NewAccessReviewTransformer().Forward(inCluster, testTenant)
+	if err != nil {
+		t.Fatalf("Forward on the upstream spelling: %v", err)
+	}
+	got = out.(*authzinternal.SelfSubjectAccessReview).Spec.ResourceAttributes.Namespace
+	if want := testTenant + "-default"; got != want {
+		t.Errorf("the upstream spelling became %q, want %q left alone", got, want)
+	}
 }
 
 // TestAccessReviewPrefixesCustomResourceGroupsOnly -- a tenant's custom

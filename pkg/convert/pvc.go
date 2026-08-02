@@ -48,6 +48,25 @@ func (v *PVCTranformer) Forward(obj runtime.Object, tenantID string) (runtime.Ob
 	if len(pvc.Spec.VolumeName) > 0 {
 		pvc.Spec.VolumeName = util.AddTenantIDPrefix(tenantID, pvc.Spec.VolumeName)
 	}
+	// ⚠️ dataSourceRef is the one field on a claim that can name ANOTHER
+	// namespace, and it was passing through untouched -- so a tenant writing
+	// `namespace: default` meant the PLATFORM's default, not its own. Prefixed
+	// here like every other namespace reference kubezoo carries (see
+	// rolebinding.go, webhookconfiguration.go, customresourcedefinition.go).
+	//
+	// ⭐ Not reachable today: CrossNamespaceVolumeDataSource has been alpha and
+	// default-off since 1.26, so the apiserver drops the field, and upstream also
+	// wants a ReferenceGrant in the target namespace. Done anyway because the
+	// cost is three lines and the alternative is depending on someone else's
+	// feature gate staying off and someone else's second lock holding.
+	//
+	// dataSource, beside it, needs nothing: it is a TypedLocalObjectReference and
+	// resolves in the claim's own namespace, which is already prefixed.
+	if pvc.Spec.DataSourceRef != nil && pvc.Spec.DataSourceRef.Namespace != nil &&
+		*pvc.Spec.DataSourceRef.Namespace != "" {
+		prefixed := util.UpstreamNamespace(tenantID, *pvc.Spec.DataSourceRef.Namespace)
+		pvc.Spec.DataSourceRef.Namespace = &prefixed
+	}
 
 	return pvc, nil
 }
@@ -57,6 +76,12 @@ func (v *PVCTranformer) Backward(obj runtime.Object, tenantID string) (runtime.O
 	pvc, ok := obj.(*internal.PersistentVolumeClaim)
 	if !ok {
 		return nil, errors.Errorf("fail to assert the runtime object to the internal version of persistentvolumeclaim")
+	}
+	// The other direction, so a tenant reads back the name it wrote.
+	if pvc.Spec.DataSourceRef != nil && pvc.Spec.DataSourceRef.Namespace != nil &&
+		*pvc.Spec.DataSourceRef.Namespace != "" {
+		trimmed := util.TrimTenantIDPrefix(tenantID, *pvc.Spec.DataSourceRef.Namespace)
+		pvc.Spec.DataSourceRef.Namespace = &trimmed
 	}
 	if len(pvc.Spec.VolumeName) > 0 {
 		if !strings.HasPrefix(pvc.Spec.VolumeName, tenantID) {

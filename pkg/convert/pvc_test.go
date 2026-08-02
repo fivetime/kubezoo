@@ -176,3 +176,61 @@ func TestPVCTranformerBackward(t *testing.T) {
 		})
 	}
 }
+
+// TestDataSourceRefNamespaceIsPrefixed covers the one field on a claim that can
+// name another namespace.
+//
+// ⚠️ It was passing through untouched, so a tenant writing `namespace: default`
+// meant the PLATFORM's default rather than its own. Not reachable today --
+// CrossNamespaceVolumeDataSource has been alpha and default-off since 1.26, so
+// the apiserver drops the field -- which is exactly why nothing would have
+// noticed until someone turned the gate on.
+func TestDataSourceRefNamespaceIsPrefixed(t *testing.T) {
+	const tenantID = "111111"
+	name := func(s string) *string { return &s }
+
+	claim := &internal.PersistentVolumeClaim{
+		Spec: internal.PersistentVolumeClaimSpec{
+			DataSourceRef: &internal.TypedObjectReference{
+				APIGroup:  name("snapshot.storage.k8s.io"),
+				Kind:      "VolumeSnapshot",
+				Name:      "snap",
+				Namespace: name("default"),
+			},
+		},
+	}
+	got, err := NewPVCTransformer().Forward(claim, tenantID)
+	if err != nil {
+		t.Fatalf("converting a claim with a cross-namespace source: %v", err)
+	}
+	if ns := *got.(*internal.PersistentVolumeClaim).Spec.DataSourceRef.Namespace; ns != "111111-default" {
+		t.Errorf("the source namespace is %q; unprefixed it names the platform's own", ns)
+	}
+
+	// And back, so the tenant reads what it wrote.
+	back, err := NewPVCTransformer().Backward(got, tenantID)
+	if err != nil {
+		t.Fatalf("converting back: %v", err)
+	}
+	if ns := *back.(*internal.PersistentVolumeClaim).Spec.DataSourceRef.Namespace; ns != "default" {
+		t.Errorf("the tenant reads back %q, want the name it wrote", ns)
+	}
+}
+
+// TestDataSourceRefWithoutANamespaceIsLeftAlone -- the field is optional, and the
+// ordinary case is a source in the claim's own namespace, which already rides the
+// namespace prefix.
+func TestDataSourceRefWithoutANamespaceIsLeftAlone(t *testing.T) {
+	claim := &internal.PersistentVolumeClaim{
+		Spec: internal.PersistentVolumeClaimSpec{
+			DataSourceRef: &internal.TypedObjectReference{Kind: "PersistentVolumeClaim", Name: "src"},
+		},
+	}
+	got, err := NewPVCTransformer().Forward(claim, "111111")
+	if err != nil {
+		t.Fatalf("converting: %v", err)
+	}
+	if ref := got.(*internal.PersistentVolumeClaim).Spec.DataSourceRef; ref.Namespace != nil {
+		t.Errorf("a namespace was invented: %q", *ref.Namespace)
+	}
+}
