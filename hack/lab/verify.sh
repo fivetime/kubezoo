@@ -257,8 +257,13 @@ spec:
       containers: [{name: c, image: busybox:1.36}]
 EOF
 sel=$($K -n "$NS" get deploy placed-deploy -o jsonpath='{.spec.template.spec.nodeSelector.kubezoo\.io/pool}' 2>/dev/null)
+# ⚠️ Outcome only: the policy's place-controller rule places a Deployment on
+# CREATE as well, so a green run here does not show WHICH layer did it. The one
+# below does -- an edit after creation is a path the policy structurally does not
+# cover. Kept because the outcome is worth pinning, labelled so it does not read
+# as proof of kubezoo's copy.
 if [ "$sel" = "$TID" ]; then
-  ok "a Deployment's template is placed too, which is what survives a webhook outage"
+  ok "a Deployment's template carries the tenant's pool"
 else
   bad "a Deployment's template is placed" "pool is '${sel:-<none>}', want '$TID'"
 fi
@@ -273,7 +278,7 @@ $T patch deploy placed-deploy --type=merge \
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubezoo.io/pool":"999999"}}}}}' >/dev/null 2>&1
 sel=$($K -n "$NS" get deploy placed-deploy -o jsonpath='{.spec.template.spec.nodeSelector.kubezoo\.io/pool}' 2>/dev/null)
 if [ "$sel" = "$TID" ]; then
-  ok "and so is a template edited after the fact, which the policy does not cover"
+  ok "and an edit after creation is placed too -- only kubezoo could have done that"
 else
   bad "an edited template is placed" "pool is '${sel:-<none>}', want '$TID' -- a tenant can move its own workloads by updating them"
 fi
@@ -290,6 +295,13 @@ fi
 
 # ...and a template carrying one is cleared rather than refused, so a Deployment
 # that already has one keeps reconciling instead of failing every write.
+#
+# ⭐ This one does distinguish the layers: tenant-placement.yaml never mentions
+# nodeName and tenant-scheduling.yaml denies it on Pod only, so nothing touched it
+# in a template before. What used to happen was worse than an escape and quieter:
+# the Deployment was accepted, kube-controller-manager built pods carrying that
+# nodeName, deny-nodename refused every one of them, and the Deployment simply
+# produced nothing with no error on the object the tenant was looking at.
 $T apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: apps/v1
 kind: Deployment

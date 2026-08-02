@@ -69,6 +69,25 @@ PSA 标签(两层都会打)、`nodeName` 拒绝(已有断言要求必须是 Kyve
 只有两类:① 策略结构上够不到的路径(如模板的 UPDATE,策略只匹配 CREATE);
 ② 绕过 kubezoo 直接对上游操作(验的是策略那一层)。其余一律靠单测钉。
 
+**本轮新增断言的逐条判定**(照这把尺子过了一遍):
+
+| 断言 | 能否区分层次 | 依据 |
+|---|---|---|
+| 存储类发布 / retired 拒绝 / 未发布拒绝 | ✅ 能 | **没有任何策略碰 storageclasses**,只有 kubezoo 服务这个组 |
+| VolumeAttributesClass 全组 | ✅ 能 | 同上,策略里 0 处提及 |
+| 上游 namespace 名的读写(#92) | ✅ 能 | 纯 kubezoo 转换层 |
+| PVC `dataSourceRef` 前缀化 | ✅ 能 | 同上 |
+| **模板 UPDATE 后仍被放置** | ✅ 能 | 策略四条规则**全部**只匹配 `operations: [CREATE]` |
+| **模板里的 `nodeName` 被清除** | ✅ 能 | `tenant-placement.yaml` **0 处**提及 nodeName,`tenant-scheduling` 的 deny 只作用于 `Pod` |
+| Deployment 模板 CREATE 时被放置 | ❌ 不能 | `place-controller` 也会做 —— 已改措辞,不再读作"证明了 kubezoo 那层" |
+| PSA 标签三条 | ❌ 不能 | 两层都会打 —— 注释已写明 |
+| `nodeName` 的 Pod 拒绝 | ❌ 不能 | 接受两种消息;策略那层另由"绕过 kubezoo"那条单独验 |
+| ~~非规范 placement 的 Pod 仍可写~~ | ❌ **空转,已删** | Kyverno 的 `place-pod` 对**任何人**建的 Pod 都生效,fixture 在写入瞬间被规范化 |
+
+⭐ 顺带查出来的:**带 `nodeName` 的 Deployment 模板以前没人管**,而后果比逃逸更安静 ——
+Deployment 被接受,KCM 照着建的 Pod 每一个都被 `deny-nodename` 拒掉,于是它**一个 Pod
+也产不出来,而租户看的那个对象上没有任何报错**。清除模板 nodeName 顺带修了这个。
+
 ⚠️ 但"两层"这个说法**只对已经建好的 namespace 成立** —— 见 §2③,
 装第二层的动作本身是第一层做的。`nodeName` 则是这一类里唯一的纯单层项。
 
