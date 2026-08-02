@@ -2377,6 +2377,65 @@ $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
 
 echo
+echo "== a tenant cannot claim traffic to an address it does not own =="
+# ⛔ A Service carrying spec.externalIPs makes the data plane on EVERY node
+# intercept traffic to those addresses and deliver it to that Service's
+# endpoints, with no check that the writer has any claim to them. A tenant could
+# take another tenant's service, the platform's DNS or apiserver, or any address
+# outside the cluster. This is CVE-2020-8554.
+#
+# ⭐ Single-layer: no policy has a rule whose kinds include Service, and
+# pkg/convert had no service.go at all, so a pass here can only be kubezoo.
+#
+# ⚠️ Also what proves the guard is WIRED -- it hangs off three call sites (Create,
+# Update, guaranteedUpdate) and the unit test calls none of them.
+extip_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: extip-probe}
+spec:
+  externalIPs: ["10.99.99.99"]
+  ports: [{port: 80}]
+  selector: {app: nothing}
+EOF
+)
+if grep -q "externalIPs" <<<"$extip_out"; then
+  ok "a Service claiming an external IP is refused"
+else
+  bad "a Service claiming an external IP is refused" \
+      "$(tr '\n' ' ' <<<"$extip_out" | cut -c1-160)"
+fi
+
+# ...and the same Service without it is fine, so the refusal is about the field
+# rather than about Services.
+if $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: extip-probe}
+spec:
+  ports: [{port: 80}]
+  selector: {app: nothing}
+EOF
+then
+  ok "while the same Service without one is accepted"
+else
+  bad "a Service without an external IP is accepted" "it was refused"
+fi
+
+# ⭐ And the update path, which is a separate call site: adding the field to an
+# existing Service must be refused too, or the guard is create-only and a tenant
+# just writes twice.
+extip_out=$($T patch service extip-probe --type=merge \
+  -p '{"spec":{"externalIPs":["10.99.99.99"]}}' 2>&1)
+if grep -q "externalIPs" <<<"$extip_out"; then
+  ok "and adding one to a Service that already exists is refused as well"
+else
+  bad "adding an external IP by update is refused" \
+      "$(tr '\n' ' ' <<<"$extip_out" | cut -c1-160)"
+fi
+$T delete service extip-probe >/dev/null 2>&1
+
+echo
 echo "== the platform caps how many cluster role bindings a tenant may own =="
 # ⛔ THIS RUNS SECOND-TO-LAST, immediately before the section that takes the
 # tenant's RoleBinding away -- which has to stay last, so this cannot be after it. Filling a

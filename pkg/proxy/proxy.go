@@ -447,6 +447,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseUnpublishedVolumeAttributesClass(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
+		return nil, false, err
+	}
 	return tp.update(ctx, obj, options)
 }
 
@@ -626,6 +629,10 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	if err := tp.refuseTooManyNamespaces(ctx, obj, tenantID); err != nil {
+		return nil, err
+	}
+	// nil: nothing is stored, so every address named here is newly claimed.
+	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
 		return nil, err
 	}
 
@@ -1032,6 +1039,45 @@ func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 			)})
 	}
 	return nil
+}
+
+// refuseNewExternalIPs stops a tenant claiming traffic to addresses it does not
+// own.
+//
+// ⛔ A Service carrying spec.externalIPs makes the data plane on EVERY node
+// intercept traffic to those addresses and hand it to that Service's endpoints,
+// with no check that the writer has any claim to the address. A tenant can take
+// another tenant's service, the platform's own -- apiserver, DNS, a registry --
+// or any address outside the cluster, so that every pod in the cluster talking to
+// it reaches the tenant's pods instead. This is CVE-2020-8554.
+//
+// ⚠️ Kubernetes' own mitigation, the DenyServiceExternalIPs admission plugin,
+// denies the field to EVERYONE including the platform. That is why the decision
+// belongs here, where the writer's tenancy is known -- and why enabling the
+// plugin upstream is not a substitute if the platform has a legitimate use.
+//
+// ⭐ Subset rather than refusal, which is the upstream plugin's rule: keeping or
+// dropping an address is allowed, adding one is not. A Service that already
+// carries an address therefore stays writable by its owner, who would otherwise
+// be unable even to remove it.
+func (tp *tenantProxy) refuseNewExternalIPs(obj, old runtime.Object) error {
+	svc, ok := obj.(*core.Service)
+	if !ok {
+		return nil
+	}
+	oldSvc, _ := old.(*core.Service)
+	if !convert.ExternalIPsAreNew(svc, oldSvc) {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Service"}, svc.Name,
+		field.ErrorList{field.Forbidden(
+			field.NewPath("spec", "externalIPs"),
+			"claiming an external IP is not available to tenants: every node would "+
+				"intercept traffic to that address and deliver it here, whoever the address "+
+				"actually belongs to. Use a Service of type LoadBalancer or NodePort, or ask "+
+				"the platform to route the address to you.",
+		)})
 }
 
 // refuseTooManyNamespaces caps how many namespaces one tenant may own.
@@ -1513,6 +1559,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		}
 
 		if err := tp.refuseUnpublishedVolumeAttributesClass(updated, original); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
 			return nil, false, err
 		}
 		got, created, err := tp.update(ctx, updated, options)
