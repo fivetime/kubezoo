@@ -2377,6 +2377,58 @@ $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
 
 echo
+echo "== a NetworkPolicy peer cannot reach past the tenant =="
+# ⛔ A peer selects namespaces by LABEL, cluster-wide, and nothing translated it
+# -- not kubezoo, not the policies, not kubetron (checked: zero references in all
+# three). So `namespaceSelector: {}` meant every namespace IN THE CLUSTER, and a
+# tenant narrowing ingress to "my namespaces" was in fact opening its pods to
+# every other tenant, with nothing to say so: the policy was accepted and did
+# exactly what it literally said.
+#
+# ⭐ Single-layer by construction, so a pass here can only be kubezoo.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: np-probe}
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - namespaceSelector: {}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: default}}
+EOF
+# Read the STORED object, which is what actually gets enforced.
+np_all=$($K -n "$NS" get networkpolicy np-probe \
+  -o jsonpath='{.spec.ingress[0].from[0].namespaceSelector.matchLabels.kubezoo\.io/tenant}' 2>/dev/null)
+if [ "$np_all" = "$TID" ]; then
+  ok "an empty namespaceSelector is confined to the tenant's own namespaces"
+else
+  bad "an empty namespaceSelector is confined" \
+      "the stored selector carries tenant='${np_all:-<none>}', so it still reaches every namespace in the cluster"
+fi
+
+np_named=$($K -n "$NS" get networkpolicy np-probe \
+  -o jsonpath='{.spec.ingress[0].from[1].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}' 2>/dev/null)
+if [ "$np_named" = "$NS" ]; then
+  ok "and naming its own namespace reaches its own, not the platform's of that name"
+else
+  bad "a named namespace is prefixed" "the stored selector names '${np_named:-<none>}', want '$NS'"
+fi
+
+# ⚠️ And the tenant reads back what it wrote, or its next apply re-sends the
+# selector, kubezoo confines it again, and the object it sees never matches the
+# object it wrote.
+np_back=$($T get networkpolicy np-probe \
+  -o jsonpath='{.spec.ingress[0].from[1].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}' 2>/dev/null)
+np_leak=$($T get networkpolicy np-probe -o json 2>/dev/null | grep -c "kubezoo.io/tenant" || true)
+if [ "$np_back" = default ] && [ "$np_leak" = 0 ]; then
+  ok "while the tenant reads back exactly the selector it wrote"
+else
+  bad "the selector round-trips" "tenant sees name='${np_back:-<none>}' (want default), tenant-label leaks=$np_leak (want 0)"
+fi
+$T delete networkpolicy np-probe >/dev/null 2>&1
+
+echo
 echo "== a tenant cannot claim traffic to an address it does not own =="
 # ⛔ A Service carrying spec.externalIPs makes the data plane on EVERY node
 # intercept traffic to those addresses and deliver it to that Service's

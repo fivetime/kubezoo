@@ -56,6 +56,15 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Kind:  "Ingress",
 		}: NewCrossReferenceConverter(defaultConvertor, NewIngressTransformer(publishedIngressClasses)),
 		{
+			// ⛔ A peer selects namespaces by LABEL, cluster-wide, and nothing
+			// translated that -- so `namespaceSelector: {}` meant every namespace
+			// in the cluster rather than every namespace the tenant owns, and a
+			// tenant narrowing ingress to "mine" was opening its pods to every
+			// other tenant. See networkpolicy.go.
+			Group: "networking.k8s.io",
+			Kind:  "NetworkPolicy",
+		}: NewCrossReferenceConverter(defaultConvertor, NewNetworkPolicyTransformer()),
+		{
 			Group: "discovery.k8s.io",
 			Kind:  "EndpointSlice",
 		}: NewCrossReferenceConverter(defaultConvertor, NewEndpointSliceTransformer(objectReferenceTransformer)),
