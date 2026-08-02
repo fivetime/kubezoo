@@ -607,6 +607,9 @@ type ProxyConfig struct {
 	// read-only view and by the PVC endpoint, which refuses a claim naming one
 	// that is not published.
 	publishedVolumeAttributesClasses publishedclass.Set
+	// maxNamespacesPerTenant is a ceiling on the fan-out amplifier: a tenant's
+	// cross-namespace list costs one upstream request per namespace it owns.
+	maxNamespacesPerTenant int
 	// classInformers backs both. Started and waited for in a post-start hook, so
 	// that no tenant is told a published class does not exist because the cache
 	// was still filling.
@@ -642,6 +645,9 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// classes, and it would compile.
 	// The subresource check is not decoration: persistentvolumeclaims/status
 	// carries the same Resource string, and a status write is not a claim.
+	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
+		config.MaxNamespaces = c.maxNamespacesPerTenant
+	}
 	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
 		config.Subresource == "" {
 		config.PublishedStorageClasses = c.publishedStorageClasses
@@ -794,6 +800,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		publishedStorageClasses:          publishedStorageClasses,
 		publishedIngressClasses:          publishedIngressClasses,
 		publishedVolumeAttributesClasses: publishedVolumeAttributesClasses,
+		maxNamespacesPerTenant:           o.MaxNamespacesPerTenant,
 		classInformers:                   classInformers,
 		ingressClassInformers:            ingressClassInformers,
 		volumeAttributesClassInformers:   volumeAttributesClassInformers,

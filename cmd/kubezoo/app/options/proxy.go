@@ -35,8 +35,11 @@ type ProxyOptions struct {
 	// -- but storage.k8s.io is not served, so it has no way to find out which
 	// names exist. Empty publishes nothing, which is the safe default: an
 	// operator who has not chosen classes has not offered any.
-	PublicStorageClasses  []string
-	ServiceAccountKeyFile string
+	PublicStorageClasses []string
+	// MaxNamespacesPerTenant caps how many namespaces one tenant may own. Zero
+	// means no cap, which is what an upgrade gets.
+	MaxNamespacesPerTenant int
+	ServiceAccountKeyFile  string
 }
 
 // NewProxyOptions creates a new ProxyOptions object
@@ -81,6 +84,16 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"refused, while it stays visible and every claim that already uses it keeps working, so tenants "+
 			"have a window to migrate. This flag is unioned with the labelled set and kept so that an "+
 			"upgrade does not silently un-publish anything.")
+	fs.IntVar(&o.MaxNamespacesPerTenant, "max-namespaces-per-tenant", o.MaxNamespacesPerTenant,
+		"the most namespaces one tenant may own, or 0 for no limit, which is the default. "+
+			"This is a ceiling on a shared-cluster amplifier rather than a billing control: a "+
+			"cross-namespace list is assembled by reading each of the tenant's namespaces in "+
+			"turn, so every `kubectl get pods` a tenant runs costs one upstream request per "+
+			"namespace it owns, against the apiserver every tenant shares. Mostly-empty "+
+			"namespaces are the worst case, since the walk has to reach them all before it "+
+			"can fill a page. Count what tenants have today before setting it -- "+
+			"`kubectl get ns -L kubezoo.io/tenant` -- because the limit refuses new "+
+			"namespaces the moment it is below what a tenant already owns.")
 }
 
 func (o *ProxyOptions) Validate() []error {

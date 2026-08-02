@@ -153,6 +153,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --api-audiences=$UPSTREAM_SA_ISSUER \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
   --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-} \
+  --max-namespaces-per-tenant=${MAX_NAMESPACES_PER_TENANT:-16} \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do

@@ -100,6 +100,10 @@ type StorageConfig struct {
 	// changes. See tenantProxy.refuseUnpublishedVolumeAttributesClass.
 	PublishedVolumeAttributesClasses publishedclass.Set
 
+	// MaxNamespaces caps how many namespaces one tenant may own. Zero means no
+	// cap. Set only on the namespaces resource.
+	MaxNamespaces int
+
 	ProxyTransport       http.RoundTripper
 	UpstreamMaster       *url.URL
 	GroupVersionKindFunc GroupVersionKindFunc

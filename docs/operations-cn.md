@@ -243,6 +243,33 @@ kubectl taint node <platform-node> kubezoo.io/pool=platform:NoSchedule
 
 ---
 
+## 2.5 ⭐ 每租户 namespace 数量上限
+
+`--max-namespaces-per-tenant=<N>`,**默认 0 = 不限**(升级不会打断任何人)。
+
+⚠️ 这是**放大器的天花板**,不是计费控制。租户的跨 namespace list 是**逐个 namespace
+读过去**的(`listAcrossNamespaces`,一个 namespace 一次上游请求,串行),所以租户每跑一次
+`kubectl get pods`,就要花掉**与它拥有的 namespace 数一样多的上游请求** —— 打的是所有租户
+共用的那台 apiserver。**大多是空的 namespace 是最坏情况**:走查必须把它们全趟一遍才能凑满
+一页。
+
+```bash
+# 设之前先数:每个租户现在有多少
+kubectl get ns -L kubezoo.io/tenant --no-headers | awk '{print $NF}' | sort | uniq -c | sort -rn
+```
+
+⛔ **设成低于某个租户的存量,它下一次建 namespace 就会被拒。** 已有的不受影响,
+**而且必须不受影响** —— 一个超限的租户仍然要能写自己已有的 namespace,否则它连"删掉里面的
+负载好回到限额以内"这件唯一该做的事都做不了。
+
+⭐ 控制器自己会给每个租户建 4 个(`default` / `kube-system` / `kube-public` /
+`kube-node-lease`),它们也算在内。所以 N 要留出这 4 个的余量。
+
+⚠️ 计数失败时**放行**,不拒绝:上游抖一下不该让租户看成配额 —— 它分不清这两者。
+日志里会有一条 `counting tenant ... to apply --max-namespaces-per-tenant`。
+
+---
+
 ## 3. 日常操作:停机一个租户
 
 ### 3.1 两种模式,先选对

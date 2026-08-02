@@ -1098,6 +1098,56 @@ expect_denied "a namespace whose name begins with the tenant's own prefix" "coul
 expect_allowed "while an ordinary namespace name is unaffected" \
   $T create namespace ns-probe-ok
 
+# ⭐ And a tenant cannot own unboundedly many. This is a ceiling on an amplifier,
+# not a billing control: a cross-namespace list is assembled by reading each of
+# the tenant's namespaces in turn -- one upstream request each, in a loop -- so
+# every `kubectl get pods` a tenant runs costs as many upstream requests as it
+# owns namespaces, against the apiserver every tenant shares.
+#
+# ⭐ Single-layer by construction: no policy counts anything, so a pass here can
+# only have come from kubezoo.
+#
+# ⚠️ The namespaces made here are deleted immediately afterwards, and the cap is
+# set well above what the rest of this file needs. The first version used a tight
+# cap and left them behind: three later sections that create a namespace of their
+# own failed, in ways that read like product defects -- a projection missing from
+# a namespace that was never created, an operator ServiceAccount seeing one
+# namespace instead of two. A quota fixture that does not clean up turns every
+# later namespace-creating assertion into a hostage.
+#
+# Counted from where the tenant is now rather than from zero, since the controller
+# makes four and the checks above have made more.
+nscap_before=$($T get namespaces --no-headers 2>/dev/null | wc -l)
+nscap_out=""
+nscap_made=""
+for i in $(seq 1 $((16 - nscap_before + 1))); do
+  nscap_out=$($T create namespace "nscap-$i" 2>&1) || break
+  nscap_made="$nscap_made nscap-$i"
+done
+if grep -q "limit is 16" <<<"$nscap_out"; then
+  ok "a tenant cannot own more namespaces than the platform allows"
+else
+  bad "the namespace cap refuses" "got: $(tr '\n' ' ' <<<"$nscap_out" | cut -c1-160)"
+fi
+
+# ⚠️ ...while writing to the ones it already has still works. A cap that also
+# froze existing namespaces would leave a tenant over the limit unable to delete
+# the workloads inside them, which is the one thing it needs to do to get back
+# under it.
+if $T label namespace ns-probe-ok probe=still-writable --overwrite >/dev/null 2>&1; then
+  ok "and writing to a namespace it already owns still works while it is at the cap"
+else
+  bad "an owned namespace stays writable at the cap" \
+      "$($T label namespace ns-probe-ok probe=x --overwrite 2>&1 | tr '\n' ' ' | cut -c1-160)"
+fi
+# ⛔ Deleted before anything else runs. See the note above: leaving them costs
+# three later assertions, and the failures do not point here.
+for ns in $nscap_made; do $T delete namespace "$ns" --wait=false >/dev/null 2>&1; done
+for _ in $(seq 30); do
+  [ "$($T get namespaces --no-headers 2>/dev/null | wc -l)" -le "$nscap_before" ] && break
+  sleep 2
+done
+
 # ⭐ And it carries the Pod Security level, written by kubezoo itself rather than
 # by the Kyverno mutate that also writes it. That matters because Pod Security
 # Admission runs INSIDE the apiserver -- no webhook, no single point -- so this

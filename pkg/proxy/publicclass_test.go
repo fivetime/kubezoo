@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -447,5 +448,105 @@ func TestRefuseTenantChosenNode(t *testing.T) {
 	// everything that is not a pod.
 	if err := proxy.refuseTenantChosenNode(&core.ConfigMap{}); err != nil {
 		t.Errorf("a ConfigMap was refused: %v", err)
+	}
+}
+
+// nsCountFake answers a namespace LIST with a fixed number of tenant namespaces.
+type nsCountFake struct {
+	kubezoodynamic.Interface
+	kubezoodynamic.NamespaceableResourceInterface
+	count int
+	err   error
+	// listed records that the count actually happened.
+	//
+	// ⚠️ An erroring fake cannot stand in for "must not be called" here: the
+	// guard fails open on a count error, so a call that errors and a call that
+	// never happened produce exactly the same result. A mutation check caught two
+	// assertions that were vacuous for precisely that reason.
+	listed bool
+}
+
+func (f *nsCountFake) Resource(schema.GroupVersionResource) kubezoodynamic.NamespaceableResourceInterface {
+	return f
+}
+
+func (f *nsCountFake) List(context.Context, metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	f.listed = true
+	if f.err != nil {
+		return nil, f.err
+	}
+	list := &unstructured.UnstructuredList{}
+	for i := 0; i < f.count; i++ {
+		item := unstructured.Unstructured{Object: map[string]interface{}{}}
+		item.SetName(fmt.Sprintf("111111-ns%d", i))
+		list.Items = append(list.Items, item)
+	}
+	list.SetResourceVersion("1")
+	return list, nil
+}
+
+// TestRefuseTooManyNamespaces caps the fan-out amplifier.
+//
+// ⚠️ A tenant's cross-namespace list is assembled by reading each of its
+// namespaces in turn, so every `kubectl get pods` it runs costs one upstream
+// request per namespace it owns, against the apiserver every tenant shares.
+func TestRefuseTooManyNamespaces(t *testing.T) {
+	proxyWith := func(max, owned int) *tenantProxy {
+		return &tenantProxy{
+			maxNamespaces: max,
+			dynamicClient: &nsCountFake{count: owned},
+		}
+	}
+	ns := &core.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team"}}
+
+	if err := proxyWith(5, 4).refuseTooManyNamespaces(context.TODO(), ns, "111111"); err != nil {
+		t.Errorf("a tenant below the limit was refused: %v", err)
+	}
+	err := proxyWith(5, 5).refuseTooManyNamespaces(context.TODO(), ns, "111111")
+	if err == nil {
+		t.Fatal("a tenant at the limit was allowed another namespace")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("refused with %T, want a Forbidden", err)
+	}
+	if !strings.Contains(err.Error(), "5") {
+		t.Errorf("the refusal does not say what the limit is: %v", err)
+	}
+
+	// ⭐ Zero is no cap, which is what an upgrade gets -- and it must not even
+	// count, since the count is an upstream LIST.
+	noCap := &nsCountFake{count: 99}
+	if err := (&tenantProxy{maxNamespaces: 0, dynamicClient: noCap}).
+		refuseTooManyNamespaces(context.TODO(), ns, "111111"); err != nil {
+		t.Errorf("no cap configured, yet: %v", err)
+	}
+	if noCap.listed {
+		t.Error("with no cap configured the namespaces were counted anyway; that is an " +
+			"upstream LIST on a path that had no question to answer")
+	}
+
+	// The guard runs on every create the proxy serves. Anything but a namespace
+	// must not reach the count, or every create in the cluster pays for a LIST.
+	other := &nsCountFake{count: 99}
+	if err := (&tenantProxy{maxNamespaces: 1, dynamicClient: other}).
+		refuseTooManyNamespaces(context.TODO(), &core.ConfigMap{}, "111111"); err != nil {
+		t.Errorf("a ConfigMap was counted against the namespace cap: %v", err)
+	}
+	if other.listed {
+		t.Error("creating a ConfigMap counted the tenant's namespaces; every create in the " +
+			"cluster would pay for an upstream LIST")
+	}
+}
+
+// TestNamespaceCountFailureDoesNotRefuse -- a blip in the upstream apiserver must
+// not look like a quota to the tenant, who cannot tell the two apart. The cap is
+// a ceiling on an amplifier, not an isolation boundary, so it fails open and says
+// so in the log.
+func TestNamespaceCountFailureDoesNotRefuse(t *testing.T) {
+	proxy := &tenantProxy{maxNamespaces: 1,
+		dynamicClient: &nsCountFake{err: fmt.Errorf("upstream is having a moment")}}
+	if err := proxy.refuseTooManyNamespaces(context.TODO(),
+		&core.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team"}}, "111111"); err != nil {
+		t.Errorf("a failed count refused the namespace: %v", err)
 	}
 }

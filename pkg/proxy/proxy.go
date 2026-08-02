@@ -43,6 +43,7 @@ import (
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
@@ -113,6 +114,10 @@ type tenantProxy struct {
 	// spec.volumeAttributesClassName -- a field the tenant may CHANGE on a bound
 	// claim, so its check is not create-only.
 	publishedVolumeAttributesClasses publishedclass.Set
+
+	// maxNamespaces caps how many namespaces this tenant may own; zero means no
+	// cap. Nil on every resource but namespaces.
+	maxNamespaces int
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -208,6 +213,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 
 		publishedStorageClasses:          config.PublishedStorageClasses,
 		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
+		maxNamespaces:                    config.MaxNamespaces,
 		convertor:                        config.Convertor,
 		groupVersionKindFunc:             config.GroupVersionKindFunc,
 		tableConvertor:                   tc,
@@ -619,6 +625,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseTenantChosenNode(obj); err != nil {
 		return nil, err
 	}
+	if err := tp.refuseTooManyNamespaces(ctx, obj, tenantID); err != nil {
+		return nil, err
+	}
 
 	// An apply that has to create the object is still an apply, and this is the
 	// path it takes -- most resources refuse to be created by an update. Sending
@@ -1023,6 +1032,53 @@ func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 			)})
 	}
 	return nil
+}
+
+// refuseTooManyNamespaces caps how many namespaces one tenant may own.
+//
+// ⚠️ A ceiling on a shared-cluster amplifier, not a billing control. A tenant's
+// cross-namespace list is assembled by reading each of its namespaces in turn --
+// listAcrossNamespaces, one upstream request per namespace, in a loop -- so every
+// `kubectl get pods` a tenant runs costs as many upstream requests as it owns
+// namespaces, against the apiserver every tenant shares. Mostly-empty namespaces
+// are the worst case, because the walk has to reach all of them before it can
+// fill a single page.
+//
+// ⭐ Counted with a LIST rather than an informer on purpose. Creating a namespace
+// is rare -- nothing does it in a loop -- and the alternative is another watch on
+// every namespace in the cluster, carried permanently, to make a rare path
+// cheaper.
+//
+// ⚠️ CREATE only. An update to an existing namespace must go through even when
+// the tenant is over the limit, or lowering the cap would leave every namespace
+// the tenant already owns unwritable -- and one of the things a tenant does to a
+// namespace it owns is delete the workloads inside it.
+func (tp *tenantProxy) refuseTooManyNamespaces(ctx context.Context, obj runtime.Object,
+	tenantID string) error {
+
+	if tp.maxNamespaces <= 0 {
+		return nil
+	}
+	if _, ok := obj.(*core.Namespace); !ok {
+		return nil
+	}
+	owned, _, err := tp.tenantNamespaces(ctx, tenantID, "")
+	if err != nil {
+		// Refusing on a failed count would make a blip in the upstream apiserver
+		// look like a quota, and the tenant cannot tell the two apart. The
+		// namespace goes through; the cap is a ceiling, not a boundary.
+		klog.Errorf("counting tenant %s's namespaces to apply --max-namespaces-per-tenant: %v",
+			tenantID, err)
+		return nil
+	}
+	if len(owned) < tp.maxNamespaces {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Resource: "namespaces"}, "",
+		fmt.Errorf("this tenant already owns %d namespaces and the limit is %d; "+
+			"delete one you no longer need, or ask the platform to raise the limit",
+			len(owned), tp.maxNamespaces))
 }
 
 // refuseTenantChosenNode refuses a pod that names the node it wants to run on.
