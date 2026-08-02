@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
+	"github.com/fivetime/kubezoo-gateway/pkg/convert"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy/pod"
 	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
@@ -575,6 +576,20 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// 1. convert the internal version of tenant object to upstream object
 	if err := tp.convertTenantObjectToUpstreamObject(obj, tenantID); err != nil {
 		return nil, err
+	}
+
+	// ⭐ Placement, for a live Pod only, and only here. A template is placed by
+	// the convertor, which needs no verb; a Pod cannot be, because its placement
+	// is immutable once stored -- rewriting it on an update makes upstream refuse
+	// the write and leaves the tenant unable to touch its own running pod.
+	//
+	// ⚠️ Placed BEFORE the object is turned into unstructured, so that a
+	// server-side apply carries these fields: conversionDelta compares the
+	// snapshot taken above against what goes upstream, and anything injected
+	// after this line would fall outside that window and be dropped from the
+	// apply. See tenantProxy.injectedPaths for what that costs when it happens.
+	if pod, ok := obj.(*core.Pod); ok && tp.subresource == "" {
+		convert.PlacePod(pod, tenantID)
 	}
 
 	// 2. convert the internal obj to unstructured

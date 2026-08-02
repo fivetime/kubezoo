@@ -57,6 +57,18 @@ ownerReference 转换。除此之外 spec 原样透传。
 `tenant-pod-security.yaml` 里的注释写明了原因:"原生 PSA 在 apiserver 进程内,
 不走 webhook、没有单点。万一 Kyverno 挂掉…已建 namespace 上的标签仍然拦得住。"
 
+⛔⛔ **lab 有一个结构性局限,已经踩到三次,写在这里**:Kyverno 在场时,
+**几乎每条断言都分不清是哪一层干的** —— 两层都会把结果弄成对的。三次分别是:
+PSA 标签(两层都会打)、`nodeName` 拒绝(已有断言要求必须是 Kyverno 拒的,kubezoo 先拒
+导致健康集群上失败)、以及最阴的一次:我加了一条断言想验"非规范 placement 的 Pod 仍可写",
+**它是空转的** —— 因为 Kyverno 的 `place-pod` 对**任何人**在租户 namespace 里建的 Pod
+都生效,那个"遗留 Pod"在写入瞬间就被规范化了。**是负向对照(把缺陷放回去重跑)发现的,
+不是断言本身。**
+
+⇒ **规则:凡是声称验证 kubezoo 这一层的 lab 断言,必须跑一次负向对照。** 能区分层次的
+只有两类:① 策略结构上够不到的路径(如模板的 UPDATE,策略只匹配 CREATE);
+② 绕过 kubezoo 直接对上游操作(验的是策略那一层)。其余一律靠单测钉。
+
 ⚠️ 但"两层"这个说法**只对已经建好的 namespace 成立** —— 见 §2③,
 装第二层的动作本身是第一层做的。`nodeName` 则是这一类里唯一的纯单层项。
 
@@ -129,7 +141,18 @@ C 类靠 PSA 那两层扛住了宿主机逃逸,但**落点隔离没有第二层*
 那些是 kube-controller-manager 直接对上游建的。但 kubezoo 看得见**租户写的模板**,
 所以模板存对了,整个故障期间它就一直在产出落点正确的 Pod。这是对那批 Pod 唯一可行的保护。
 
-⚠️ **kubezoo 在 UPDATE 上也注入,策略只匹配 CREATE。** 策略之所以能只管 CREATE,
+⛔ **修正:Pod 只在 CREATE 放置,模板才是每次都放置。** 我第一版让 `place()` 在
+**每次**写入都重写 Pod 的 placement,那是个缺陷:`spec.nodeSelector` / `schedulerName`
+在 Pod update 上**不可变**,而 `validateOnlyAddedTolerations`(k8s `validation.go:4415`)
+要求**已有的每一条 toleration 都必须还在**。于是对任何"存储的 placement 与规范值不同"
+的 Pod —— 升级前建的、或 webhook 不在时建的 —— 租户**从此改不动自己正在运行的 Pod**。
+Kyverno 没这个问题,因为它的规则匹配 `operations: [CREATE]`。
+
+⇒ 现在:模板走转换器(无需 verb),Pod 走 `tenantProxy.Create` 的 `convert.PlacePod`。
+放在**转换之后、构造 unstructured 之前**,这样 SSA 的 `conversionDelta` 能看见这些注入
+字段并带上;放在那之后就会被 apply 丢掉。
+
+⚠️ **kubezoo 在模板的 UPDATE 上也注入,策略只匹配 CREATE。** 策略之所以能只管 CREATE,
 是因为 Pod 本身永远是 CREATE、`place-pod` 会把模板说的覆盖掉 —— 而那个兜底恰恰是
 webhook 不在时缺失的那个。lab 里"改完模板还能被改回去"是**唯一一条能区分出是哪一层
 干的**断言。

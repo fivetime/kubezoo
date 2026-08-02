@@ -81,24 +81,40 @@ func (t *PlacementTransformer) Forward(obj runtime.Object, tenantID string) (run
 		// to place, and nothing wrong with that.
 		return obj, nil
 	}
-	place(spec, tenantID)
-	if _, isPod := obj.(*core.Pod); !isPod {
-		// ⭐ nodeName in a TEMPLATE is always the tenant's own doing: nothing in
-		// Kubernetes ever writes it there. It goes around the scheduler entirely
-		// -- kubelet takes the pod because the pod names the node, and a
-		// nodeSelector it fails is caught only later, by kubelet, after the pod
-		// is already assigned. Cleared here rather than refused so that a
-		// Deployment already carrying one keeps reconciling instead of failing
-		// every write from now on.
+	if _, isPod := obj.(*core.Pod); isPod {
+		// ⛔ A live Pod is placed on CREATE and never again -- by
+		// tenantProxy.Create, which is the one caller that knows it is a create.
 		//
-		// ⚠️ NOT done for a live Pod, and that is the trap this side-steps: the
-		// scheduler writes spec.nodeName on every pod it binds, so from then on
-		// every update to that pod -- a label, an annotation -- carries it.
-		// Clearing it there would unbind running pods, and refusing would fail
-		// every later write. tenantProxy.Create refuses it on the one operation
-		// where it can only have come from the tenant.
-		spec.NodeName = ""
+		// Rewriting these on an update does not merely waste work, it BREAKS the
+		// pod. spec.nodeSelector and spec.schedulerName are immutable on a pod
+		// update, and validateOnlyAddedTolerations requires every toleration the
+		// stored pod already has to still be there. So writing the canonical
+		// placement over a pod whose stored placement differs -- one created
+		// before this existed, above all -- makes upstream refuse the update, and
+		// the tenant can no longer touch its own running pod at all. Kyverno never
+		// had this problem because its rules match operations: [CREATE].
+		//
+		// The lab's "a bound pod stays writable" assertion did not catch it: the
+		// pod it writes to was itself created with the canonical placement, so the
+		// rewrite was a no-op. Only a pod predating the change would have failed.
+		return obj, nil
 	}
+	place(spec, tenantID)
+	// ⭐ nodeName in a TEMPLATE is always the tenant's own doing: nothing in
+	// Kubernetes ever writes it there. It goes around the scheduler entirely
+	// -- kubelet takes the pod because the pod names the node, and a
+	// nodeSelector it fails is caught only later, by kubelet, after the pod
+	// is already assigned. Cleared here rather than refused so that a
+	// Deployment already carrying one keeps reconciling instead of failing
+	// every write from now on.
+	//
+	// ⚠️ NOT done for a live Pod, and that is the trap this side-steps: the
+	// scheduler writes spec.nodeName on every pod it binds, so from then on
+	// every update to that pod -- a label, an annotation -- carries it.
+	// Clearing it there would unbind running pods, and refusing would fail
+	// every later write. tenantProxy.Create refuses it on the one operation
+	// where it can only have come from the tenant.
+	spec.NodeName = ""
 	return obj, nil
 }
 
@@ -214,3 +230,14 @@ var PodCarryingKinds = []schema.GroupKind{
 	{Group: "batch", Kind: "Job"},
 	{Group: "batch", Kind: "CronJob"},
 }
+
+// PlacePod puts a pod in its tenant's node pool.
+//
+// ⚠️ Exported for tenantProxy.Create, which is the one caller that knows a write
+// is a CREATE. A pod's placement cannot be rewritten afterwards -- nodeSelector
+// and schedulerName are immutable on a pod update, and every toleration the
+// stored pod already carries has to still be there -- so doing this on an update
+// would make upstream refuse it and leave the tenant unable to touch its own
+// running pod. Templates go through Forward instead, where there is no such
+// restriction and no need for a verb.
+func PlacePod(pod *core.Pod, tenantID string) { place(&pod.Spec, tenantID) }

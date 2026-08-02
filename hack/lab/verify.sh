@@ -321,6 +321,23 @@ else
       "$($T -n default annotate pod placed probe=x --overwrite 2>&1 | tr '\n' ' ' | cut -c1-160)"
 fi
 
+# ⛔ The case this CANNOT reach, recorded so nobody adds an assertion that looks
+# like it does. What would prove the create-only rule is a pod whose STORED
+# placement is not the canonical one -- a pod predating this hardening, or one
+# written while the webhook was down. Rewriting placement on an update is refused
+# by upstream (nodeSelector is immutable on a pod update and every existing
+# toleration has to survive), so such a pod would become unwritable by its tenant.
+#
+# ⚠️ There is no way to build one here: Kyverno's place-pod matches every Pod
+# CREATE in a tenant-labelled namespace whoever issues it, so a pod created
+# against upstream with a foreign pool is canonicalised on the way in. An earlier
+# version of this file did exactly that and asserted on it; a negative control --
+# putting the defect back and re-running -- showed the assertion passing anyway.
+# It proved nothing and has been removed.
+#
+# What pins the rule instead is TestForwardLeavesALivePodAlone in
+# pkg/convert/placement_test.go, which is mutation-checked and does go red.
+
 $T delete deploy placed-deploy >/dev/null 2>&1
 
 echo

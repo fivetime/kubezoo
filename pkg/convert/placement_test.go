@@ -17,6 +17,7 @@ limitations under the License.
 package convert
 
 import (
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -135,8 +136,6 @@ func TestEveryPodCarrierIsPlaced(t *testing.T) {
 		obj  runtime.Object
 		spec func(runtime.Object) *core.PodSpec
 	}{
-		{"Pod", &core.Pod{ObjectMeta: meta, Spec: tenantChosenPlacement()},
-			func(o runtime.Object) *core.PodSpec { return &o.(*core.Pod).Spec }},
 		{"PodTemplate", &core.PodTemplate{ObjectMeta: meta, Template: template()},
 			func(o runtime.Object) *core.PodSpec { return &o.(*core.PodTemplate).Template.Spec }},
 		{"ReplicationController", func() runtime.Object {
@@ -171,6 +170,40 @@ func TestEveryPodCarrierIsPlaced(t *testing.T) {
 			continue
 		}
 		assertPlaced(t, tc.kind, tc.spec(tc.obj), tenantID)
+	}
+
+	// ⭐ A Pod is placed by tenantProxy.Create instead, through PlacePod, because
+	// only that caller knows a write is a create. Checked here so the same
+	// expectations cover both routes.
+	pod := &core.Pod{ObjectMeta: meta, Spec: tenantChosenPlacement()}
+	PlacePod(pod, tenantID)
+	assertPlaced(t, "Pod (via PlacePod)", &pod.Spec, tenantID)
+}
+
+// TestForwardLeavesALivePodAlone is the defect this rule exists to avoid.
+//
+// ⛔ A pod's placement cannot be rewritten after it is stored: nodeSelector and
+// schedulerName are immutable on a pod update, and validateOnlyAddedTolerations
+// requires every toleration the stored pod already has to still be there. So
+// writing the canonical placement over a pod whose stored placement differs --
+// one created before any of this existed, above all -- makes upstream refuse the
+// update, and the tenant can no longer touch its own running pod at all.
+//
+// ⚠️ The lab's "a bound pod stays writable" assertion cannot catch this: the pod
+// it writes to was created with the canonical placement, so the rewrite is a
+// no-op. Only a pod predating the change would have failed, and the lab has none.
+func TestForwardLeavesALivePodAlone(t *testing.T) {
+	before := tenantChosenPlacement()
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "running", Namespace: "team"},
+		Spec:       *before.DeepCopy(),
+	}
+	if _, err := NewPlacementTransformer().Forward(pod, "111111"); err != nil {
+		t.Fatalf("converting a live pod: %v", err)
+	}
+	if !reflect.DeepEqual(pod.Spec, before) {
+		t.Error("the transformer rewrote a live pod's placement; on an update that is " +
+			"refused by upstream and the tenant can no longer write to its own pod")
 	}
 }
 
