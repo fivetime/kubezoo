@@ -226,6 +226,46 @@ else
   fi
 fi
 
+# ⭐ A Deployment's TEMPLATE, not just a pod. This is what actually protects a
+# tenant during a webhook outage: kubezoo never sees the pods a Deployment
+# produces -- kube-controller-manager creates those against upstream directly --
+# so a template stored with the right pool is the only thing still placing them.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: placed-deploy}
+spec:
+  replicas: 0
+  selector: {matchLabels: {app: placed-deploy}}
+  template:
+    metadata: {labels: {app: placed-deploy}}
+    spec:
+      nodeSelector: {kubezoo.io/pool: "999999"}
+      containers: [{name: c, image: busybox:1.36}]
+EOF
+sel=$($K -n "$NS" get deploy placed-deploy -o jsonpath='{.spec.template.spec.nodeSelector.kubezoo\.io/pool}' 2>/dev/null)
+if [ "$sel" = "$TID" ]; then
+  ok "a Deployment's template is placed too, which is what survives a webhook outage"
+else
+  bad "a Deployment's template is placed" "pool is '${sel:-<none>}', want '$TID'"
+fi
+
+# ⭐⭐ And an UPDATE is placed as well. This is the one assertion here that can
+# tell the two layers apart: every rule in tenant-placement.yaml matches
+# operations: [CREATE], so a template rewritten AFTER creation can only have been
+# rewritten by kubezoo. (The policy gets away with CREATE-only because a pod is
+# always a create and its own rule overwrites whatever the template said -- but
+# that backstop is exactly what is missing when the webhook is gone.)
+$T patch deploy placed-deploy --type=merge \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubezoo.io/pool":"999999"}}}}}' >/dev/null 2>&1
+sel=$($K -n "$NS" get deploy placed-deploy -o jsonpath='{.spec.template.spec.nodeSelector.kubezoo\.io/pool}' 2>/dev/null)
+if [ "$sel" = "$TID" ]; then
+  ok "and so is a template edited after the fact, which the policy does not cover"
+else
+  bad "an edited template is placed" "pool is '${sel:-<none>}', want '$TID' -- a tenant can move its own workloads by updating them"
+fi
+$T delete deploy placed-deploy >/dev/null 2>&1
+
 echo
 echo "== binding: the path that goes around every pod-level rule =="
 cat >"$LAB/verify-binding.json" <<EOF

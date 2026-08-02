@@ -158,6 +158,22 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 		// silently.
 	}
 
+	// ⭐ Every kind carrying a pod template gets the placement transformer, a
+	// second copy of what the Kyverno tenant-placement policy does. Placement
+	// isolation was one webhook deep until now; placement.go says why the
+	// template rather than the pod is what matters.
+	placementTransformer := NewPlacementTransformer()
+	for _, gk := range PodCarryingKinds {
+		convertor := NewCrossReferenceConverter(defaultConvertor, placementTransformer)
+		if _, taken := nativeKindToConvertors[gk]; taken {
+			// Two convertors for one kind means one of them silently never runs,
+			// and the placement one losing that race is the whole finding coming
+			// straight back.
+			panic("a pod-carrying kind already has a convertor: " + gk.String())
+		}
+		nativeKindToConvertors[gk] = convertor
+	}
+
 	nativeConvertor = NewNativeObjectConvertor(defaultConvertor, nativeKindToConvertors)
 	customConvertor = NewCrossReferenceConverter(defaultConvertor, NewCustomResourceTransformer())
 	return nativeConvertor, customConvertor

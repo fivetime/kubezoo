@@ -101,7 +101,7 @@ ownerReference 转换。除此之外 spec 原样透传。
 
 ## 2. 结论
 
-### ⛔ ① 落点隔离是**单层**,而且那一层**已经静默失效过一次**
+### ✅ ① 落点隔离是**单层**,而且那一层**已经静默失效过一次** —— 已修
 
 B 类整组 —— `nodeSelector` / `affinity` / `tolerations` / `topologySpreadConstraints` /
 `schedulerName` / `priorityClassName` / `runtimeClassName`,加上 C 类里的 `nodeName` ——
@@ -116,6 +116,23 @@ B 类整组 —— `nodeSelector` / `affinity` / `tolerations` / `topologySpread
 
 ⇒ Kyverno 一挂,**租户 Pod 可以落到任何节点上,包括别的租户的节点池**。
 C 类靠 PSA 那两层扛住了宿主机逃逸,但**落点隔离没有第二层**。
+
+**✅ 已做**(选了 §3 的 (c),剥离 + 注入):
+
+- 规则定义在 contract 一处(`NodePoolFor` / `NodePoolLabelKey` / `TenantSchedulerName` /
+  `UnreachableTolerationSeconds`),`TestPlacementMatchesThePolicy` **双向**比对策略 YAML
+- `pkg/convert/placement.go` 对 **9 种带 Pod 模板的 kind** 全部注入
+- **前置**:平台节点也打污点(见 `docs/operations-cn.md` §2),
+  这样万一还有漏网路径,故障模式是 Pending 而不是落错
+
+⭐ **改模板才是关键,不是改 Pod。** kubezoo 看不见 Deployment 产出的 Pod ——
+那些是 kube-controller-manager 直接对上游建的。但 kubezoo 看得见**租户写的模板**,
+所以模板存对了,整个故障期间它就一直在产出落点正确的 Pod。这是对那批 Pod 唯一可行的保护。
+
+⚠️ **kubezoo 在 UPDATE 上也注入,策略只匹配 CREATE。** 策略之所以能只管 CREATE,
+是因为 Pod 本身永远是 CREATE、`place-pod` 会把模板说的覆盖掉 —— 而那个兜底恰恰是
+webhook 不在时缺失的那个。lab 里"改完模板还能被改回去"是**唯一一条能区分出是哪一层
+干的**断言。
 
 ### ⚠️ ② 两条钉节点的路,韧性不同
 

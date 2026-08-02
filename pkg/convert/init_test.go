@@ -19,10 +19,10 @@ package convert
 import (
 	"testing"
 
-	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	core "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
@@ -34,7 +34,14 @@ func TestNativeObjectConvertorConvertTenantObjectToUpstreamObject(t *testing.T) 
 	originName := "good"
 	originNamespace := "luck"
 
-	pod := v1.Pod{
+	// ⚠️ The INTERNAL type, which is what the proxy hands the convertor --
+	// apigroups.go's NewFunc for pods returns &core.Pod{}. These were versioned
+	// v1.Pods, and passed only because no convertor was registered for Pod at
+	// all, so they fell through to the default one, which reaches an object
+	// through meta.Accessor and never looks at its type. The moment Pod got a
+	// convertor the difference mattered -- and a test asserting namespace
+	// prefixing on a type production never sees was not testing much.
+	pod := core.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
 			APIVersion: "v1",
@@ -62,7 +69,7 @@ func TestNativeObjectConvertorConvertUpstreamObjectToTenantObject(t *testing.T) 
 	originName := "good"
 	originNamespace := tenant + util.TenantIDSeparator + "luck"
 
-	pod := v1.Pod{
+	pod := core.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
 			APIVersion: "v1",
