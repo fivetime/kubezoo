@@ -214,6 +214,33 @@ kubectl taint node <node> kubezoo.io/pool=<租户ID>:NoSchedule
 **实测**:标签专属时,跨租户绑定的 Pod 被 kubelet 拒(`NodeAffinity failed`,容器一个没起);
 把目标节点也标成同一个池子,**同一次绑定就让 Pod 真的 Running 在了别的池子上**。
 
+### ⛔⛔ 平台自己的节点**也必须打污点** —— 决定了 Kyverno 挂掉时会发生什么
+
+租户 Pod 的 `nodeSelector` 和 `tolerations` **都是 Kyverno 注入的**,而 Kyverno 是
+webhook,是单点。它不在的时候,Pod 到达 apiserver 时**既没有 nodeSelector 也没有容忍**。
+那样一个 Pod 会落到哪,完全取决于集群里**有没有不带污点的节点**:
+
+| 平台节点 | Kyverno 挂掉时,无容忍的租户 Pod |
+|---|---|
+| **不打污点** | ⛔ 它唯一能落的地方就是**平台节点** —— 控制面、系统组件所在的机器 |
+| **打了污点** | ✅ 哪儿都落不了,**停在 Pending** |
+
+```bash
+# 平台/系统节点(含控制面)全部打上,值用什么不重要,有污点就行
+kubectl taint node <platform-node> kubezoo.io/pool=platform:NoSchedule
+```
+
+⭐ 这一条**不写任何代码**,却把故障模式从"**静默落到平台节点上**"变成"**停住不动**" ——
+后者可见、可告警、不造成任何越界。
+
+⚠️ 代价:平台自己的系统组件必须显式容忍这个污点(DaemonSet 通常已经容忍
+`node-role.kubernetes.io/control-plane`,但**不会**自动容忍你新加的这个)。
+上线前先确认 kube-system 里该跑的都还在跑。
+
+⚠️ 而这条**只是兜底,不是隔离**:Pending 意味着"没落错",不意味着"落对了"。
+真正的隔离仍然是注入的 nodeSelector —— 见 `docs/pod-spec-audit-cn.md` §2① 的结论:
+那条路径今天**只有 Kyverno 一层**。
+
 ---
 
 ## 3. 日常操作:停机一个租户
@@ -381,6 +408,8 @@ kubectl --kubeconfig <租户的kubeconfig> get pods              # 应恢复正�
 - [ ] `kubectl get validatingadmissionpolicy` **3 条**(这几条 `get clusterpolicy` 看不到)
 - [ ] 做过一次存量修正:namespace 的 PSA 标签 **+ 存量违规 Pod 已删**
 - [ ] 每个租户节点池的 `kubezoo.io/pool` 标签**互不相同**(§2,承重前提)
+- [ ] **平台/系统节点也带 NoSchedule 污点**(§2):否则 Kyverno 一挂,
+      无容忍的租户 Pod 会径直落到平台节点上
 - [ ] 在 canary 租户上完整走过一遍冻结:§3.3 三条 + §3.4 功能检查 + §3.5 解除
 - [ ] 冻结的 namespace 里,平台建的 Deployment 仍能收敛出 Pod(§5.3)
 - [ ] 运营知道 `Frozen` **不是取证冻结**(§4)
