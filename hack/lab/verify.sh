@@ -163,8 +163,21 @@ expect_allowed "a compliant pod is still accepted (control)" \
 expect_denied "privileged pod" "tenant-pod-security-restricted\|PodSecurity \"restricted" -- \
   $T apply -f <(pod priv '"hostNetwork":true,')
 
-expect_denied "pod pinned to a node with spec.nodeName" "tenant-scheduling" -- \
+# ⚠️ Either layer is a pass now: kubezoo refuses this in-process
+# (refuseTenantChosenNode) and the policy refuses it at the webhook, and kubezoo
+# gets there first, so pinning the message to tenant-scheduling would fail on a
+# perfectly healthy cluster. Same reasoning as the privileged-pod check above.
+expect_denied "pod pinned to a node with spec.nodeName" "tenant-scheduling\|spec.nodeName: Forbidden" -- \
   $T apply -f <(pod pinned '"nodeName":"kz-audit3-worker",')
+
+# ⭐ ...and the policy is checked on its own, by going around kubezoo entirely and
+# creating the pod against upstream in a tenant namespace. Accepting either
+# message above is what lets a rule rot unnoticed once a second layer refuses
+# first; this is the assertion that would notice. It also covers what kubezoo
+# structurally cannot: a pod born upstream, which is how every pod a Deployment
+# produces arrives.
+expect_denied "and the policy still refuses one created around kubezoo entirely" "tenant-scheduling" -- \
+  $K -n "$NS" apply -f <(pod pinned-direct '"nodeName":"kz-audit3-control-plane",')
 
 expect_denied "DaemonSet" "tenant-deny-daemonset" -- \
   $T apply -f - <<EOF
@@ -264,6 +277,50 @@ if [ "$sel" = "$TID" ]; then
 else
   bad "an edited template is placed" "pool is '${sel:-<none>}', want '$TID' -- a tenant can move its own workloads by updating them"
 fi
+# ⭐ nodeName is the last field in the pod surface that goes around the scheduler,
+# and until now only a Kyverno deny stood in front of it. A pod naming its node is
+# taken by kubelet directly: every rule that lives in the scheduler, taints above
+# all, is simply never consulted.
+out=$($T apply -f <(pod nodenamed '"nodeName":"kz-audit3-control-plane",') 2>&1)
+if grep -qi "nodeName" <<<"$out"; then
+  ok "a pod naming the node it wants is refused"
+else
+  bad "a pod naming its own node is refused" "$(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+fi
+
+# ...and a template carrying one is cleared rather than refused, so a Deployment
+# that already has one keeps reconciling instead of failing every write.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: nodenamed-deploy}
+spec:
+  replicas: 0
+  selector: {matchLabels: {app: nodenamed-deploy}}
+  template:
+    metadata: {labels: {app: nodenamed-deploy}}
+    spec:
+      nodeName: kz-audit3-control-plane
+      containers: [{name: c, image: busybox:1.36}]
+EOF
+node=$($K -n "$NS" get deploy nodenamed-deploy -o jsonpath='{.spec.template.spec.nodeName}' 2>/dev/null)
+if $K -n "$NS" get deploy nodenamed-deploy >/dev/null 2>&1 && [ -z "$node" ]; then
+  ok "and a template naming one has it cleared, not the whole write refused"
+else
+  bad "a template naming a node is cleared" "template nodeName is '${node:-<absent>}'; deployment exists: $($K -n "$NS" get deploy nodenamed-deploy >/dev/null 2>&1 && echo yes || echo no)"
+fi
+$T delete deploy nodenamed-deploy >/dev/null 2>&1
+
+# ⚠️ And the trap this had to side-step: the scheduler writes spec.nodeName onto
+# every pod it binds, so from then on EVERY update to that pod carries it.
+# Refusing there would fail every later write to every running pod in the cluster.
+if $T -n default annotate pod placed probe=still-writable --overwrite >/dev/null 2>&1; then
+  ok "while a bound pod stays writable, which is what refusing on update would have broken"
+else
+  bad "a bound pod stays writable" \
+      "$($T -n default annotate pod placed probe=x --overwrite 2>&1 | tr '\n' ' ' | cut -c1-160)"
+fi
+
 $T delete deploy placed-deploy >/dev/null 2>&1
 
 echo

@@ -237,3 +237,41 @@ func TestPlacementLetsSubresourcesThrough(t *testing.T) {
 		}
 	}
 }
+
+// TestTemplateNodeNameIsCleared -- nodeName in a template is always the tenant's
+// own doing, since nothing in Kubernetes ever writes it there.
+//
+// ⚠️ Cleared rather than refused so a Deployment that already carries one keeps
+// reconciling instead of failing every write from now on. And deliberately NOT
+// done for a live Pod: the scheduler writes spec.nodeName on every pod it binds,
+// so clearing it there would unbind running pods. tenantProxy.Create refuses it
+// on the one operation where it can only have come from the tenant.
+func TestTemplateNodeNameIsCleared(t *testing.T) {
+	deployment := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "w", Namespace: "team"},
+		Spec: apps.DeploymentSpec{Template: core.PodTemplateSpec{
+			Spec: core.PodSpec{NodeName: "another-tenants-node"},
+		}},
+	}
+	if _, err := NewPlacementTransformer().Forward(deployment, "111111"); err != nil {
+		t.Fatalf("placing a deployment: %v", err)
+	}
+	if got := deployment.Spec.Template.Spec.NodeName; got != "" {
+		t.Errorf("the template still names node %q, which skips the scheduler for every "+
+			"pod it produces", got)
+	}
+
+	// ⚠️ A live pod keeps it. Clearing here would unbind every running pod the
+	// tenant ever touches.
+	bound := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "team"},
+		Spec:       core.PodSpec{NodeName: "the-node-the-scheduler-picked"},
+	}
+	if _, err := NewPlacementTransformer().Forward(bound, "111111"); err != nil {
+		t.Fatalf("placing a bound pod: %v", err)
+	}
+	if bound.Spec.NodeName != "the-node-the-scheduler-picked" {
+		t.Error("a bound pod was unbound by the placement transformer; every update to a " +
+			"running pod carries the node the scheduler chose")
+	}
+}

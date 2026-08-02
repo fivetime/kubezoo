@@ -601,6 +601,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseUnpublishedVolumeAttributesClass(obj, nil); err != nil {
 		return nil, err
 	}
+	if err := tp.refuseTenantChosenNode(obj); err != nil {
+		return nil, err
+	}
 
 	// An apply that has to create the object is still an apply, and this is the
 	// path it takes -- most resources refuse to be created by an update. Sending
@@ -1005,6 +1008,41 @@ func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 			)})
 	}
 	return nil
+}
+
+// refuseTenantChosenNode refuses a pod that names the node it wants to run on.
+//
+// spec.nodeName goes around the scheduler completely: kubelet takes the pod
+// because the pod names the node, and every placement rule that lives in the
+// scheduler -- taints above all -- is simply not consulted. What still applies is
+// nodeSelector, which kubelet checks, which is why the per-tenant pool LABEL is
+// load-bearing and the taint alone is not.
+//
+// ⚠️ CREATE ONLY, and here that is not a preference but the only workable rule.
+// The scheduler writes spec.nodeName onto every pod it binds, so from that
+// moment every update to that pod -- a label, an annotation, a status write --
+// carries it. Refusing on update would fail every later write to every running
+// pod in the cluster. This is the one operation where the field can only have
+// come from the tenant.
+//
+// A second copy of what tenant-scheduling.yaml denies, for the same reason the
+// placement injection is: that policy is a webhook, and a webhook that was never
+// registered does not fail, so failurePolicy does not cover it. Templates are
+// handled in pkg/convert/placement.go instead, where the field can be cleared
+// rather than refused because nothing but a tenant ever writes it there.
+func (tp *tenantProxy) refuseTenantChosenNode(obj runtime.Object) error {
+	pod, ok := obj.(*core.Pod)
+	if !ok || pod.Spec.NodeName == "" {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Pod"}, pod.Name,
+		field.ErrorList{field.Forbidden(
+			field.NewPath("spec", "nodeName"),
+			"choosing the node is not available to tenants: it goes around the scheduler, "+
+				"and with it every rule about where your workloads may run. Leave it unset "+
+				"and the scheduler will place the pod in your own node pool.",
+		)})
 }
 
 // refuseUnpublishedVolumeAttributesClass refuses a claim that names a

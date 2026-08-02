@@ -413,3 +413,39 @@ func TestVolumeAttributesClassUnsyncedAsksForARetry(t *testing.T) {
 		t.Errorf("an unchanged class was held up by the cache: %v", err)
 	}
 }
+
+// TestRefuseTenantChosenNode covers the field that goes around the scheduler.
+//
+// ⚠️ CREATE only, and here that is the only workable rule rather than a
+// preference: the scheduler writes spec.nodeName onto every pod it binds, so from
+// then on every update to that pod carries it. Refusing on update would fail
+// every later write to every running pod. This guard is wired into Create alone,
+// which is the one operation where the field can only have come from the tenant.
+func TestRefuseTenantChosenNode(t *testing.T) {
+	proxy := &tenantProxy{}
+
+	err := proxy.refuseTenantChosenNode(&core.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "escape"},
+		Spec:       core.PodSpec{NodeName: "another-tenants-node"},
+	})
+	if err == nil {
+		t.Fatal("a pod naming its own node was accepted; it would skip the scheduler entirely")
+	}
+	if !apierrors.IsInvalid(err) {
+		t.Errorf("refused with %T, want an Invalid naming the field", err)
+	}
+	if !strings.Contains(err.Error(), "nodeName") {
+		t.Errorf("the refusal does not name the field: %v", err)
+	}
+
+	if err := proxy.refuseTenantChosenNode(&core.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "ordinary"},
+	}); err != nil {
+		t.Errorf("a pod leaving the node to the scheduler was refused: %v", err)
+	}
+	// The guard runs on every create the proxy serves and must be inert for
+	// everything that is not a pod.
+	if err := proxy.refuseTenantChosenNode(&core.ConfigMap{}); err != nil {
+		t.Errorf("a ConfigMap was refused: %v", err)
+	}
+}

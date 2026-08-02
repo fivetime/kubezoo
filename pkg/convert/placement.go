@@ -82,6 +82,23 @@ func (t *PlacementTransformer) Forward(obj runtime.Object, tenantID string) (run
 		return obj, nil
 	}
 	place(spec, tenantID)
+	if _, isPod := obj.(*core.Pod); !isPod {
+		// ⭐ nodeName in a TEMPLATE is always the tenant's own doing: nothing in
+		// Kubernetes ever writes it there. It goes around the scheduler entirely
+		// -- kubelet takes the pod because the pod names the node, and a
+		// nodeSelector it fails is caught only later, by kubelet, after the pod
+		// is already assigned. Cleared here rather than refused so that a
+		// Deployment already carrying one keeps reconciling instead of failing
+		// every write from now on.
+		//
+		// ⚠️ NOT done for a live Pod, and that is the trap this side-steps: the
+		// scheduler writes spec.nodeName on every pod it binds, so from then on
+		// every update to that pod -- a label, an annotation -- carries it.
+		// Clearing it there would unbind running pods, and refusing would fail
+		// every later write. tenantProxy.Create refuses it on the one operation
+		// where it can only have come from the tenant.
+		spec.NodeName = ""
+	}
 	return obj, nil
 }
 
