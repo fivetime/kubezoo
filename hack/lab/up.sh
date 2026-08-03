@@ -138,6 +138,14 @@ PKI=$ZOO/_output/pki
 # halves of the union. Making the two consistent would silently drop coverage of
 # whichever one lost -- and the flag half is what keeps an upgrade from
 # un-publishing everything an operator already relies on.
+
+# ⭐ The SHIPPED policy file, not one written here. The lab asserting on an audit
+# log produced by a policy that only exists in the lab would prove nothing about
+# what a deployment records -- and this is the file a deployment mounts.
+#
+# Truncated per run, because the assertions ask whether a request from THIS run
+# was recorded and a leftover from the last one answers yes either way.
+rm -f "$LAB/kubezoo-audit.log"
 nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --allow-privileged=true --apiserver-count=1 --cors-allowed-origins='.*' --delete-collection-workers=1 \
   --etcd-prefix=/zoo --etcd-servers=http://127.0.0.1:2379 --event-ttl=1h0m0s \
@@ -151,6 +159,8 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=true \
   --api-audiences=$UPSTREAM_SA_ISSUER \
+  --audit-policy-file=$ZOO/config/setup/audit-policy.yaml \
+  --audit-log-path=$LAB/kubezoo-audit.log \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
   --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-} \
   --max-namespaces-per-tenant=${MAX_NAMESPACES_PER_TENANT:-16} \

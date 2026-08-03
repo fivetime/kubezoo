@@ -59,6 +59,27 @@
 # symptom is a Forbidden that reads exactly like a genuine authorization
 # decision, so an assertion that accepts any refusal will pass on it.
 #
+# ⭐⭐ THE HOSTAGE RULE IS NOT ABOUT QUOTAS. It is about any section that changes
+# shared fixture STATE and intends to put it back. Written above as "a quota
+# fixture", it got read as being about quotas -- and then a section that
+# suspended $TID in order to check that suspensions are audited did precisely the
+# same damage by another route: the tenant's cluster-scoped grant had not been
+# widened back when the next section ran, and that reported as the
+# ClusterRoleBinding cap failing to refuse. Same shape, same misdirection,
+# different resource.
+#
+# ⚠️ "I restore it afterwards" is not an answer, because restoring is
+# asynchronous and the probe that waits for it is usually wrong -- see the next
+# rule. Give the section its own tenant; it costs one create and one delete.
+#
+# ⭐ A WAIT PROBE MUST DISTINGUISH THE TWO STATES. Three times in one session a
+# loop waited on something that was true before AND after: a `get` while waiting
+# for a ReadOnly suspension to lift (ReadOnly allows reads by design), a
+# namespace going Active while waiting for permissions that arrive separately, a
+# label read back that nothing had actually removed. A probe that succeeds in
+# both states is not a wait, it is decoration -- and the cost lands on whatever
+# runs next, under its name rather than this one's.
+#
 # ⭐ AND A SETUP STEP MUST NEVER FAIL QUIETLY. When the second namespace above
 # silently failed to appear, the run did not report one broken fixture; it
 # reported a missing ResourceQuota and a pod refused by RBAC instead of by quota,
@@ -2911,6 +2932,81 @@ else
       "$(tr '\n' ' ' <<<"$np_out" | cut -c1-160)"
 fi
 $T delete service np-probe >/dev/null 2>&1
+
+echo
+echo "== what kubezoo refuses is written down, and so is the platform's own decision =="
+# ⭐ Placed HERE on purpose, right after a refusal. The section above just had a
+# request turned away by a kubezoo guard -- which means it never reached the
+# upstream cluster, so the upstream audit log has nothing to say about it.
+#
+# ⛔ That is the gap this covers. kubezoo impersonates the tenant on every verb
+# it forwards, so what a tenant MANAGES to do is already attributable upstream.
+# What it TRIES and is stopped from doing is not, and neither are writes to
+# Tenant objects, which live in kubezoo's own store. In an investigation those
+# are the interesting halves: what was attempted, and who ordered the freeze.
+audit_log=$LAB/kubezoo-audit.log
+if [ ! -s "$audit_log" ]; then
+  bad "kubezoo writes an audit log" "$audit_log is missing or empty -- --audit-policy-file/--audit-log-path did not take"
+else
+  ok "kubezoo writes an audit log"
+
+  # The refusal from the section above: the tenant's identity, the verb, and a
+  # 403 that upstream never saw.
+  refused=$(grep '"objectRef"' "$audit_log" 2>/dev/null \
+    | grep '"resource":"services"' | grep "\"username\":\"$TID-admin\"" \
+    | grep '"code":4' | head -1)
+  if [ -n "$refused" ]; then
+    ok "a request kubezoo refused is recorded, with the tenant that sent it"
+  else
+    bad "a refused request is recorded" \
+      "no services request from $TID-admin with a 4xx in the audit log, so a tenant's blocked attempts leave no trace"
+  fi
+
+  # ⚠️ And the bodies are NOT there. The policy logs metadata for everything, so
+  # a refusal is visible without the audit log becoming a second copy of what
+  # tenants send. A rule reordered above the secrets rule would break this
+  # quietly, which is why it is asserted rather than assumed.
+  if grep -q '"requestObject"' <<<"$refused"; then
+    bad "the refusal is recorded without its body" \
+      "the audit entry carries requestObject; the policy is logging bodies where it should log metadata"
+  else
+    ok "and recorded without the body the tenant sent"
+  fi
+
+  # The platform's own decision, in full. Tenant objects never leave kubezoo, so
+  # this is the only place a freeze is written down at all.
+  #
+  # ⛔ ON ITS OWN TENANT, not on $TID, and this is the header's hostage rule in a
+  # new costume. Suspending the tenant every later section uses is exactly the
+  # same mistake as filling it to a quota: the first version did that, restored
+  # it afterwards, and still handed the ClusterRoleBinding section a tenant whose
+  # cluster-scoped grant had not been widened back yet -- which reported as that
+  # cap failing to refuse, pointing nowhere near this code.
+  #
+  # ⭐ And nothing here needs a provisioned tenant. The audit record is written
+  # when kubezoo serves the patch, whether or not the controller has got as far
+  # as making namespaces -- so this costs one create and one delete, and waits
+  # for nothing.
+  audit_tid=909092
+  kubectl --kubeconfig "$ZOOKC" create -f - >/dev/null 2>&1 <<EOF
+apiVersion: tenant.kubezoo.io/v1alpha1
+kind: Tenant
+metadata: {name: "$audit_tid"}
+spec: {}
+EOF
+  kubectl --kubeconfig "$ZOOKC" patch tenant "$audit_tid" --type=merge \
+    -p '{"spec":{"suspension":{"mode":"ReadOnly","reason":"audit assertion"}}}' >/dev/null 2>&1
+  sleep 1
+  suspend=$(grep '"resource":"tenants"' "$audit_log" 2>/dev/null \
+    | grep '"verb":"patch"' | grep "\"name\":\"$audit_tid\"" | tail -1)
+  if [ -n "$suspend" ] && grep -q '"requestObject"' <<<"$suspend"; then
+    ok "suspending a tenant is recorded in full, with who did it"
+  else
+    bad "suspending a tenant is recorded in full" \
+      "no patch of tenant $audit_tid carrying requestObject; who froze a tenant and what they set would be unknowable"
+  fi
+  kubectl --kubeconfig "$ZOOKC" delete tenant "$audit_tid" >/dev/null 2>&1
+fi
 
 echo
 echo "== the platform caps how many cluster role bindings a tenant may own =="

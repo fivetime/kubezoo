@@ -885,6 +885,22 @@ func buildGenericConfig(
 	if lastErr = s.EgressSelector.ApplyTo(genericConfig); lastErr != nil {
 		return
 	}
+	// ⛔ Without this the audit flags are a lie. AddFlags registers every one of
+	// them and Validate checks them, so --audit-policy-file and --audit-log-path
+	// are accepted, validated, and then nothing is recorded: ApplyTo is what
+	// builds the policy evaluator and the backend, and it was never called. An
+	// audit control that silently does nothing is worse than none at all,
+	// because somebody is relying on it being there.
+	//
+	// ⭐ And kubezoo is the only place some of it can be recorded. It
+	// impersonates the tenant on everything it forwards, so what a tenant
+	// MANAGES to do is attributable in the upstream audit log -- but what
+	// pkg/proxy REFUSES never reaches upstream, and neither do writes to Tenant
+	// objects, which live in kubezoo's own etcd. Blocked attempts, and the
+	// decision to freeze a tenant, exist here or nowhere.
+	if lastErr = s.Audit.ApplyTo(genericConfig); lastErr != nil {
+		return
+	}
 
 	namer := openapinamer.NewDefinitionNamer(legacyscheme.Scheme, extensionsapiserver.Scheme, aggregatorscheme.Scheme)
 	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openAPIDefinitions, namer)
@@ -1221,6 +1237,15 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		// Carries the apply force flag, which is a query parameter the storage
 		// layer never sees. See tenantfilters.WithApplyForce.
 		handler = tenantfilters.WithApplyForce(handler)
+		// Inside authentication and outside everything else, which is where
+		// upstream puts it (config.go, WithAudit at 1064 and WithAuthentication
+		// at 1075): the audit event has to carry the authenticated identity, and
+		// it has to be emitted for requests the filters below go on to refuse.
+		handler = genericapifilters.WithAudit(handler, c.AuditBackend, c.AuditPolicyRuleEvaluator, c.LongRunningFunc)
+		// A request that fails to authenticate takes the failed handler and never
+		// reaches the line above, so it needs its own audit wrapper or repeated
+		// attempts with a bad or withdrawn credential leave no trace.
+		failedHandler = genericapifilters.WithFailedAuthenticationAudit(failedHandler, c.AuditBackend, c.AuditPolicyRuleEvaluator)
 		handler = genericapifilters.WithAuthentication(handler, c.Authentication.Authenticator, failedHandler, c.Authentication.APIAudiences, c.Authentication.RequestHeaderConfig)
 		handler = genericfilters.WithCORS(handler, c.CorsAllowedOriginList, nil, nil, nil, "true")
 		// Records the warnings the request path emits -- without it AddWarning is

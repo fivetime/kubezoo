@@ -64,6 +64,17 @@ spec:
         # **永不失效**(那种 token 没有过期时间)。取证吊销场景下这是个真口子。
         - --service-account-lookup=true
         - --api-audiences=kubezoo
+        # ⭐ Audit, and not optional for a platform that intends to freeze a
+        # tenant for an investigation. kubezoo impersonates the tenant upstream,
+        # so what it FORWARDS is attributable in the upstream audit log -- but
+        # what it REFUSES never gets there, and neither do writes to Tenant
+        # objects, which live in kubezoo's own store. Without this, a tenant's
+        # blocked attempts and the freeze itself are recorded nowhere.
+        - --audit-policy-file=/etc/kubezoo/audit/policy.yaml
+        - --audit-log-path=/var/log/kubezoo/audit.log
+        - --audit-log-maxsize=100
+        - --audit-log-maxbackup=10
+        - --audit-log-maxage=90
         - --v=4
         ports:
         - containerPort: 6443
@@ -75,6 +86,11 @@ spec:
           mountPath: /etc/kubezoo/pki
         - name: upstream-pki
           mountPath: /etc/upstream/pki
+        - name: audit-policy
+          mountPath: /etc/kubezoo/audit
+          readOnly: true
+        - name: audit-log
+          mountPath: /var/log/kubezoo
       volumes:
       # ⭐ kubezoo-pki no longer carries ca-key.pem. Issuing tenant certificates
       # moved to kubezoo-controller, so the root of the tenant trust chain lives
@@ -86,6 +102,23 @@ spec:
       - name: upstream-pki
         secret:
           secretName: upstream-pki
+      - name: audit-policy
+        configMap:
+          name: kubezoo-audit-policy
+      # ⚠️ hostPath, so the log survives the pod. An audit log inside the
+      # container filesystem is gone at the moment it becomes evidence -- a
+      # restart, a reschedule, or the eviction that follows the incident being
+      # investigated. Point this at whatever the platform actually collects from.
+      - name: audit-log
+        hostPath:
+          path: /var/log/kubezoo
+          type: DirectoryOrCreate
+---
+# The audit policy, from config/setup/audit-policy.yaml. Kept as a ConfigMap
+# rather than baked into the image so that trimming it does not need a rebuild.
+#
+#   kubectl create configmap kubezoo-audit-policy \
+#     --from-file=policy.yaml=config/setup/audit-policy.yaml -n kube-system
 ---
 # KubeZoo service
 apiVersion: v1

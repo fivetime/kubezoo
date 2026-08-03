@@ -1,0 +1,55 @@
+# Audit policy for kubezoo.
+#
+# ⭐ WHY THIS EXISTS AT ALL, given the upstream cluster has its own audit log:
+# kubezoo impersonates the tenant on every verb it forwards, so anything that
+# reaches upstream is already attributable there. Two things never reach it:
+#
+#   1. Requests kubezoo REFUSES. Every guard in pkg/proxy -- a claimed external
+#      IP, a node port, an unpublished storage class, a write to the platform's
+#      own quota -- answers the tenant itself. A tenant that tries five hundred
+#      times and is stopped five hundred times leaves NO trace anywhere without
+#      this file. In an investigation that is the interesting half: not what a
+#      tenant managed to do, but what it tried.
+#
+#   2. Writes to Tenant objects, which live in kubezoo's own etcd. That includes
+#      the suspension itself -- so without this, "who froze this tenant, and
+#      when" is recorded nowhere. A field on the object filled in by whoever did
+#      it would be self-reported; an audit record carries the authenticated
+#      identity, which is the difference between a note and evidence.
+#
+# ⚠️ Metadata level already records responseStatus, so a refusal is visible
+# without logging any bodies. That is what makes "log everything" affordable
+# here.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# The pair of events per request halves for no loss: RequestReceived carries
+# nothing ResponseComplete does not, except that the request began.
+omitStages:
+  - RequestReceived
+rules:
+  # ⛔ FIRST, so it wins over every rule below. A tenant's Secret bodies are the
+  # one thing an audit log must not turn into a second copy of. Rules are
+  # evaluated in order and the first match applies, so this cannot be reordered
+  # below the RequestResponse rule without quietly starting to log them.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+
+  # The platform's own decisions, in full. These are low-volume and they are the
+  # records an investigation actually reads: what the suspension said, what quota
+  # was set, who set it.
+  - level: RequestResponse
+    resources:
+      - group: "tenant.kubezoo.io"
+      - group: "quota.kubezoo.io"
+
+  # Everything else, metadata only. This is the rule that captures refusals --
+  # responseStatus is part of the metadata, so a 403 from a kubezoo guard is
+  # recorded with the tenant that sent it, the verb, and the resource, and
+  # without the body it sent.
+  #
+  # ⚠️ It also captures reads, which is where the volume is. A platform that
+  # needs to trim should drop `get`/`list`/`watch` here rather than narrow the
+  # write rules -- a refused write is the record with evidentiary value.
+  - level: Metadata
