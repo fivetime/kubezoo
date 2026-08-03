@@ -335,6 +335,49 @@ kubectl get ns -L kubezoo.io/tenant --no-headers | awk '{print $NF}' | sort | un
 
 ---
 
+## 2.6 ⭐ 租户凭据:发一次,不留底
+
+租户的 kubeconfig 由控制器生成,**base64 放在 Tenant 对象的 annotation 上**:
+
+```bash
+kubectl get tenant <租户ID> \
+  -o jsonpath='{.metadata.annotations.kubezoo\.io/tenant\.kubeconfig\.base64}' | base64 -d
+```
+
+⛔ **那份 kubeconfig 里含租户的私钥**,所以平台**不会一直留着它**。
+默认签发 **24 小时**后控制器丢弃这份副本(`--credential-retention`),
+只保留一条签发时间标记 `kubezoo.io/tenant.credential-issued-at`。
+
+**理由不是洁癖**:一个集群级对象上放着**每一个租户的私钥**,读一次等于全部;
+而留着它对平台**没有任何用处** —— 客户端证书**没有吊销机制**,这份副本不构成任何筹码,
+只是暴露面。租户也从来没要求平台永久保管自己的私钥。
+
+### 再要一张
+
+**删掉签发标记即可**,下一次调谐就会签发新的并重新写进 annotation:
+
+```bash
+kubectl annotate tenant <租户ID> kubezoo.io/tenant.credential-issued-at-
+```
+
+⭐ 这样一来**轮换节奏回到了要凭据的人手里** —— 平台不替租户决定什么时候换。
+
+⚠️⚠️ **撤回不是吊销,两件事。** 上面丢弃的只是**平台手里的副本**;
+租户已经拿走的那张证书**照常有效直到过期**(当前 10 年)。
+要让一个已经持证的租户失效,用 `spec.suspension`(见 §3),那是另一套机制。
+**单租户吊销今天做不到**:所有租户证书由同一个 client CA 签发,唯一手段是轮换 CA,
+而那会作废**所有**租户。
+
+⚠️ 三条运维须知:
+
+- **升级不会重签**:本功能之前建的租户有 kubeconfig 但没有标记,控制器**认领**它
+  (只补标记、不换证书),保留期从升级那一刻开始算
+- **`--credential-retention=0` 关闭撤回**,给那些"晚于任何窗口才来取凭据"的开通流程
+- **对 Pod 零影响**:租户负载用的是投影 SA token,不是这张证书;
+  影响面只有拿 kubeconfig 的人和 CI
+
+---
+
 ## 3. 日常操作:停机一个租户
 
 ### 3.1 两种模式,先选对
