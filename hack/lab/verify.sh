@@ -127,6 +127,10 @@ kubectl --kubeconfig "$ZOOKC" config set-credentials admin --client-certificate=
   --client-key=$PKI/admin-key.pem --embed-certs=true >/dev/null
 kubectl --kubeconfig "$ZOOKC" config set-context zoo --cluster=zoo --user=admin >/dev/null
 kubectl --kubeconfig "$ZOOKC" config use-context zoo >/dev/null
+# ⚠️ No spec.quota, and that is not an omission to fix casually: the quota path
+# is skipped in this lab because the upstream cluster does not serve
+# clusterresourcequotas, so a quota here would be silently ignored and would read
+# as coverage that does not exist. See the note further down.
 kubectl --kubeconfig "$ZOOKC" create -f - >/dev/null 2>&1 <<EOF
 apiVersion: tenant.kubezoo.io/v1alpha1
 kind: Tenant
@@ -2474,6 +2478,25 @@ else
 fi
 $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
+
+# ⛔ NOT COVERED HERE, and it is worth saying why rather than leaving a gap that
+# looks like an oversight. The tenant quota path -- the ClusterResourceQuota
+# controller deriving a per-namespace ResourceQuota, and the admission webhook
+# enforcing the tenant-wide aggregate -- never runs in this lab. The controller
+# asks the UPSTREAM cluster whether it serves quota.kubezoo.io
+# clusterresourcequotas and gets no, so it skips quota reconciliation entirely
+# (`Skip synchronize cluster resource quota since nil tenant or
+# clusterResourceQuota client` in kubezoo-controller.log). Giving the tenant a
+# spec.quota does not help: the CRD and that controller have to be installed
+# upstream first.
+#
+# ⚠️ So a whole enforcement path that decides how much of the cluster a tenant can
+# take has ZERO coverage in the harness that covers everything else. The escape
+# fixed alongside this note -- a tenant stripping the label the quota webhook
+# selects on -- is pinned by unit tests instead
+# (TestStrippedAutoupdateLabelIsRestored, TestRefusePlatformQuotaWrite), which
+# for that particular claim are stronger anyway: they drive the reconciler and
+# the guard directly. Standing the CRD up here is its own task.
 
 echo
 echo "== a NetworkPolicy peer cannot reach past the tenant =="

@@ -50,6 +50,7 @@ import (
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
+	quotav1alpha1 "github.com/fivetime/kubezoo-contract/pkg/apis/quota/v1alpha1"
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 	"github.com/fivetime/kubezoo-contract/pkg/util"
@@ -448,6 +449,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 		return nil, false, err
 	}
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
+		return nil, false, err
+	}
+	if err := tp.refusePlatformQuotaWrite(obj); err != nil {
 		return nil, false, err
 	}
 	return tp.update(ctx, obj, options)
@@ -1048,6 +1052,47 @@ func (tp *tenantProxy) refuseUnpublishedStorageClass(obj runtime.Object) error {
 	return nil
 }
 
+// refusePlatformQuotaWrite stops a tenant editing the quota object the platform
+// derived for it.
+//
+// ⛔ A tenant is admin in its own namespaces -- tenantNamespaceAdminRole is "*"
+// on "*", deliberately, so that custom resources from tenant CRDs are covered --
+// and the per-namespace ResourceQuota the ClusterResourceQuota controller
+// derives lives in one of those namespaces. So the tenant can edit it, and one
+// edit was enough: the reconciler finds that quota by its createdBy label while
+// the admission webhook finds it by autoupdate, and the repair compared spec
+// only. Removing just autoupdate left the reconciler finding an unchanged quota
+// and doing nothing, while the webhook selected none at all.
+//
+// ⚠️ What stops is the TENANT-WIDE aggregate. Upstream's own admission keeps
+// enforcing the per-namespace object, which reads no labels -- so every
+// namespace admits the full allowance independently and the real ceiling becomes
+// allowance times namespaces.
+//
+// ⭐ Refused here as well as repaired there, and the two do different jobs. The
+// reconciler closes the permanent case but only after a reconcile; this closes
+// the window, because kubezoo sees every tenant write before it lands. Neither
+// alone is enough: the reconciler cannot stop the edit, and this cannot repair a
+// quota that some other path already damaged.
+//
+// A tenant creating a ResourceQuota of its own is untouched -- limiting yourself
+// further is always allowed. Only the platform's own object is protected, and it
+// is recognised by the label the platform put there.
+func (tp *tenantProxy) refusePlatformQuotaWrite(obj runtime.Object) error {
+	quota, ok := obj.(*core.ResourceQuota)
+	if !ok {
+		return nil
+	}
+	if _, mine := quota.Labels[quotav1alpha1.ClusterResourceQuotaCreatedby]; !mine {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Resource: "resourcequotas"}, quota.Name,
+		fmt.Errorf("this ResourceQuota is derived from your tenant quota and is maintained by "+
+			"the platform; editing it would stop your tenant-wide quota being enforced. "+
+			"Create a ResourceQuota of your own if you want to limit this namespace further"))
+}
+
 // refuseNewExternalIPs stops a tenant claiming traffic to addresses it does not
 // own.
 //
@@ -1569,6 +1614,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refusePlatformQuotaWrite(updated); err != nil {
 			return nil, false, err
 		}
 		got, created, err := tp.update(ctx, updated, options)

@@ -550,3 +550,40 @@ func TestNamespaceCountFailureDoesNotRefuse(t *testing.T) {
 		t.Errorf("a failed count refused the namespace: %v", err)
 	}
 }
+
+// TestRefusePlatformQuotaWrite -- a tenant is admin in its own namespaces, and
+// the ResourceQuota the platform derives from its tenant quota lives in one of
+// them. One label edit was enough to stop the tenant-wide aggregate being
+// enforced.
+func TestRefusePlatformQuotaWrite(t *testing.T) {
+	proxy := &tenantProxy{}
+	platform := &core.ResourceQuota{ObjectMeta: metav1.ObjectMeta{
+		Name:      "kubezoo-tenant-quota-111111-abcde",
+		Namespace: "team",
+		Labels: map[string]string{
+			"clusterresourcequota.quota.kubezoo.io/createdby": "kubezoo-tenant-quota-111111",
+		},
+	}}
+	err := proxy.refusePlatformQuotaWrite(platform)
+	if err == nil {
+		t.Fatal("a tenant was allowed to edit the quota the platform derived for it")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("refused with %T, want a Forbidden", err)
+	}
+
+	// ⭐ A tenant limiting itself further is always allowed. Only the platform's
+	// own object is protected, and it is recognised by the label the platform put
+	// there -- not by the namespace or the name.
+	own := &core.ResourceQuota{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-own-limits", Namespace: "team",
+	}}
+	if err := proxy.refusePlatformQuotaWrite(own); err != nil {
+		t.Errorf("a tenant's own ResourceQuota was refused: %v", err)
+	}
+
+	// Inert for everything that is not a quota, since it runs on every write.
+	if err := proxy.refusePlatformQuotaWrite(&core.ConfigMap{}); err != nil {
+		t.Errorf("a ConfigMap was refused: %v", err)
+	}
+}

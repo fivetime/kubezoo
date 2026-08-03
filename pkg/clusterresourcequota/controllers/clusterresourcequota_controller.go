@@ -234,12 +234,50 @@ func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx cont
 		return quota, r.Client.Create(ctx, quota)
 	}
 
+	// ⛔ The labels are repaired too, and not only the spec. They are read by two
+	// different components: the reconciler finds a quota by createdBy, the
+	// admission webhook finds it by autoupdate -- and comparing spec alone meant
+	// a tenant could remove the autoupdate label and keep the other, leaving this
+	// loop still finding the quota, still seeing an unchanged spec, and doing
+	// nothing, while the webhook then selected nothing at all. The tenant-wide
+	// aggregate stopped being enforced permanently and silently: upstream's own
+	// admission keeps enforcing the per-namespace object, so each namespace still
+	// admits the full allowance and the real ceiling becomes allowance times
+	// namespaces.
+	//
+	// ⚠️ A tenant is admin in its own namespaces on purpose -- "*" on "*", so
+	// that custom resources from tenant CRDs are covered -- so it can write this
+	// object, and repairing what it writes is the only lever this controller has.
+	// This closes the permanent case; the write is still refused up front by
+	// tenantProxy so the window is never opened in the first place.
+	// ⚠️ Compared, NOT written, here. UpdateOnConflict decides whether to issue a
+	// request by deep-comparing the object before and after its mutate function,
+	// so anything corrected before that snapshot is taken looks unchanged and no
+	// request is sent. The first version of this repaired the labels here and the
+	// test still failed with the label empty.
+	wantLabels := map[string]string{
+		quotav1alpha1.ClusterResourceQuotaCreatedby: clusterquota.Name,
+		LabelClusterResourceQuotaAutoUpdate:         "true",
+	}
+	labelsDirty := false
+	for key, want := range wantLabels {
+		if matchedquota.Labels[key] != want {
+			labelsDirty = true
+		}
+	}
+
 	specDirty := !apiequality.Semantic.DeepEqual(clusterquota.Spec.ResourceQuotaSpec, matchedquota.Spec)
 
-	if specDirty {
+	if specDirty || labelsDirty {
 		r.Logger.Info("sync resource quota in namespace", "resourceQuota", client.ObjectKeyFromObject(matchedquota).String(), "clusterResourceQuota", clusterquota.Name)
 		_, err := UpdateOnConflict(ctx, DefaultRetry, r.APIReader, ObjectUpdater(r.Client), matchedquota, func() error {
 			matchedquota.Spec = clusterquota.Spec.ResourceQuotaSpec
+			if matchedquota.Labels == nil {
+				matchedquota.Labels = map[string]string{}
+			}
+			for key, want := range wantLabels {
+				matchedquota.Labels[key] = want
+			}
 			return nil
 		})
 		if err != nil {
