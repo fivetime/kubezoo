@@ -143,7 +143,7 @@ kubectl label volumeattributesclass gold volumeattributesclass.kubezoo.io/publis
 ### 1.0 ⭐ 最可靠的一步:跑验证套件
 
 ```bash
-hack/lab/verify.sh          # 21 条断言,每条都提交一个必须被拒的东西再看它被谁拒
+hack/lab/verify.sh          # 每条断言都提交一个必须被拒的东西,再看它究竟被谁拒
 ```
 
 上面那些 `get` 只能告诉你"对象在";**只有这个能告诉你"它真的会拒"**。
@@ -187,6 +187,50 @@ done
 ```
 
 **不删就等于没封。**
+
+### 1.2 ⛔⛔ 配额组件必须**先于**租户控制器启动 —— 顺序错了会静默失效
+
+租户级配额(`Tenant.spec.quota`)由两个独立进程接力,而**接力棒只递一次**:
+
+```
+Tenant.spec.quota → kubezoo-controller 建 ClusterResourceQuota
+                  → 配额组件给每个租户 namespace 派生 ResourceQuota + 汇总用量
+                  → 准入 webhook 在 Pod CREATE 时按租户总量判定
+```
+
+`kubezoo-controller` 在**启动时**问上游一次"你提供 `quota.kubezoo.io` 吗",
+拿到否就把配额客户端永久置空,**之后不再重试**。而 `quota.kubezoo.io` 的 CRD 是**配额组件**
+自己启动时装的。所以:
+
+> **先起租户控制器、后起配额组件 ⇒ 该控制器整个生命周期内,所有租户的 `spec.quota` 全部被忽略。**
+
+`kubectl get tenant` 看着完全正常,租户侧也没有任何报错 —— **它只是想建多少建多少**。
+唯一的痕迹在 `kubezoo-controller` 的日志里,有两条,**要找的是第二条**:
+
+| 级别 | 内容 | 含义 |
+|---|---|---|
+| INFO(启动时一次) | `the upstream cluster does not serve clusterresourcequotas` | 只说明本集群没装配额组件 —— **没有租户用配额时这是正常的** |
+| **ERROR(每个受影响租户一条)** | `tenant <id> sets spec.quota but NO QUOTA IS BEING ENFORCED for it` | **有租户设了 `spec.quota` 却完全不生效**,这条才是故障 |
+
+所以巡检 grep `NO QUOTA IS BEING ENFORCED`,不要 grep 那条 INFO。
+
+**正确顺序**:先 `kubectl apply -f config/setup/quota.yaml`,等 CRD 就绪,再起(或重启)
+`kubezoo-controller`。已经装反了的集群,**重启一次 kubezoo-controller 即可**,不需要重建租户。
+
+自查(应当每个有 `spec.quota` 的租户都有一个):
+
+```bash
+kubectl get clusterresourcequota
+```
+
+⚠️ 另外两条,来自这条链路的实际形态:
+
+- **每个 namespace 里派生的 `ResourceQuota` 带的是"全额"**,不是均分。跨 namespace 的总量
+  **只由 webhook 保证**(它在判定前把租户级的汇总用量顶替进去)。所以
+  **webhook 没装 = 租户拿到 `额度 × namespace 数`**,而每个 namespace 单看都是合规的。
+- webhook 是 `failurePolicy: Fail`,且只排除了 `default` / `kube-system`。
+  **配额组件挂掉 = 全集群(除这两个 namespace)Pod 创建全部失败**,报错是连接被拒,
+  与配额无关,极易误诊。它是单点,排空节点时**不要和租户负载一起赶**。
 
 ---
 

@@ -45,6 +45,26 @@
 # ⚠️ And a cap set in up.sh has to leave headroom for everything this file does,
 # not just for the section testing it.
 #
+# ⭐ A SEPARATE TRAP, AND NOT A CONSEQUENCE OF THAT CHURN: a tenant's PERMISSIONS
+# do not arrive with its namespaces. Waiting for a namespace to go Active is
+# waiting on the wrong object -- the RoleBinding inside it, and the tenant's
+# cluster-scoped grants, land afterwards, and the authorizer lags further still.
+#
+# Reproduced on a cluster created from scratch seconds earlier, so this is the
+# path's own asynchrony and not accumulated state. It cost two runs to see,
+# because it moves: first a Forbidden on creating a namespace, then, once that
+# was retried, a Forbidden on creating a pod INSIDE the new namespace.
+#
+# Retry the first write of each scope rather than waiting on an object. The
+# symptom is a Forbidden that reads exactly like a genuine authorization
+# decision, so an assertion that accepts any refusal will pass on it.
+#
+# ⭐ AND A SETUP STEP MUST NEVER FAIL QUIETLY. When the second namespace above
+# silently failed to appear, the run did not report one broken fixture; it
+# reported a missing ResourceQuota and a pod refused by RBAC instead of by quota,
+# and neither named the step that had actually broken. Check every setup command
+# and report it under its own name.
+#
 # ⭐ ANY ASSERTION CLAIMING TO VERIFY KUBEZOO'S OWN LAYER NEEDS A NEGATIVE CONTROL.
 # With the policies healthy both layers usually produce the same outcome, so a
 # green assertion proves nothing about which one did the work. One assertion here
@@ -127,10 +147,12 @@ kubectl --kubeconfig "$ZOOKC" config set-credentials admin --client-certificate=
   --client-key=$PKI/admin-key.pem --embed-certs=true >/dev/null
 kubectl --kubeconfig "$ZOOKC" config set-context zoo --cluster=zoo --user=admin >/dev/null
 kubectl --kubeconfig "$ZOOKC" config use-context zoo >/dev/null
-# ⚠️ No spec.quota, and that is not an omission to fix casually: the quota path
-# is skipped in this lab because the upstream cluster does not serve
-# clusterresourcequotas, so a quota here would be silently ignored and would read
-# as coverage that does not exist. See the note further down.
+# ⚠️ Still no spec.quota, and the reason has changed rather than gone away. The
+# quota path DOES run in this lab now, which is exactly why this tenant must
+# stay outside it: every assertion below creates objects through this tenant, so
+# a quota here would make an unrelated test fail the moment it created one pod
+# too many, and the failure would point at whatever that test was about. The
+# quota chain gets its own tenant, further down.
 kubectl --kubeconfig "$ZOOKC" create -f - >/dev/null 2>&1 <<EOF
 apiVersion: tenant.kubezoo.io/v1alpha1
 kind: Tenant
@@ -2479,24 +2501,231 @@ fi
 $T delete ingressclass selected >/dev/null 2>&1
 $T delete ns ssa-ns >/dev/null 2>&1
 
-# ⛔ NOT COVERED HERE, and it is worth saying why rather than leaving a gap that
-# looks like an oversight. The tenant quota path -- the ClusterResourceQuota
-# controller deriving a per-namespace ResourceQuota, and the admission webhook
-# enforcing the tenant-wide aggregate -- never runs in this lab. The controller
-# asks the UPSTREAM cluster whether it serves quota.kubezoo.io
-# clusterresourcequotas and gets no, so it skips quota reconciliation entirely
-# (`Skip synchronize cluster resource quota since nil tenant or
-# clusterResourceQuota client` in kubezoo-controller.log). Giving the tenant a
-# spec.quota does not help: the CRD and that controller have to be installed
-# upstream first.
+echo
+echo "== tenant-wide quota =="
+# The chain under test has four components and no two of them are in the same
+# repository or process:
 #
-# ⚠️ So a whole enforcement path that decides how much of the cluster a tenant can
-# take has ZERO coverage in the harness that covers everything else. The escape
-# fixed alongside this note -- a tenant stripping the label the quota webhook
-# selects on -- is pinned by unit tests instead
-# (TestStrippedAutoupdateLabelIsRestored, TestRefusePlatformQuotaWrite), which
-# for that particular claim are stronger anyway: they drive the reconciler and
-# the guard directly. Standing the CRD up here is its own task.
+#   Tenant.spec.quota  --kubezoo-controller-->  ClusterResourceQuota (upstream)
+#     --quota reconciler-->  a ResourceQuota in EVERY tenant namespace, each
+#     carrying the FULL allowance, plus CRQ.status.used summed across them
+#     --admission webhook-->  pod CREATE refused
+#
+# ⭐ The aggregate lives in the webhook, not in the per-namespace objects. Each
+# namespace's ResourceQuota holds the whole allowance, so upstream's own quota
+# admission alone would let a tenant have the allowance N times over, once per
+# namespace. What makes it tenant-wide is webhook.go substituting the cluster
+# quota's summed status for the namespace's own before evaluating.
+#
+# That is why the assertion below spends its budget in a SECOND namespace: a
+# test that fills one namespace and stops proves only what upstream already
+# does. Crossing the namespace boundary is the whole claim, and it is its own
+# negative control -- if the substitution were dropped, the second namespace
+# would admit, because its own used is zero.
+QTID=909091
+QNS_A=$QTID-default
+QNS_B=$QTID-second
+QKC=$LAB/verify-$QTID.kubeconfig
+# ⚠️ Through the zoo, not through $K. Tenants are served by kubezoo out of its
+# own etcd and are not an upstream resource at all, so deleting one with the
+# upstream client is a no-op that says nothing, and the wait below then spends
+# its entire budget watching namespaces nobody has asked to go away. The tenant
+# setup at the top of this file has the same shape and the same problem; it gets
+# away with it because up.sh wipes kubezoo's etcd on every run.
+kubectl --kubeconfig "$ZOOKC" delete tenant "$QTID" >/dev/null 2>&1
+for _ in $(seq 40); do
+  [ "$($K get ns -l "kubezoo.io/tenant=$QTID" --no-headers 2>/dev/null | wc -l)" = 0 ] && break
+  sleep 3
+done
+kubectl --kubeconfig "$ZOOKC" create -f - >/dev/null 2>&1 <<EOF
+apiVersion: tenant.kubezoo.io/v1alpha1
+kind: Tenant
+metadata: {name: "$QTID"}
+spec: {quota: {hard: {pods: "2"}}}
+EOF
+cat >"$LAB/verify-q-csr.json" <<EOF
+{"CN":"$QTID-admin","key":{"algo":"rsa","size":2048},"names":[{"OU":"$QTID"}]}
+EOF
+cfssl gencert -ca=$PKI/ca.pem -ca-key=$PKI/ca-key.pem -config=$PKI/ca-config.json \
+  -profile=kubernetes "$LAB/verify-q-csr.json" 2>/dev/null | cfssljson -bare "$LAB/verify-$QTID"
+kubectl --kubeconfig "$QKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
+  --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+kubectl --kubeconfig "$QKC" config set-credentials t --client-certificate="$LAB/verify-$QTID.pem" \
+  --client-key="$LAB/verify-$QTID-key.pem" --embed-certs=true >/dev/null
+kubectl --kubeconfig "$QKC" config set-context t --cluster=zoo --user=t >/dev/null
+kubectl --kubeconfig "$QKC" config use-context t >/dev/null
+Q="kubectl --kubeconfig $QKC"
+
+# ⚠️ Every step below reports its own failure, and none of them is allowed to
+# fail quietly. The first version silenced all three, and when the second
+# namespace did not come up the run reported two assertion failures -- a missing
+# ResourceQuota and a pod refused by RBAC instead of by quota -- neither of which
+# named the step that had actually broken. A setup step that fails silently does
+# not produce one clear failure, it produces several misleading ones.
+quota_setup_ok=1
+for _ in $(seq 30); do
+  [ "$($K get ns "$QNS_A" -o jsonpath='{.status.phase}' 2>/dev/null)" = Active ] && break
+  sleep 3
+done
+if [ "$($K get ns "$QNS_A" -o jsonpath='{.status.phase}' 2>/dev/null)" != Active ]; then
+  bad "quota fixture: the tenant's first namespace comes up" \
+    "$QNS_A is $($K get ns "$QNS_A" -o jsonpath='{.status.phase}' 2>&1 | head -c 80) after 90s -- if it is Terminating, the previous run's namespaces had not finished going away"
+  quota_setup_ok=0
+fi
+# ⚠️ Retried, because the tenant's namespace being Active does NOT mean the
+# tenant may yet create another one. The two things arrive from different
+# places: the namespace from kubezoo-controller, the cluster-scope permission
+# from the RBAC this file has been churning all run. The upstream authorizer
+# serves stale answers while its cache catches up -- the same trap the header
+# records for the namespace-cap section, and this section sits after all of that
+# churn by design, because a quota fixture has to go last.
+#
+# The symptom was a Forbidden on `create namespace` that looked like a genuine
+# authorization result and was not.
+if [ "$quota_setup_ok" = 1 ]; then
+  ns_out=""
+  for _ in $(seq 20); do
+    ns_out=$($Q create ns second 2>&1) && break
+    sleep 3
+  done
+  if ! $Q get ns second >/dev/null 2>&1; then
+    bad "quota fixture: the tenant can create a second namespace" \
+      "still failing after 60s: $(tr '\n' ' ' <<<"$ns_out" | cut -c1-160)"
+    quota_setup_ok=0
+  fi
+fi
+if [ "$quota_setup_ok" = 1 ]; then
+  for _ in $(seq 20); do
+    [ "$($K get ns "$QNS_B" -o jsonpath='{.status.phase}' 2>/dev/null)" = Active ] && break
+    sleep 3
+  done
+  if [ "$($K get ns "$QNS_B" -o jsonpath='{.status.phase}' 2>/dev/null)" != Active ]; then
+    bad "quota fixture: the tenant's second namespace comes up" "$QNS_B never became Active"
+    quota_setup_ok=0
+  fi
+fi
+
+# The tenant controller decides ONCE, at startup, whether the upstream cluster
+# serves clusterresourcequotas, and keeps a nil client forever if it does not.
+# So a missing CRQ here does not mean the reconciler is broken -- it usually
+# means the quota component started after the controller. Say so, because the
+# symptom is otherwise indistinguishable from the feature not working.
+if [ "$quota_setup_ok" = 1 ]; then
+  crq=$(for _ in $(seq 20); do
+    n=$($K get clusterresourcequota -o name 2>/dev/null | grep "$QTID" | head -1)
+    [ -n "$n" ] && { echo "$n"; break; }; sleep 3
+  done)
+  if [ -z "$crq" ]; then
+    bad "the tenant's spec.quota reaches a ClusterResourceQuota" \
+      "none appeared for $QTID -- if kubezoo-controller.log says 'does not serve clusterresourcequotas', the quota component started too late"
+  else
+    ok "the tenant's spec.quota reaches a ClusterResourceQuota"
+  fi
+  
+  derived=0
+  for _ in $(seq 20); do
+    a=$($K -n "$QNS_A" get resourcequota -l clusterresourcequota.quota.kubezoo.io/autoupdate=true -o name 2>/dev/null | wc -l)
+    b=$($K -n "$QNS_B" get resourcequota -l clusterresourcequota.quota.kubezoo.io/autoupdate=true -o name 2>/dev/null | wc -l)
+    [ "$a" -ge 1 ] && [ "$b" -ge 1 ] && { derived=1; break; }
+    sleep 3
+  done
+  if [ "$derived" = 1 ]; then
+    ok "a labelled ResourceQuota is derived into every tenant namespace"
+  else
+    bad "a labelled ResourceQuota is derived into every tenant namespace" "got $a in $QNS_A, $b in $QNS_B"
+  fi
+  
+  # ⭐ Prove the second namespace admits a pod BEFORE the quota is spent, and do
+  # it with the same spec that will be refused later. Two things at once:
+  #
+  #  - It is the before half of a before/after control. Without it, the refusal
+  #    at the end is just "a pod was refused in a namespace", and the run that
+  #    produced this comment showed exactly how that goes wrong -- the pod was
+  #    refused by RBAC, not by quota, and only the policy-name check caught it.
+  #  - It waits out that RBAC. A tenant's access to a namespace it has just
+  #    created does not arrive with the namespace; the RoleBinding inside it
+  #    lands separately, and the authorizer lags further still.
+  probe_out=""
+  for _ in $(seq 20); do
+    probe_out=$($Q -n second create -f <(pod qprobe '') 2>&1) && break
+    sleep 3
+  done
+  if $Q -n second get pod qprobe >/dev/null 2>&1; then
+    ok "the tenant's second namespace admits this pod while quota is free"
+    # Out of the way before the quota is counted -- otherwise it is a third pod.
+    $Q -n second delete pod qprobe --force --grace-period=0 >/dev/null 2>&1
+  else
+    bad "the tenant's second namespace admits this pod while quota is free" \
+      "$(tr '\n' ' ' <<<"$probe_out" | cut -c1-160)"
+  fi
+
+  expect_allowed "the tenant may create pods up to its quota (1/2)" \
+    $Q -n default create -f <(pod qpod1 '')
+  expect_allowed "the tenant may create pods up to its quota (2/2)" \
+    $Q -n default create -f <(pod qpod2 '')
+  
+  # Poll the SUMMED usage, not the pods: the number the webhook reads is written
+  # by two independent loops -- upstream's quota controller fills in the namespace
+  # object's status.used, and only then does the reconciler sum it into the
+  # cluster quota. Creating the third pod before that lands would measure nothing.
+  used=""
+  for _ in $(seq 30); do
+    used=$($K get "$crq" -o jsonpath='{.status.used.pods}' 2>/dev/null)
+    [ "$used" = 2 ] && break
+    sleep 3
+  done
+  if [ "$used" = 2 ]; then
+    ok "usage is summed across the tenant's namespaces into the cluster quota"
+  else
+    bad "usage is summed across the tenant's namespaces into the cluster quota" "status.used.pods=${used:-<empty>} after 90s"
+  fi
+  
+  # ⭐ The claim. Namespace B has consumed nothing of its own.
+  #
+  # Matched on "exceeded quota" rather than accepting any refusal, and that is not
+  # pedantry here: namespace B is freshly created, and a pod in it can be refused
+  # by placement or by PSA for reasons having nothing to do with quota, which
+  # would leave this assertion passing while proving nothing.
+  expect_denied "a third pod is refused in a DIFFERENT namespace, on the tenant-wide total" \
+    "exceeded quota" -- $Q -n second create -f <(pod qpod3 '')
+  
+  # Both halves of #97, now against a quota system that is actually running. The
+  # unit tests drive the guard and the reconciler directly; these say the objects
+  # they act on are the objects that exist here.
+  qname=$($K -n "$QNS_A" get resourcequota -l clusterresourcequota.quota.kubezoo.io/autoupdate=true -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  expect_denied "the tenant may not edit the ResourceQuota derived from its quota" \
+    "maintained by the platform" -- \
+    $Q -n default patch resourcequota "$qname" --type=merge -p '{"spec":{"hard":{"pods":"99"}}}'
+  
+  # ⚠️ The strip has to be confirmed, not assumed. An empty $qname, or any other
+  # reason the label command does not land, leaves the label sitting at "true"
+  # from beginning to end -- and the loop below then reports a restoration that
+  # never happened. This assertion is only about the reconciler if something
+  # actually removed the label first.
+  if ! $K -n "$QNS_A" label resourcequota "$qname" \
+       clusterresourcequota.quota.kubezoo.io/autoupdate- >/dev/null 2>&1; then
+    bad "a stripped autoupdate label is restored by the reconciler" \
+      "could not strip the label to begin with (resourcequota name was '${qname:-<empty>}')"
+    qname=""
+  fi
+  if [ -n "$qname" ]; then
+    restored=""
+    for _ in $(seq 20); do
+      restored=$($K -n "$QNS_A" get resourcequota "$qname" \
+        -o jsonpath='{.metadata.labels.clusterresourcequota\.quota\.kubezoo\.io/autoupdate}' 2>/dev/null)
+      [ "$restored" = true ] && break
+      sleep 3
+    done
+    if [ "$restored" = true ]; then
+      ok "a stripped autoupdate label is restored by the reconciler"
+    else
+      bad "a stripped autoupdate label is restored by the reconciler" "label is ${restored:-<gone>} after 60s"
+    fi
+  fi
+
+fi
+kubectl --kubeconfig "$ZOOKC" delete tenant "$QTID" >/dev/null 2>&1
+rm -f "$LAB/verify-$QTID"*.pem "$LAB/verify-q-csr.json" "$QKC"
 
 echo
 echo "== a NetworkPolicy peer cannot reach past the tenant =="

@@ -164,6 +164,104 @@ for i in $(seq 60); do
 done
 echo "kubezoo healthz: $(curl -sk --cert $PKI/kubezoo/admin.pem --key $PKI/kubezoo/admin-key.pem https://127.0.0.1:6443/healthz)"
 
+kubectl --context "kind-$CLUSTER" config view --minify --raw > "$LAB/ctrl-upstream.kubeconfig"
+
+echo "== cluster resource quota =="
+# ⚠️ This has to come BEFORE the tenant controller, and the order is load-bearing
+# rather than cosmetic. The controller decides once, at startup, whether the
+# upstream cluster serves clusterresourcequotas -- cmd/.../clusterQuotaClient
+# asks discovery and keeps a nil client forever if the answer is no. Nothing
+# retries. Start the controller first and every tenant's spec.quota is silently
+# ignored for the lifetime of the process, with one INFO line as the only trace.
+#
+# The CRD arrives with this binary (it installs the copy embedded in
+# kubezoo-contract), so "before" here means "before the API exists", not merely
+# before in the file.
+QUOTA=$LAB/kubezoo-quota
+( cd "$ZOO" && go build -o "$QUOTA" ./cmd/clusterresourcequota )
+
+# ⛔ Unregister BEFORE stopping the old process, and re-register only once the
+# new one answers. The webhook is failurePolicy: Fail and excludes only two
+# namespaces, so a registration outliving its process does not degrade anything
+# -- it stops every pod in the cluster from being created, and the error is a
+# connection refused that names neither quota nor kubezoo. That state is
+# reachable by nothing more exotic than rebooting the host: the kind cluster
+# comes back with the webhook still in it and the host process gone.
+#
+# Deleting first means the window where a registration has no process behind it
+# is this script's own runtime, and never outlives it.
+kubectl --context "kind-$CLUSTER" delete validatingwebhookconfiguration \
+  clusterresourcequota.kubezoo.io --ignore-not-found >/dev/null 2>&1
+pkill -f "$LAB/kubezoo-quot[a]" || true
+
+# The shipped ValidatingWebhookConfiguration reaches the component through a
+# Service, because in production it runs as a pod. Here it runs as a host
+# process, so the upstream apiserver -- which is inside a kind container --
+# needs a route back out. That is the docker network gateway, and the serving
+# certificate has to carry it as a SAN or the apiserver rejects the connection.
+QUOTA_HOST=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' \
+  | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)
+if [ -z "$QUOTA_HOST" ]; then
+  # Stop here rather than carry an empty address into the certificate and the
+  # webhook URL. Registering a failurePolicy: Fail webhook that points nowhere
+  # breaks pod creation cluster-wide, which is a far worse outcome than a lab
+  # that refuses to start.
+  echo "FATAL: could not find the docker 'kind' network's IPv4 gateway; the webhook has no route back to the host" >&2
+  exit 1
+fi
+QUOTA_PORT=${QUOTA_PORT:-19443}
+rm -rf "$LAB/quota-pki" && mkdir -p "$LAB/quota-pki"
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout "$LAB/quota-pki/tls.key" -out "$LAB/quota-pki/tls.crt" \
+  -subj "/CN=kubezoo-cluster-resource-quota" \
+  -addext "subjectAltName=IP:$QUOTA_HOST" >"$LAB/quota-pki.log" 2>&1
+
+nohup "$QUOTA" --kubeconfig="$LAB/ctrl-upstream.kubeconfig" \
+  --metrics-bind-address=:18080 --health-probe-bind-address=:18081 \
+  --webhook-port="$QUOTA_PORT" --webhook-cert-dir="$LAB/quota-pki" \
+  >"$LAB/quota.log" 2>&1 &
+
+# Wait for the API the controller is about to ask discovery about, not for the
+# process: the race this ordering exists to avoid is won or lost on whether the
+# CRD is served, and the binary is up well before that.
+for i in $(seq 60); do
+  kubectl --context "kind-$CLUSTER" get crd clusterresourcequotas.quota.kubezoo.io >/dev/null 2>&1 && break
+  sleep 1
+done
+echo "quota crd: $(kubectl --context "kind-$CLUSTER" get crd clusterresourcequotas.quota.kubezoo.io -o name 2>&1)"
+
+# Same rules and the same namespace exclusion as config/setup/quota.tmpl.yaml --
+# only clientConfig differs, url instead of service. Keep the exclusion: with
+# failurePolicy Fail and no exclusion, a webhook that dies takes the cluster's
+# own pods with it, including the ones the lab needs to recover.
+kubectl --context "kind-$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: clusterresourcequota.kubezoo.io
+webhooks:
+- name: clusterresourcequota.kubezoo.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    url: https://$QUOTA_HOST:$QUOTA_PORT/admission/validating/clusterresourcequotas
+    caBundle: $(base64 -w0 <"$LAB/quota-pki/tls.crt")
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values: [default, kube-system]
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    operations: ["CREATE"]
+    resources: ["pods"]
+    scope: Namespaced
+  sideEffects: None
+  timeoutSeconds: 5
+EOF
+
 # The tenant controller is its own binary in its own repository. kubezoo alone
 # accepts Tenant objects and does nothing with them -- no namespaces, no
 # RoleBindings -- so a lab without this process passes nothing.
@@ -185,7 +283,6 @@ kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-credentials admin \
   --client-certificate=$PKI/kubezoo/admin.pem --client-key=$PKI/kubezoo/admin-key.pem --embed-certs=true >/dev/null
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config set-context c --cluster=zoo --user=admin >/dev/null
 kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config use-context c >/dev/null
-kubectl --context "kind-$CLUSTER" config view --minify --raw > "$LAB/ctrl-upstream.kubeconfig"
 "$CTRL/hack/lab/up-controller.sh" "$LAB" \
   "$LAB/ctrl-zoo.kubeconfig" "$LAB/ctrl-upstream.kubeconfig" "$PKI/kubezoo"
 # The policy layer is part of the tested shape, not an optional extra: without it
