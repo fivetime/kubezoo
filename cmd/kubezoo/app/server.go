@@ -1215,6 +1215,54 @@ func getServiceIPAndRanges(serviceClusterIPRanges string) (net.IP, net.IPNet, ne
 	return apiServerServiceIP, primaryServiceIPRange, secondaryServiceIPRange, nil
 }
 
+// NewBuildHandlerChanFunc builds kubezoo's request filter chain.
+//
+// ⛔⛔ THIS CHAIN IS HAND-BUILT, WHICH MEANS EVERY FILTER UPSTREAM INSTALLS AND
+// THIS DOES NOT IS A DECISION SOMEBODY HAS TO HAVE MADE. Three times it was not
+// a decision, it was an omission, and each time the symptom was a flag that a
+// deployment passes and nothing consumes:
+//
+//	--audit-log-path        accepted, validated, and nothing recorded
+//	--max-requests-inflight accepted, and no concurrency limit of any kind
+//	--request-timeout       accepted, and no request ever timed out
+//
+// A missing filter does not fail to compile and does not fail to start. It goes
+// wrong later, on one path, in a way that reads as something else -- the missing
+// WithAuditInit surfaced as a nil-pointer panic on every PATCH.
+//
+// The accounting below is against upstream's DefaultBuildHandlerChain
+// (staging/src/k8s.io/apiserver/pkg/server/config.go). Keep it current when
+// either side moves; a filter that is deliberately absent needs a reason here,
+// not silence.
+//
+// Present, in upstream's order and for upstream's reasons: WithAudit,
+// WithFailedAuthenticationAudit, WithAuthentication, WithCORS,
+// WithWarningRecorder, WithTimeoutForNonLongRunningRequests, WithRequestDeadline,
+// WithWaitGroup, WithRequestInfo, WithProbabilisticGoaway, WithCacheControl,
+// WithPanicRecovery, WithAuditInit, WithMaxInFlightLimit.
+//
+// Absent on purpose:
+//
+//   - WithAuthorization. kubezoo runs --authorization-mode=AlwaysAllow and
+//     authorizes nothing of its own: every forwarded request is impersonated as
+//     the tenant, so the decision is upstream RBAC's. What upstream cannot judge
+//     -- the platform APIs served from kubezoo's own etcd -- is guarded by
+//     WithPlatformAPIGuard instead.
+//   - WithPriorityAndFairness. Off deliberately; see EnablePriorityAndFairness
+//     above, where the reason is written out. WithMaxInFlightLimit is the branch
+//     upstream takes in that case, and it is now installed.
+//   - WithImpersonation. Honouring an inbound Impersonate-User header would let
+//     a tenant ask to be somebody else. kubezoo impersonates OUTBOUND, which is
+//     a different direction and unaffected.
+//   - filterlatency.Track*, WithLatencyTrackers, WithHTTPLogging, WithTracing.
+//     Observability, no behaviour.
+//   - WithRetryAfter, WithWatchTerminationDuringShutdown,
+//     WithMuxAndDiscoveryComplete. All three hang off c.lifecycleSignals, which
+//     this tree does not populate. They shape behaviour during startup and
+//     shutdown -- 503-with-Retry-After rather than a refusal, watches drained on
+//     the way down -- so this is a real gap, not a non-issue, and it is scoped
+//     to the moments around a restart.
+//   - WithHSTS, WithRoutine. A header and a scheduling optimisation.
 func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 	tenants tenantlister.TenantLister) func(apiHandler http.Handler, c *server.Config) (secure http.Handler) {
 	return func(handler http.Handler, c *genericapiserver.Config) (secure http.Handler) {
@@ -1237,6 +1285,24 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		// Carries the apply force flag, which is a query parameter the storage
 		// layer never sees. See tenantfilters.WithApplyForce.
 		handler = tenantfilters.WithApplyForce(handler)
+		// ⛔ Without this kubezoo has NO concurrency limit of any kind, while
+		// accepting --max-requests-inflight and reporting nothing. Upstream
+		// installs one or the other -- priority and fairness when FlowControl is
+		// configured, this when it is not (config.go, the else branch above
+		// WithImpersonation) -- and kubezoo has P&F deliberately off, so this is
+		// the branch it lands in and it was never wired.
+		//
+		// ⚠️ The flag was passed in the lab AND in config/setup/proxy.yaml, so a
+		// deployment reads as though a limit of 1002 is in force. It is the same
+		// shape as the audit flags being accepted and discarded: the setting is
+		// parsed, stored on the config, and then nothing consults it.
+		//
+		// ⭐ It matters more here than on an ordinary apiserver, because one
+		// tenant request is not one upstream request. A cross-namespace list is
+		// served by reading each of the tenant's namespaces in turn, so unbounded
+		// concurrency here is unbounded fan-out onto the cluster every other
+		// tenant shares.
+		handler = genericfilters.WithMaxInFlightLimit(handler, c.MaxRequestsInFlight, c.MaxMutatingRequestsInFlight, c.LongRunningFunc)
 		// Inside authentication and outside everything else, which is where
 		// upstream puts it (config.go, WithAudit at 1064 and WithAuthentication
 		// at 1075): the audit event has to carry the authenticated identity, and
@@ -1254,6 +1320,21 @@ func NewBuildHandlerChanFunc(discoveryProxy proxy.DiscoveryProxy,
 		// adding a header stays threadsafe when the timeout fires.
 		handler = genericapifilters.WithWarningRecorder(handler)
 		handler = genericfilters.WithTimeoutForNonLongRunningRequests(handler, c.LongRunningFunc)
+		// ⛔ Without this the line above enforces nothing. In 1.36 the timeout
+		// filter no longer carries a duration: it takes the deadline off the
+		// request context (timeout.go, `timeoutCh := r.Context().Done()`), and
+		// this is the filter that puts one there. Missing, --request-timeout is
+		// accepted and no request is ever timed out -- one that hangs holds its
+		// goroutine, and now its in-flight slot, for as long as the client stays
+		// connected.
+		//
+		// ⚠️ Third instance of the same shape in one audit of this chain, after
+		// the audit flags and --max-requests-inflight: a flag parsed, validated,
+		// stored on the config, and consumed by nothing. Passing it in
+		// config/setup/proxy.yaml is what makes it worse than absent -- the
+		// deployment reads as though ten minutes is enforced.
+		handler = genericapifilters.WithRequestDeadline(handler, c.AuditBackend, c.AuditPolicyRuleEvaluator,
+			c.LongRunningFunc, c.Serializer, c.RequestTimeout)
 		// HandlerChainWaitGroup was split in 1.29 into a wait group for
 		// non-long-running requests and a rate-limited one for watches.
 		handler = genericfilters.WithWaitGroup(handler, c.LongRunningFunc, c.NonLongRunningRequestWaitGroup)

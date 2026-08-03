@@ -1642,7 +1642,21 @@ if [ -n "$CRBTOK" ]; then
   kubectl --kubeconfig "$CRBKC" config set-credentials sa --token="$CRBTOK" >/dev/null
   kubectl --kubeconfig "$CRBKC" config set-context c --cluster=zoo --user=sa >/dev/null
   kubectl --kubeconfig "$CRBKC" config use-context c >/dev/null
-  seen=$(kubectl --kubeconfig "$CRBKC" get secrets -A --no-headers 2>/dev/null | grep -c crb-probe)
+  # ⚠️ Retried, and it has to be THIS read that is retried rather than the
+  # `auth can-i` above. That loop asks the UPSTREAM authorizer with --as; this
+  # goes through kubezoo with a ServiceAccount token, which authenticates here
+  # and is impersonated onward. Two different paths with two different caches --
+  # so the first answering yes says nothing about the second, and the assertion
+  # failed intermittently while its supposed wait had already passed.
+  #
+  # ⭐ It is a positive assertion about a grant that arrives asynchronously, so
+  # the only sound probe is the read itself.
+  seen=0
+  for _ in $(seq 20); do
+    seen=$(kubectl --kubeconfig "$CRBKC" get secrets -A --no-headers 2>/dev/null | grep -c crb-probe)
+    [ "$seen" -ge 2 ] && break
+    sleep 2
+  done
   if [ "$seen" -ge 2 ]; then
     ok "an operator ServiceAccount reads across the tenant's namespaces with it ($seen)"
   else
