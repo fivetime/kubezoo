@@ -73,6 +73,14 @@ local_up() {
     docker tag kubezoo/clusterresourcequota:"${LOCAL_UP_IMAGE_TAG}" kubezoo/clusterresourcequota:local-up
 
     echo "Setting up ClusterResourceQuota on $CLUSTER_NAME..."
+    # ⚠️ No `kubectl apply` of the CRD here, and that is not an omission: the
+    # quota controller installs it itself at startup, from the copy embedded in
+    # kubezoo-contract. Applying it here as well would make the deployment a
+    # second source for something that already has one.
+    #
+    # ⛔ The wait below is therefore waiting on the CONTROLLER, not on a manifest.
+    # If it spins forever, the controller did not start or could not install the
+    # CRD -- look at its logs rather than for a missing yaml.
     # run quota controller and webhook
     kubectl --context "kind-${CLUSTER_NAME}" apply -f $ZOO_ROOT/_output/setup/quota.yaml
     while ! kubectl --context "kind-${CLUSTER_NAME}" get clusterresourcequota; do
