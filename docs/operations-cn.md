@@ -241,6 +241,27 @@ kubectl taint node <platform-node> kubezoo.io/pool=platform:NoSchedule
 真正的隔离仍然是注入的 nodeSelector —— 见 `docs/pod-spec-audit-cn.md` §2① 的结论:
 那条路径今天**只有 Kyverno 一层**。
 
+### ⚠️ 排空节点时:租户的 PodDisruptionBudget 会卡住你,但锁不死你
+
+租户可以自由创建 PDB(kubezoo、控制器、策略层**都不管它**),包括
+`minAvailable: 100%` / `maxUnavailable: 0` —— 那样它的 Pod **永远不接受驱逐**。
+
+⭐ **但 PDB 只约束驱逐 API**(`pkg/registry/core/pod/storage/eviction.go`),
+处理普通 DELETE 的 `strategy.go` 里零引用 ⇒ **直接删除完全绕过它**。
+
+| 你用什么排空 | 结果 |
+|---|---|
+| `kubectl drain`(默认走 eviction) | ⛔ 卡住,反复 429 |
+| `kubectl drain --disable-eviction` | ✅ 直接删,PDB 无效 |
+| cluster-autoscaler 缩容 | ⛔ 尊重 PDB,该节点永远缩不掉 |
+
+⚠️ **没有加代码守卫,是有意的**:拒绝 `minAvailable: 100%` 会打断租户正当的高可用配置,
+而平台本来就有更大的锤子。代价是**租户会失去优雅停机** —— 强删不等它的 preStop 跑完。
+所以真要强删前,先看一眼是不是某个租户把自己钉死了,能沟通就沟通。
+
+⚠️ 落点隔离生效后,租户 Pod 都在**自己的节点池**上,所以它卡住的是自己那批节点。
+但平台做全集群内核升级时,那批节点照样会挡路。
+
 ---
 
 ## 2.5 ⭐ 每租户 namespace 数量上限
