@@ -451,6 +451,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseNodePorts(obj, original); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refusePlatformQuotaWrite(obj); err != nil {
 		return nil, false, err
 	}
@@ -637,6 +640,20 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 	// nil: nothing is stored, so every address named here is newly claimed.
 	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
+		return nil, err
+	}
+	// nil for the same reason: on a create there is no port to have kept.
+	if err := tp.refuseNodePorts(obj, nil); err != nil {
+		return nil, err
+	}
+	// ⚠️ Needed on the CREATE path specifically, not only on the update paths.
+	// The label this refuses is what the quota reconciler finds its own objects
+	// by, and a tenant is admin in its own namespaces -- so it can create an
+	// ordinary ResourceQuota carrying that label and no ownerReference. The
+	// reconciler handles the decoy by stripping the label rather than adopting
+	// it, but that is a repair after the fact; this is what keeps it from being
+	// written at all.
+	if err := tp.refusePlatformQuotaWrite(obj); err != nil {
 		return nil, err
 	}
 
@@ -1127,8 +1144,76 @@ func (tp *tenantProxy) refuseNewExternalIPs(obj, old runtime.Object) error {
 			field.NewPath("spec", "externalIPs"),
 			"claiming an external IP is not available to tenants: every node would "+
 				"intercept traffic to that address and deliver it here, whoever the address "+
-				"actually belongs to. Use a Service of type LoadBalancer or NodePort, or ask "+
-				"the platform to route the address to you.",
+				"actually belongs to. Use a Service of type LoadBalancer, or ask the platform "+
+				"to route the address to you.",
+		)})
+}
+
+// refuseNodePorts stops a tenant opening a port on the platform's nodes.
+//
+// ⛔ Refused rather than confined, because there is nothing to confine it to. A
+// tenant has no node concept at all: it does not own the machines, does not
+// choose where its pods land, and has no way to address a node. A port opened on
+// EVERY node is therefore outside everything this layer maintains -- reachable
+// by anyone who can reach the node network, with no tenancy anywhere in the
+// path, past the tenant's own NetworkPolicies. The range is shared and finite as
+// well, so one tenant pinning 30080 takes it from every other.
+//
+// That is the whole reason. What follows is why the refusal costs nothing, not
+// why it is right.
+//
+// ⭐ No capability is lost. kubetron does not use node ports: it forked away
+// from the node:nodePort shape it inherited and addresses the backing pod
+// directly. LoadBalancer stays the way a tenant publishes a Service -- and it is
+// the way that has an owner, a cost, and an address belonging to somebody.
+//
+// ⚠️ kubetron's own "ports" are not these ports, and the difference is exactly
+// the point. A Neutron/OVN port is a network attachment -- the interface a pod
+// is plugged into, INSIDE the tenant's own network, with what may reach it
+// governed by security groups the tenant administers in OpenStack, through
+// Horizon. That policy surface is not in this API at all, which is why nothing
+// here and nothing in kubetron's code manages it. A node port is an L4 port
+// number on one of the platform's machines: outside any tenant network, and
+// governed by no policy surface anywhere. Same word, opposite situations -- one
+// is a tenant-owned thing whose controls simply live on another control plane,
+// the other has no owner and no controls.
+//
+// Two refusals, because they are two different things to ask for: the type can
+// be requested with no port named at all, and upstream then allocates one; and a
+// port can be named on a Service of any type, including LoadBalancer.
+//
+// ⚠️ The subset rule on the named ports is not leniency. Services created before
+// this rule carry ports upstream allocated for them, and an outright refusal
+// would leave those unwritable by their owner -- who could then not even remove
+// them. Adding is refused; keeping and dropping are not.
+func (tp *tenantProxy) refuseNodePorts(obj, old runtime.Object) error {
+	svc, ok := obj.(*core.Service)
+	if !ok {
+		return nil
+	}
+	if svc.Spec.Type == core.ServiceTypeNodePort {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "", Kind: "Service"}, svc.Name,
+			field.ErrorList{field.Forbidden(
+				field.NewPath("spec", "type"),
+				"a Service of type NodePort is not available to tenants: it opens a port on "+
+					"every node of the platform, and a node is not something you own or can "+
+					"address. Use type LoadBalancer to publish a Service, or type ClusterIP "+
+					"behind an Ingress.",
+			)})
+	}
+	oldSvc, _ := old.(*core.Service)
+	if !convert.NodePortsAreNew(svc, oldSvc) {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Service"}, svc.Name,
+		field.ErrorList{field.Forbidden(
+			field.NewPath("spec", "ports", "nodePort"),
+			"naming a node port is not available to tenants: the port is opened on every "+
+				"node of the platform, and the range is shared with every other tenant on a "+
+				"first-come-first-served basis. Nothing in this platform's data plane "+
+				"reaches your pods through it.",
 		)})
 }
 
@@ -1614,6 +1699,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refuseNodePorts(updated, original); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refusePlatformQuotaWrite(updated); err != nil {

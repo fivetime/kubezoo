@@ -2839,6 +2839,80 @@ fi
 $T delete service extip-probe >/dev/null 2>&1
 
 echo
+echo "== a tenant cannot open a port on the platform's nodes =="
+# ⛔ A tenant has no node concept: it owns none of the machines, decides where
+# nothing lands, and cannot address one. A port opened on EVERY node is therefore
+# outside everything this layer maintains -- reachable by whoever reaches the
+# node network, past the tenant's own NetworkPolicies -- and it comes out of a
+# finite range shared first-come-first-served with every other tenant.
+#
+# ⭐ Single-layer, like the external IP above: no policy has a rule matching
+# Services, so a pass here can only be kubezoo.
+np_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: np-probe}
+spec:
+  type: NodePort
+  ports: [{port: 80}]
+  selector: {app: nothing}
+EOF
+)
+if grep -q "spec.type" <<<"$np_out"; then
+  ok "a Service of type NodePort is refused"
+else
+  bad "a Service of type NodePort is refused" "$(tr '\n' ' ' <<<"$np_out" | cut -c1-160)"
+fi
+
+# ⭐ The type is not the only way to ask. A node port can be NAMED on a Service of
+# any other type, and refusing only the type would leave that open -- which is
+# also the difference between reading spec.type and reading the ports.
+np_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: np-probe}
+spec:
+  type: LoadBalancer
+  ports: [{port: 80, nodePort: 30099}]
+  selector: {app: nothing}
+EOF
+)
+if grep -q "nodePort" <<<"$np_out"; then
+  ok "and naming a node port on a Service of another type is refused too"
+else
+  bad "naming a node port on another type is refused" \
+      "$(tr '\n' ' ' <<<"$np_out" | cut -c1-160)"
+fi
+
+# ...and the same Service without either is fine, so the refusal is about the
+# node port rather than about Services or about LoadBalancer.
+if $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: np-probe}
+spec:
+  ports: [{port: 80}]
+  selector: {app: nothing}
+EOF
+then
+  ok "while the same Service without one is accepted"
+else
+  bad "a Service without a node port is accepted" "it was refused"
+fi
+
+# ⭐ And the update path, a separate call site: converting an existing Service to
+# NodePort must be refused too, or the guard is create-only and a tenant writes
+# twice.
+np_out=$($T patch service np-probe --type=merge -p '{"spec":{"type":"NodePort"}}' 2>&1)
+if grep -q "spec.type" <<<"$np_out"; then
+  ok "and converting an existing Service to NodePort is refused as well"
+else
+  bad "converting an existing Service to NodePort is refused" \
+      "$(tr '\n' ' ' <<<"$np_out" | cut -c1-160)"
+fi
+$T delete service np-probe >/dev/null 2>&1
+
+echo
 echo "== the platform caps how many cluster role bindings a tenant may own =="
 # ⛔ THIS RUNS SECOND-TO-LAST, immediately before the section that takes the
 # tenant's RoleBinding away -- which has to stay last, so this cannot be after it. Filling a

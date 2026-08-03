@@ -20,8 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
@@ -659,5 +664,162 @@ func TestTenantProxyCreateSubresourceAddressesTheParent(t *testing.T) {
 			assert.Equal(t, tc.wantPath, gotPath,
 				"the subresource request went to the wrong object")
 		})
+	}
+}
+
+// TestEveryWritePathRunsTheSameGuards pins that the three write paths refuse the
+// same things.
+//
+// ⛔ The guard list is written out three times -- Create, Update for a PUT, and
+// guaranteedUpdate for a PATCH -- and nothing makes the copies agree. Leaving a
+// guard out of one of them compiles, passes every unit test that calls the guard
+// directly, and leaves an escape reachable by writing twice: create the object
+// without the field, then patch it in.
+//
+// ⭐ That is not hypothetical. refuseNodePorts was added to Create and to Update
+// and missed in guaranteedUpdate, which meant `kubectl patch` converted a
+// Service to NodePort with nothing in the way. Only the lab's update assertion
+// caught it -- reading the code had produced the confident and wrong conclusion
+// that Update was the PATCH path.
+//
+// Compares the source rather than behaviour on purpose: behaviour needs a live
+// proxy per guard, and what goes wrong here is an omission, which is a property
+// of the text.
+func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
+	src, err := os.ReadFile("proxy.go")
+	if err != nil {
+		t.Fatalf("reading proxy.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "proxy.go", src, 0)
+	if err != nil {
+		t.Fatalf("parsing proxy.go: %v", err)
+	}
+
+	// Every method whose name says it refuses something is a guard, so a guard
+	// added later is covered without anyone remembering to list it here.
+	guards := map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || !strings.HasPrefix(fn.Name.Name, "refuse") {
+			continue
+		}
+		guards[fn.Name.Name] = true
+	}
+	if len(guards) < 3 {
+		t.Fatalf("found %d guards, expected the several that exist; the detection is wrong", len(guards))
+	}
+
+	// ⚠️ Direct calls are not enough, and a version of this test that stopped
+	// there reported two guards missing that were not: refuseProjectedName and
+	// refuseProjectedLabel are called from tp.update, which BOTH update paths end
+	// in. A test that cries wolf gets an allowlist entry written for it and stops
+	// meaning anything, so follow the calls one method to the next.
+	directCalls := map[string]map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil {
+			continue
+		}
+		directCalls[fn.Name.Name] = map[string]bool{}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				directCalls[fn.Name.Name][sel.Sel.Name] = true
+			}
+			return true
+		})
+	}
+	// ⚠️ Helpers are followed, other ENTRY POINTS are not, and that distinction is
+	// the whole difficulty. guaranteedUpdate has a branch that delegates to
+	// Create when the object turns out not to exist, so a plain transitive walk
+	// credits guaranteedUpdate with every guard Create runs -- and the version of
+	// this test that did that passed happily with the guard deleted from
+	// guaranteedUpdate. Following nothing produces the opposite error. Follow
+	// helpers only.
+	entryPoint := map[string]bool{"Create": true, "Update": true, "guaranteedUpdate": true}
+	var reachable func(from string, seen map[string]bool) map[string]bool
+	reachable = func(from string, seen map[string]bool) map[string]bool {
+		out := map[string]bool{}
+		if seen[from] {
+			return out
+		}
+		seen[from] = true
+		for callee := range directCalls[from] {
+			if guards[callee] {
+				out[callee] = true
+				continue
+			}
+			// Only methods defined in this file are followed; anything else is a
+			// leaf as far as this test is concerned.
+			if _, isLocal := directCalls[callee]; isLocal && !entryPoint[callee] {
+				for g := range reachable(callee, seen) {
+					out[g] = true
+				}
+			}
+		}
+		return out
+	}
+	called := map[string]map[string]bool{}
+	for _, path := range []string{"Create", "Update", "guaranteedUpdate"} {
+		if _, ok := directCalls[path]; !ok {
+			continue
+		}
+		called[path] = reachable(path, map[string]bool{})
+	}
+	for _, path := range []string{"Create", "Update", "guaranteedUpdate"} {
+		if called[path] == nil {
+			t.Fatalf("%s not found in proxy.go; this test no longer knows where the write paths are", path)
+		}
+	}
+
+	// ⭐ Create-only is a legitimate answer for some rules, so the test asks for a
+	// REASON rather than for symmetry. Adding a guard therefore forces the
+	// decision to be made and written down; it does not force the guard onto
+	// paths where it would do harm.
+	createOnly := map[string]string{
+		"refuseTenantChosenNode": "placement runs on CREATE and never again: nodeSelector and " +
+			"schedulerName are immutable on a pod update and every existing toleration must " +
+			"survive one, so re-running it would make a tenant's own running pods unwritable",
+		"refuseReservedName": "a name cannot change after creation",
+		"refuseUnpublishedStorageClass": "a retired class refuses NEW references only -- existing " +
+			"claims have to stay writable by their owner, which is the whole point of retiring " +
+			"rather than deleting",
+		"refuseTooManyNamespaces": "a ceiling on how many exist, and only a create adds one",
+	}
+
+	// A guard that appears on ANY write path has to appear on all of them, unless
+	// it is create-only on purpose. Guards nothing calls are a separate problem
+	// and not this test's.
+	for name := range guards {
+		var missing []string
+		var present bool
+		for _, path := range []string{"Create", "Update", "guaranteedUpdate"} {
+			if called[path][name] {
+				present = true
+			} else {
+				missing = append(missing, path)
+			}
+		}
+		if !present {
+			continue
+		}
+		if _, deliberate := createOnly[name]; deliberate {
+			// Still checked: a guard excused from the update paths had better be
+			// on the create path, or it runs nowhere at all.
+			if !called["Create"][name] {
+				t.Errorf("%s is listed as create-only but does not run on Create, so it runs on "+
+					"no write path at all", name)
+			}
+			continue
+		}
+		if len(missing) > 0 {
+			t.Errorf("%s runs on some write paths but not %v -- a tenant reaches the unguarded one "+
+				"by writing twice: create the object without the field, then patch it in. If that "+
+				"is deliberate, say why in createOnly above", name, missing)
+		}
 	}
 }

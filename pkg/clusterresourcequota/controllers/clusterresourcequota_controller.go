@@ -248,8 +248,11 @@ func (r *ClusterResourceQuotaReconciler) ensureResourceQuotaInNamespace(ctx cont
 	// ⚠️ A tenant is admin in its own namespaces on purpose -- "*" on "*", so
 	// that custom resources from tenant CRDs are covered -- so it can write this
 	// object, and repairing what it writes is the only lever this controller has.
-	// This closes the permanent case; the write is still refused up front by
-	// tenantProxy so the window is never opened in the first place.
+	// This closes the permanent case. tenantProxy refuses the write up front as
+	// well -- on all three write paths now; when this comment was first written
+	// it said so while the guard was in fact missing from the create path, so a
+	// tenant could still write the object once and rely on this loop to repair
+	// it. Repair here is the backstop, not the only line.
 	// ⚠️ Compared, NOT written, here. UpdateOnConflict decides whether to issue a
 	// request by deep-comparing the object before and after its mutate function,
 	// so anything corrected before that snapshot is taken looks unchanged and no

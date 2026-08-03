@@ -66,3 +66,54 @@ func TestExternalIPsAreNew(t *testing.T) {
 		}
 	}
 }
+
+// TestNodePortsAreNew pins the rule that a tenant may keep or drop the node
+// ports it already has and may not ask for one it does not.
+//
+// ⛔ A node is not something a tenant has: it owns none of the machines, chooses
+// where nothing lands, and cannot address one. So a port opened on every node is
+// reachable by whoever reaches the node network, past every boundary this layer
+// maintains, out of a range shared first-come-first-served with every other
+// tenant.
+//
+// ⚠️ Subset rather than refusal for the same reason as external IPs: Services
+// created before this rule carry ports upstream allocated for them, and refusing
+// outright would leave those unwritable by their owner.
+func TestNodePortsAreNew(t *testing.T) {
+	svc := func(ports ...int32) *core.Service {
+		s := &core.Service{}
+		for _, p := range ports {
+			s.Spec.Ports = append(s.Spec.Ports, core.ServicePort{NodePort: p})
+		}
+		return s
+	}
+	health := func(p int32) *core.Service {
+		return &core.Service{Spec: core.ServiceSpec{HealthCheckNodePort: p}}
+	}
+
+	for _, tc := range []struct {
+		name string
+		svc  *core.Service
+		old  *core.Service
+		want bool
+	}{
+		{"no ports at all", svc(), nil, false},
+		{"unassigned ports are not a request", svc(0, 0), nil, false},
+		{"naming one on create", svc(30080), nil, true},
+		{"keeping what upstream allocated", svc(30080), svc(30080), false},
+		{"dropping one", svc(), svc(30080), false},
+		{"dropping one of two", svc(30080), svc(30080, 30081), false},
+		{"adding one alongside a kept one", svc(30080, 30081), svc(30080), true},
+		{"swapping one for another", svc(30081), svc(30080), true},
+		{"health check port on create", health(30080), nil, true},
+		{"keeping the health check port", health(30080), health(30080), false},
+		{"changing the health check port", health(30081), health(30080), true},
+		{"dropping the health check port", health(0), health(30080), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NodePortsAreNew(tc.svc, tc.old); got != tc.want {
+				t.Fatalf("NodePortsAreNew = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
