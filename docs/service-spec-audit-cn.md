@@ -81,9 +81,16 @@ IP 的流量 DNAT 到这个租户的 Pod**。租户不需要拥有那个 IP,也�
 kubetron 的 service reconciler(去开 Octavia LB),配额、计费、IP 归属这些问题都在那一侧
 有上下文,kubezoo 这里没有。
 
-在 kubezoo 层能做且不越界的只有一件:把 `loadBalancerClass` 当成第四个 class 走
-`pkg/publishedclass`(标签发布 + 未发布即拒)。⚠️ 但**先要确认 kubetron 是否使用这个字段**
-来选择 LB 提供者 —— 若它根本不看,那这层校验就是自欺。**未核实,未做。**
+曾经看着可行的一条是:把 `loadBalancerClass` 当成第四个 class 走 `pkg/publishedclass`
+(标签发布 + 未发布即拒)—— 毕竟它和 `storageClassName` 长得一模一样。
+
+⛔ **已核实,这条走不通:kubetron 既不读 `loadBalancerClass` 也不读 `loadBalancerIP`**
+(`kubetron/pkg/` 非测试代码里两者均零引用)。它接管一个 Service 的依据是注解
+`kubetron.network.kubevirt.io/lb: "true"`(`pkg/service/reconciler.go:117`),
+连 `type: LoadBalancer` 都不是。**在 kubezoo 层校验一个下游根本不看的字段,是自欺。**
+
+⭐ 这条留作教训:**"下游读不读这个字段"必须查源码,不能按"和 X 同构"推。**
+本轮就是靠这一步否掉了一个已经想好怎么做的方案。
 
 ### ⚠️ ③ nodePort 一族:先到先得的端口占位
 
@@ -93,3 +100,7 @@ kubetron 的 service reconciler(去开 Octavia LB),配额、计费、IP 归属�
 
 **没有做**。真要管,合理的形状是"租户不得点名 nodePort,只能由系统分配"——
 但这会打断任何依赖固定 nodePort 的存量租户,同样是产品决策。
+
+⚠️ 而且要先核实一件事(**未核实**):在 kubetron 的 OVN 数据面下,nodePort 还是不是
+一条有效的对外暴露路径。若租户流量根本不经过节点端口,这条的严重性会大幅下降 ——
+别在没确认之前就按"标准 Kubernetes"的直觉去加校验。
