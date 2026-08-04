@@ -629,8 +629,14 @@ S=/var/run/secrets/kubernetes.io/serviceaccount
 NS=$(cat $S/namespace 2>/dev/null)
 BODY=$(curl -sk -H "Authorization: Bearer $(cat $S/token)" \
   "https://ZOOHOST:6443/api/v1/namespaces/$NS/pods?limit=1" 2>&1)
-ANS=$(echo "$BODY" | tr ',{' '\n\n' | grep -o '"namespace":"[^"]*"' | head -1 | cut -d'"' -f4)
-echo "believes=[$NS] answers=[$ANS] raw=[$(echo "$BODY" | head -c 120 | tr -d '\n')]"
+# ⚠️ The apiserver pretty-prints, so it is "namespace": "x" with a space --
+# an expression written for the compact form matches nothing and the probe
+# reports no answer (it did, twice). Requiring at least one space also skips
+# the escaped \"namespace\":\"x\" inside last-applied-configuration, which
+# would otherwise be the first match and is the TENANT's spelling either way,
+# so it would agree with the file no matter what the real answer said.
+ANS=$(echo "$BODY" | grep -oE '"namespace": +"[^"]*"' | head -1 | sed 's/.*"\(.*\)"$/\1/')
+echo "believes=[$NS] answers=[$ANS] raw=[$(echo "$BODY" | tr -d '\n' | head -c 300)]"
 PROBE
     sed -i "s|ZOOHOST|$ZOO_HOST|" "$LAB/verify-sa-ns.sh"
     ns_out=$($K -n "$NS" exec -i sa-probe -- sh -s <"$LAB/verify-sa-ns.sh" 2>&1 | tail -1)
