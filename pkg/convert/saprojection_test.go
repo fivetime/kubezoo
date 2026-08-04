@@ -105,9 +105,37 @@ func TestForwardLeavesALivePodsVolumesAlone(t *testing.T) {
 		t.Fatal("a volume was added to a live pod: every update to a pod created before " +
 			"this existed would be refused upstream, and the tenant could not touch it again")
 	}
-	if _, stamped := pod.Annotations[TenantNamespaceAnnotation]; stamped {
-		t.Error("annotated a live pod without the volume that reads it -- no effect, and it " +
-			"reads as if the projection were installed")
+}
+
+// TestAPodReadBackAndWrittenAgainKeepsItsNamespace is the hole Backward opens if
+// an update does not re-stamp the annotation.
+//
+// Backward hides it, so a tenant doing kubectl edit -- or applying a manifest it
+// rendered from a get -- sends a pod without it. The volume is immutable and
+// stays, now pointing at an annotation that is gone, and a downward API selector
+// for a missing key resolves to the EMPTY STRING with no error
+// (fieldpath.ExtractFieldPathAsString). The pod's namespace file goes blank,
+// which is worse than the upstream name this exists to replace.
+func TestAPodReadBackAndWrittenAgainKeepsItsNamespace(t *testing.T) {
+	tr := NewSATokenNamespaceTransformer()
+	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: testTenant + "-default"}}
+	ProjectPodNamespace(pod, testTenant) // as created
+
+	if _, err := tr.Backward(pod, testTenant); err != nil { // as the tenant reads it
+		t.Fatal(err)
+	}
+	if _, err := tr.Forward(pod, testTenant); err != nil { // and writes it back
+		t.Fatal(err)
+	}
+
+	if got := pod.Annotations[TenantNamespaceAnnotation]; got != "default" {
+		t.Fatalf("after a read-modify-write the pod carries %q; its namespace file is filled "+
+			"from that annotation, and an absent key resolves to the empty string, so the pod "+
+			"would come to believe it is in no namespace at all", got)
+	}
+	if len(pod.Spec.Volumes) != 1 {
+		t.Errorf("%d volumes after the write-back: adding one on an update is refused upstream, "+
+			"because spec.volumes is immutable", len(pod.Spec.Volumes))
 	}
 }
 

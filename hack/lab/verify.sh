@@ -608,6 +608,49 @@ PROBE
     else
       bad "prefixed landing" "the object is not upstream as ${TID}-verify.example, so the write did not go through the translation"
     fi
+
+    # ⭐ The name the pod uses to ASK and the name the ANSWER carries have to be
+    # the same string. They were not: the namespace file is filled by upstream's
+    # ServiceAccount plugin from metadata.namespace, so the pod believed
+    # <tid>-default while every object came back saying default.
+    #
+    # This breaks nothing visible. util.UpstreamNamespace makes the request
+    # succeed either way, so a curl probe reports 200 and a tenant sees data.
+    # What fails is a client that indexes objects by their own namespace and
+    # then looks them up by the name it read from that file -- controller-runtime,
+    # which is every operator built with kubebuilder that watches its own
+    # namespace. Its cache never matches: no error, no log, no events.
+    #
+    # ⚠️ Asserted on the two strings AGREEING, not on the file's contents alone:
+    # a probe that only read the file would still pass if the answer changed
+    # spelling instead, and it is the disagreement that does the damage.
+    cat >"$LAB/verify-sa-ns.sh" <<'PROBE'
+S=/var/run/secrets/kubernetes.io/serviceaccount
+NS=$(cat $S/namespace 2>/dev/null)
+BODY=$(curl -sk -H "Authorization: Bearer $(cat $S/token)" \
+  "https://ZOOHOST:6443/api/v1/namespaces/$NS/configmaps?limit=1" 2>&1)
+ANS=$(echo "$BODY" | tr ',{' '\n\n' | grep -o '"namespace":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "believes=[$NS] answers=[$ANS] raw=[$(echo "$BODY" | head -c 120 | tr -d '\n')]"
+PROBE
+    sed -i "s|ZOOHOST|$ZOO_HOST|" "$LAB/verify-sa-ns.sh"
+    ns_out=$($K -n "$NS" exec -i sa-probe -- sh -s <"$LAB/verify-sa-ns.sh" 2>&1 | tail -1)
+    ns_believes=$(printf '%s' "$ns_out" | sed -n 's/.*believes=\[\([^]]*\)\].*/\1/p')
+    ns_answers=$(printf '%s' "$ns_out" | sed -n 's/.*answers=\[\([^]]*\)\].*/\1/p')
+    if [ -z "$ns_believes" ] || [ -z "$ns_answers" ]; then
+      bad "in-pod namespace agreement" "the probe produced no usable answer, so this is reported as failed rather than skipped: $(printf '%s' "$ns_out" | cut -c1-200)"
+    elif [ "$ns_believes" = "$ns_answers" ]; then
+      ok "a pod's own name for its namespace is the one its objects come back with ($ns_believes)"
+    else
+      bad "in-pod namespace agreement" "the pod believes it is in '$ns_believes' while its objects say '$ns_answers' -- an operator watching its own namespace builds a cache it can never hit, silently"
+    fi
+    # And the tenant's spelling specifically, not merely a consistent one: an
+    # answer carrying the upstream name would agree with the file and still be
+    # the wrong view to hand a tenant's operator.
+    if [ "$ns_believes" = "default" ]; then
+      ok "and that name is the tenant's own, not the upstream one"
+    elif [ -n "$ns_believes" ]; then
+      bad "in-pod namespace spelling" "the pod sees '$ns_believes', want 'default' -- the tenant's view is what its operator's code was written against"
+    fi
   fi
 fi
 

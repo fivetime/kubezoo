@@ -104,20 +104,34 @@ func (t *SATokenNamespaceTransformer) Forward(obj runtime.Object, tenantID strin
 	if spec == nil {
 		return obj, nil
 	}
+	accessor, ok := obj.(metav1.Object)
+	if !ok {
+		return obj, nil
+	}
+	// The namespace on obj is already the upstream one: the default convertor
+	// runs before every transformer.
+	tenantNamespace := util.TrimTenantIDPrefix(tenantID, accessor.GetNamespace())
+
 	if _, isPod := obj.(*core.Pod); isPod {
-		// ⛔ Same reason placement skips a live Pod, and a sharper one: a pod's
-		// spec.volumes is IMMUTABLE after creation. Injecting here would make
-		// upstream refuse every update to a pod that predates this, and the
-		// tenant could no longer touch its own running pod at all. Pods are done
-		// on CREATE only, by tenantProxy.Create, through ProjectPodNamespace.
+		// ⛔ No volume here. A pod's spec.volumes is IMMUTABLE after creation, so
+		// injecting on an update would make upstream refuse every write to a pod
+		// that predates this and leave the tenant unable to touch its own running
+		// pod -- the trap placement.go already documents. Pods get the volume on
+		// CREATE only, from tenantProxy.Create via ProjectPodNamespace.
+		//
+		// ⭐ But the ANNOTATION is stamped on every write, and it has to be.
+		// Backward hides it, so a tenant that reads a pod and writes it back --
+		// kubectl edit, an apply from a rendered manifest -- sends one without
+		// it. The volume it cannot remove would then point at an annotation that
+		// is gone, and a downward API selector for a missing key resolves to the
+		// EMPTY STRING with no error (fieldpath.ExtractFieldPathAsString), so the
+		// pod's namespace file would go blank. That is worse than the upstream
+		// name this whole change exists to replace.
+		stampTenantNamespace(meta, tenantNamespace)
 		return obj, nil
 	}
 
-	// The namespace on obj is already the upstream one: the default convertor
-	// runs before every transformer.
-	if accessor, ok := obj.(metav1.Object); ok {
-		project(meta, spec, util.TrimTenantIDPrefix(tenantID, accessor.GetNamespace()))
-	}
+	project(meta, spec, tenantNamespace)
 	return obj, nil
 }
 
@@ -164,13 +178,7 @@ func project(meta *metav1.ObjectMeta, spec *core.PodSpec, tenantNamespace string
 		// namespace file.
 		return
 	}
-	if meta.Annotations == nil {
-		meta.Annotations = map[string]string{}
-	}
-	// ⭐ Unconditional. A tenant-supplied value here is an input to a platform
-	// decision, and the rule everywhere else in kubezoo is that those are
-	// overwritten, not honoured.
-	meta.Annotations[TenantNamespaceAnnotation] = tenantNamespace
+	stampTenantNamespace(meta, tenantNamespace)
 
 	if ptr.Deref(spec.AutomountServiceAccountToken, true) == false {
 		// The tenant asked for no token. Injecting a volume no container mounts
@@ -196,6 +204,22 @@ func project(meta *metav1.ObjectMeta, spec *core.PodSpec, tenantNamespace string
 		Name:         kubezooSAVolumeName,
 		VolumeSource: core.VolumeSource{Projected: tenantNamespaceTokenVolume()},
 	})
+}
+
+// stampTenantNamespace writes the tenant's name for the namespace onto whatever
+// metadata the pod will be born with.
+//
+// ⭐ Unconditional. A tenant-supplied value here is an input to a platform
+// decision, and the rule everywhere else in kubezoo is that those are
+// overwritten rather than honoured.
+func stampTenantNamespace(meta *metav1.ObjectMeta, tenantNamespace string) {
+	if tenantNamespace == "" {
+		return
+	}
+	if meta.Annotations == nil {
+		meta.Annotations = map[string]string{}
+	}
+	meta.Annotations[TenantNamespaceAnnotation] = tenantNamespace
 }
 
 // saVolume returns the volume upstream's plugin would consider already present.
