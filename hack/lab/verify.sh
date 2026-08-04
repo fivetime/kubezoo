@@ -3994,6 +3994,125 @@ SNAP
 )
 fi
 
+# --- the shapes a claim can take, beside an ordinary filesystem ------------
+$T apply -f - >/dev/null 2>&1 <<'BLK'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: csi-block}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Block
+  storageClassName: csi-hostpath-sc
+  resources: {requests: {storage: 64Mi}}
+BLK
+for _ in $(seq 40); do
+  [ "$($T get persistentvolumeclaims csi-block -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] && break
+  sleep 3
+done
+$T apply -f - >/dev/null 2>&1 <<'BLK'
+apiVersion: v1
+kind: Pod
+metadata: {name: csi-block-pod}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      volumeDevices: [{name: v, devicePath: /dev/xvda}]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  volumes: [{name: v, persistentVolumeClaim: {claimName: csi-block}}]
+BLK
+for _ in $(seq 40); do
+  [ "$($T get pod csi-block-pod -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+# ⚠️ Asserted on the device NODE, not on the pod running: a Pod can be Running
+# with the device path missing, and "Running" would report that as success.
+csi_dev=$($T exec csi-block-pod -- sh -c 'ls -l /dev/xvda 2>&1' 2>&1 | tr -d '\r' | head -1)
+case "$csi_dev" in
+  b*) ok "a tenant gets a raw block volume as an actual block device" ;;
+  *)  bad "a block volume reaches the pod" "ls said: $(cut -c1-120 <<<"$csi_dev")" ;;
+esac
+
+$T apply -f - >/dev/null 2>&1 <<'CLONE'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: csi-clone}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: csi-hostpath-sc
+  resources: {requests: {storage: 64Mi}}
+  dataSource: {kind: PersistentVolumeClaim, name: csi-data}
+CLONE
+for _ in $(seq 40); do
+  [ "$($T get persistentvolumeclaims csi-clone -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] && break
+  sleep 3
+done
+[ "$($T get persistentvolumeclaims csi-clone -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] \
+  && ok "a claim cloned from the tenant's own claim binds" \
+  || bad "cloning a claim" "phase=$($T get persistentvolumeclaims csi-clone -o jsonpath='{.status.phase}' 2>&1 | cut -c1-60) ; $($K -n "$NS" describe pvc csi-clone 2>&1 | tail -3 | tr '\n' ' ' | cut -c1-160)"
+# ⭐ dataSource is a TypedLocalObjectReference, so the source is same-namespace by
+# construction. Asserted rather than assumed: "safe by construction" has been
+# wrong in both directions today, and what lands UPSTREAM is what decides.
+csi_srcns=$($K -n "$NS" get pvc csi-clone -o jsonpath='{.spec.dataSourceRef.namespace}' 2>/dev/null)
+{ [ -z "$csi_srcns" ] || [ "$csi_srcns" = "$NS" ]; } \
+  && ok "and its data source resolves inside the tenant" \
+  || bad "clone source namespace" "upstream says '$csi_srcns', the tenant's namespace is $NS"
+
+# --- a performance tier is sold, and a deleted claim really goes away ------
+if $K get volumeattributesclass csi-hostpath-gold >/dev/null 2>&1; then
+  # ⭐ #93 added the check and nothing ever ran it against a driver. Both states.
+  $K label volumeattributesclass csi-hostpath-gold volumeattributesclass.kubezoo.io/published- >/dev/null 2>&1
+  sleep 3
+  expect_denied "a claim naming an unpublished VolumeAttributesClass" "publish\|available\|forbidden" -- \
+    $T apply -f - <<'VAC'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: csi-vac-refused}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: csi-hostpath-sc
+  volumeAttributesClassName: csi-hostpath-gold
+  resources: {requests: {storage: 64Mi}}
+VAC
+  $K label volumeattributesclass csi-hostpath-gold volumeattributesclass.kubezoo.io/published=true --overwrite >/dev/null
+  for _ in $(seq 20); do $T get volumeattributesclass csi-hostpath-gold >/dev/null 2>&1 && break; sleep 2; done
+  $T apply -f - >/dev/null 2>&1 <<'VAC'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: csi-vac}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: csi-hostpath-sc
+  volumeAttributesClassName: csi-hostpath-gold
+  resources: {requests: {storage: 64Mi}}
+VAC
+  for _ in $(seq 40); do
+    [ "$($T get persistentvolumeclaims csi-vac -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] && break
+    sleep 3
+  done
+  [ "$($T get persistentvolumeclaims csi-vac -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] \
+    && ok "and a claim on a published one binds, with the driver applying it for real" \
+    || bad "a published VolumeAttributesClass" "phase=$($T get persistentvolumeclaims csi-vac -o jsonpath='{.status.phase}' 2>&1 | cut -c1-60) ; $($K -n "$NS" describe pvc csi-vac 2>&1 | tail -3 | tr '\n' ' ' | cut -c1-160)"
+  $K label volumeattributesclass csi-hostpath-gold volumeattributesclass.kubezoo.io/published- >/dev/null 2>&1
+else
+  bad "VolumeAttributesClass fixture" "csi-hostpath-gold is missing -- up.sh creates it; the two checks below it are skipped rather than reported green"
+fi
+
+# ⚠️ Deletes the CLONE, not a claim anything else reads. Reclaiming is the one
+# storage check that destroys what it looks at.
+csi_clonevol=$($T get persistentvolumeclaims csi-clone -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+$T delete persistentvolumeclaims csi-clone --wait=true >/dev/null 2>&1
+csi_gone=no
+for _ in $(seq 40); do
+  $K get pv "$csi_clonevol" >/dev/null 2>&1 || { csi_gone=yes; break; }
+  sleep 3
+done
+[ "$csi_gone" = yes ] \
+  && ok "deleting a claim really deletes its volume, so the space comes back" \
+  || bad "reclaiming a volume" "PV $csi_clonevol still there after 120s (phase=$($K get pv "$csi_clonevol" -o jsonpath='{.status.phase}' 2>&1 | cut -c1-40))"
+
 # ⚠️ LAST of the storage checks, and that is not cosmetic: growing csi-data
 # changes a fixture every check before it reads. Placed earlier, it made the
 # snapshot restore fail -- a claim restored from a 128Mi snapshot cannot ask for

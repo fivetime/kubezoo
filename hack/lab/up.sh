@@ -354,6 +354,22 @@ else
   done
   echo "csi: hostpath driver installed"
 fi
+# ⚠️ ModifyVolume is OFF by default in this driver, and without it a
+# VolumeAttributesClass assertion tests "the driver does not support it" rather
+# than anything about kubezoo. Patched rather than set at install so a cluster
+# that already has the driver gets it too.
+if ! kubectl --context "kind-$CLUSTER" get statefulset csi-hostpathplugin \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null | grep -q enable-controller-modify-volume; then
+  kubectl --context "kind-$CLUSTER" patch statefulset csi-hostpathplugin --type=json \
+    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-controller-modify-volume=true"}]' >/dev/null
+  for _ in $(seq 40); do
+    ready=$(kubectl --context "kind-$CLUSTER" get pod csi-hostpathplugin-0 \
+      -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null | tr ' ' '\n' | grep -c true)
+    [ "${ready:-0}" -ge 8 ] && break
+    sleep 5
+  done
+  echo "csi: volume modification enabled on the driver"
+fi
 # ⭐ Snapshots need three things the driver does not bring: the CRDs, the
 # platform's snapshot controller, and a VolumeSnapshotClass. Without them a
 # tenant's VolumeSnapshot is accepted and never reconciled, which is exactly the
@@ -398,6 +414,17 @@ allowVolumeExpansion: true
 SCEOF
 kubectl --context "kind-$CLUSTER" label storageclass csi-hostpath-sc \
   storageclass.kubezoo.io/published- >/dev/null 2>&1 || true
+# ⚠️ Unpublished, like every other class here: verify.sh publishes it, asserts on
+# both states, and puts it back.
+kubectl --context "kind-$CLUSTER" apply -f - >/dev/null 2>&1 <<'VACEOF'
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata: {name: csi-hostpath-gold}
+driverName: hostpath.csi.k8s.io
+parameters: {tier: gold}
+VACEOF
+kubectl --context "kind-$CLUSTER" label volumeattributesclass csi-hostpath-gold \
+  volumeattributesclass.kubezoo.io/published- >/dev/null 2>&1 || true
 
 echo "== policies =="
 if [ -n "${KUBEZOO_CONTRACT_DIR:-}" ]; then
