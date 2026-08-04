@@ -3812,6 +3812,36 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
 done
 
 
+# --- an endpoint address has to be one of your own pods' -------------------
+# ⛔ Seventh spec, seventh time all three layers were empty: the convertors
+# translate targetRef and nothing else, no policy mentions endpoints, and
+# upstream validates only the FORM of an address. Cross-tenant IS contained --
+# the binding is keyed on the slice's own namespace, which kubezoo prefixes --
+# but who FOLLOWS the address is not: an ingress controller connects to endpoint
+# IPs directly, bypassing the ClusterIP, and nginx is a published class here.
+expect_denied "an endpoint address with no pod behind it" "names no pod" -- \
+  $T apply -f - <<'EP'
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {name: forged, labels: {kubernetes.io/service-name: whatever}}
+addressType: IPv4
+ports: [{port: 80}]
+endpoints: [{addresses: ["10.0.0.1"]}]
+EP
+# ⚠️ And with a targetRef to a pod the tenant really owns, but an address that is
+# not that pod's -- the shape a check on targetRef alone would let through.
+expect_denied "an address that is not the pod's own" "not one of pod" -- \
+  $T apply -f - <<'EP'
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {name: forged2, labels: {kubernetes.io/service-name: whatever}}
+addressType: IPv4
+ports: [{port: 80}]
+endpoints:
+  - addresses: ["169.254.10.10"]
+    targetRef: {kind: Pod, name: csi-reader, namespace: default}
+EP
+
 # --- the URL that is not called a URL --------------------------------------
 # ⛔ kubezoo refuses a webhook's clientConfig.url because "a URL cannot be
 # confined to the tenant; use clientConfig.service". That reasoning assumes a

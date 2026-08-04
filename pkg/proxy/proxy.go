@@ -497,6 +497,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseExternalNameService(obj); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseForgedEndpointAddress(ctx, obj); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -727,6 +730,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 	// nil: nothing is stored, so every address named here is newly claimed.
 	if err := tp.refuseExternalNameService(obj); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseForgedEndpointAddress(ctx, obj); err != nil {
 		return nil, err
 	}
 	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
@@ -1874,6 +1880,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		// ExternalName. Nothing revalidates the webhook -- the resolver runs at
 		// call time -- so this write is the last chance to refuse it.
 		if err := tp.refuseExternalNameService(updated); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refuseForgedEndpointAddress(ctx, updated); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
