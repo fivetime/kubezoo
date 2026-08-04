@@ -85,3 +85,33 @@ func (c *CrossReferenceConvertor) ConvertUpstreamObjectToTenantObject(obj runtim
 
 	return nil
 }
+
+// chainTransformers runs several transformers over one object.
+//
+// ⚠️ Backward runs them in REVERSE order, so that a chain is an onion rather
+// than a queue: whatever the last Forward added, the first Backward removes.
+// Both directions in the same order looks right and is wrong the moment two
+// transformers touch the same field.
+func chainTransformers(ts ...ObjectTransformer) ObjectTransformer { return transformerChain(ts) }
+
+type transformerChain []ObjectTransformer
+
+var _ ObjectTransformer = transformerChain(nil)
+
+func (c transformerChain) Forward(obj runtime.Object, tenantID string) (runtime.Object, error) {
+	for _, t := range c {
+		if _, err := t.Forward(obj, tenantID); err != nil {
+			return nil, err
+		}
+	}
+	return obj, nil
+}
+
+func (c transformerChain) Backward(obj runtime.Object, tenantID string) (runtime.Object, error) {
+	for i := len(c) - 1; i >= 0; i-- {
+		if _, err := c[i].Backward(obj, tenantID); err != nil {
+			return nil, err
+		}
+	}
+	return obj, nil
+}

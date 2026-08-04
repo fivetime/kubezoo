@@ -20,6 +20,7 @@ import (
 	"github.com/pkg/errors"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apps "k8s.io/kubernetes/pkg/apis/apps"
@@ -175,28 +176,41 @@ func place(spec *core.PodSpec, tenantID string) {
 // for -- there is no error, no log, and nothing that fails to build.
 // TestEveryServedPodCarrierIsPlaced is what makes that impossible to miss.
 func podSpecOf(obj runtime.Object) (*core.PodSpec, error) {
+	_, spec, err := podTemplateOf(obj)
+	return spec, err
+}
+
+// podTemplateOf is podSpecOf plus the metadata the pod will be BORN with, which
+// is not the same object as the workload's own metadata: a Deployment's pods
+// carry spec.template.metadata, and a downward API field selector inside the pod
+// reads that, never the Deployment's. saprojection.go needs both halves.
+//
+// ⚠️ One switch, deliberately. A second copy of this list is a second place to
+// forget a kind, and the whole point of the warning above is that forgetting one
+// is silent.
+func podTemplateOf(obj runtime.Object) (*metav1.ObjectMeta, *core.PodSpec, error) {
 	switch typed := obj.(type) {
 	case *core.Pod:
-		return &typed.Spec, nil
+		return &typed.ObjectMeta, &typed.Spec, nil
 	case *core.PodTemplate:
-		return &typed.Template.Spec, nil
+		return &typed.Template.ObjectMeta, &typed.Template.Spec, nil
 	case *core.ReplicationController:
 		if typed.Spec.Template == nil {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *apps.Deployment:
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *apps.StatefulSet:
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *apps.DaemonSet:
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *apps.ReplicaSet:
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *batch.Job:
-		return &typed.Spec.Template.Spec, nil
+		return &typed.Spec.Template.ObjectMeta, &typed.Spec.Template.Spec, nil
 	case *batch.CronJob:
-		return &typed.Spec.JobTemplate.Spec.Template.Spec, nil
+		return &typed.Spec.JobTemplate.Spec.Template.ObjectMeta, &typed.Spec.JobTemplate.Spec.Template.Spec, nil
 
 	// ⚠️ Subresources of the kinds above, which reach this convertor because the
 	// map is keyed by GroupKind and a subresource storage carries its PARENT's
@@ -208,10 +222,10 @@ func podSpecOf(obj runtime.Object) (*core.PodSpec, error) {
 	// The assertion still saw a refusal and only the reason gave it away. A guard
 	// that masks the guard behind it is worse than no guard.
 	case *core.Binding, *policy.Eviction, *autoscaling.Scale:
-		return nil, nil
+		return nil, nil, nil
 	}
-	return nil, errors.Errorf("placement was asked to handle %T, which carries no pod template; "+
-		"either it should not be registered in InitConvertors or podSpecOf is missing a case", obj)
+	return nil, nil, errors.Errorf("placement was asked to handle %T, which carries no pod template; "+
+		"either it should not be registered in InitConvertors or podTemplateOf is missing a case", obj)
 }
 
 // PodCarryingKinds are every kind kubezoo serves that carries a pod template.

@@ -171,9 +171,14 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 	// second copy of what the Kyverno tenant-placement policy does. Placement
 	// isolation was one webhook deep until now; placement.go says why the
 	// template rather than the pod is what matters.
-	placementTransformer := NewPlacementTransformer()
+	//
+	// ⭐ ...and the same kinds carry the service account namespace projection, so
+	// that a pod's own idea of which namespace it is in agrees with the one
+	// kubezoo answers in. saprojection.go says why that is not the policy layer's
+	// job either.
+	podTransformer := chainTransformers(NewPlacementTransformer(), NewSATokenNamespaceTransformer())
 	for _, gk := range PodCarryingKinds {
-		convertor := NewCrossReferenceConverter(defaultConvertor, placementTransformer)
+		convertor := NewCrossReferenceConverter(defaultConvertor, podTransformer)
 		if _, taken := nativeKindToConvertors[gk]; taken {
 			// Two convertors for one kind means one of them silently never runs,
 			// and the placement one losing that race is the whole finding coming

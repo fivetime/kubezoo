@@ -649,6 +649,11 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// apply. See tenantProxy.injectedPaths for what that costs when it happens.
 	if pod, ok := obj.(*core.Pod); ok && tp.subresource == "" {
 		convert.PlacePod(pod, tenantID)
+		// ⭐ And the pod's own name for its namespace, here for the same reason
+		// and with a sharper edge: spec.volumes is immutable once the pod is
+		// stored, so doing it in the convertor would make every update to a pod
+		// that predates this be refused upstream. saprojection.go.
+		convert.ProjectPodNamespace(pod, tenantID)
 	}
 
 	// 2. convert the internal obj to unstructured
