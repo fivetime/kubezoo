@@ -3994,6 +3994,50 @@ SNAP
 )
 fi
 
+# ⚠️ LAST of the storage checks, and that is not cosmetic: growing csi-data
+# changes a fixture every check before it reads. Placed earlier, it made the
+# snapshot restore fail -- a claim restored from a 128Mi snapshot cannot ask for
+# 64Mi, and upstream refused it correctly while the failure read as a snapshot
+# problem. The hostage rule in this file's header, met for the third time today.
+# --- growing a volume: the only tenant write that really updates a bound claim
+# ⭐ Why this is here rather than in a storage backlog: spec.volumeName is
+# IMMUTABLE once a claim is bound, and pkg/convert/pvc.go decides whether to
+# re-prefix it. An expansion is the first and only tenant operation that
+# exercises that decision on a live claim -- if Forward gets it wrong, upstream
+# refuses the whole write and the tenant can never touch its own volume again.
+csi_before=$($T get persistentvolumeclaims csi-data -o jsonpath='{.spec.volumeName}' 2>&1)
+csi_out=$($T patch persistentvolumeclaims csi-data --type=merge \
+  -p '{"spec":{"resources":{"requests":{"storage":"128Mi"}}}}' 2>&1)
+grep -qiE "patched|configured" <<<"$csi_out" \
+  && ok "a tenant can patch its bound claim to a larger size" \
+  || bad "expanding a claim" "$(tr '\n' ' ' <<<"$csi_out" | cut -c1-180)"
+csi_after=$($T get persistentvolumeclaims csi-data -o jsonpath='{.spec.volumeName}' 2>&1)
+[ "$csi_before" = "$csi_after" ] \
+  && ok "and the immutable volumeName came through the update untouched" \
+  || bad "volumeName mangled by an update" "before='$csi_before' after='$csi_after' -- re-prefixing an immutable field makes upstream refuse every later write to this claim"
+
+# ⚠️ Two halves, asserted apart, because they fail for different reasons: the
+# driver growing the volume, and the filesystem catching up on the node. A single
+# check reported "the volume does not grow" when it had grown and only a pod was
+# missing -- upstream says so itself, in the FileSystemResizePending condition.
+for _ in $(seq 40); do
+  [ "$($K get pv "$csi_before" -o jsonpath='{.spec.capacity.storage}' 2>/dev/null)" = 128Mi ] && break
+  sleep 3
+done
+[ "$($K get pv "$csi_before" -o jsonpath='{.spec.capacity.storage}' 2>/dev/null)" = 128Mi ] \
+  && ok "the driver really grows the volume" \
+  || bad "control-plane expansion" "PV capacity=$($K get pv "$csi_before" -o jsonpath='{.spec.capacity.storage}' 2>&1 | cut -c1-60)"
+for _ in $(seq 50); do
+  [ "$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.capacity.storage}' 2>/dev/null)" = 128Mi ] && break
+  sleep 3
+done
+[ "$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.capacity.storage}' 2>/dev/null)" = 128Mi ] \
+  && ok "and the tenant's claim reports the new size" \
+  || bad "the claim catches up" "status.capacity=$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.capacity.storage}' 2>&1 | cut -c1-60) ; conditions: $($T get persistentvolumeclaims csi-data -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' 2>&1 | cut -c1-100)"
+expect_denied "shrinking it again" "invalid\|smaller\|forbidden" -- \
+  $T patch persistentvolumeclaims csi-data --type=merge -p '{"spec":{"resources":{"requests":{"storage":"64Mi"}}}}'
+
+
 # Put the class back the way up.sh leaves it.
 $K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1
 fi
