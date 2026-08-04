@@ -12,6 +12,58 @@
 
 ---
 
+## 0. 定位:kubezoo 不在 Kubernetes 官方那三格里的任何一格
+
+Kubernetes 多租户工作组把租户形态分成三种
+([官方博客](https://kubernetes.io/blog/2021/04/15/three-tenancy-models-for-kubernetes/)):
+
+| | 控制平面 | 集群级资源 | worker |
+|---|---|---|---|
+| **Namespaces as a Service** | 共享 | 共享,**租户不能建/改** | 共享 |
+| **Clusters as a Service** | 每租户一套(含物理) | 每租户独立 | 每租户独立 |
+| **Control Planes as a Service**(Kamaji、vcluster) | **每租户一套 apiserver** | 每租户独立 | 共享 |
+
+⭐ **kubezoo 占的是这张表里没有的一格:共享控制平面 + 每租户的集群级资源。**
+
+官方对 NaaS 的定义里有一句是决定性的:
+
+> tenants share cluster-wide resources like ClusterRoles and CRDs and hence
+> **cannot create or update these cluster-wide resources**
+
+**kubezoo 刻意打破了它** —— 租户能建 ClusterRole、CRD、ClusterRoleBinding、webhook 配置,
+靠的是名字/组前缀翻译。目的是拿 NaaS 的成本结构(一套控制平面),同时给出 CPaaS
+"能管自己集群级资源"的那部分体验。
+
+### ⛔ 这一格没有任何上游指南,而这解释了本仓库缺陷的分布
+
+官方那三格里都不会遇到我们遇到的那类问题:NaaS **整类禁止**租户碰集群级资源;
+CPaaS 每租户一个 apiserver,**边界由进程给出**。只有这一格既允许又共享。
+
+⇒ 逐字段审计 PVC / PodSpec / Service / NetworkPolicy / Ingress / PV 六个 spec,
+**每一个都至少一处三层皆无人守**。命中率高得反常,原因不是代码差,是
+**没有任何现成清单覆盖"租户拥有的集群级资源"该防什么** —— 每一条都得从头推:
+`externalIPs`、`nodePort`、PV 的 `claimRef`、CRD 数量上限、集群级 RBAC 的派生,
+全部落在这一格里。
+
+### ⚠️ 这笔交换的账要一直付
+
+| | kubezoo | Kamaji(CPaaS) |
+|---|---|---|
+| 每租户成本 | 一组 namespace | **一整套 apiserver + etcd** |
+| 视图真实度 | 接近,**靠翻译层** | **就是真的**,无翻译 |
+| 隔离基础 | 翻译层正确性 + 网络隔离 + 策略层 | **apiserver 边界** |
+| 租户版本差异 | 全租户同版本 | 每租户可不同 |
+| 上面那类缺陷 | **要一条条堵** | **结构上不存在** |
+
+**kubezoo 用"翻译层必须处处正确"换掉了"每租户一套控制平面"。** 这笔账是可付的
+(`hack/lab/verify.sh` 195 条断言),但**它不会自己付完**:每新增一类租户可拥有的
+集群级资源,都要重新问一遍"这一类的边界在哪、谁在守"。
+
+⇒ 密度高时 kubezoo 明显划算;租户少、且每个都要独立版本时,CPaaS 更直接。
+**两者不是竞品,是不同密度下的不同答案**(平台里 Kamaji 侧的工作见 kubesluice)。
+
+---
+
 ## 1. 目标架构(B1)
 
 ```
