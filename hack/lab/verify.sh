@@ -3699,6 +3699,165 @@ else
 fi
 
 echo
+echo "== storage a tenant can actually use: a real CSI driver, end to end =="
+# ⭐ LAST, and that placement is the hostage rule: this section relabels a shared
+# StorageClass, so anything after it would inherit whichever state it left
+# behind. It puts the label back at the end, but "puts it back" is not a
+# guarantee -- a section that dies half way does not.
+#
+# ⭐ Why a real driver rather than kind's local-path: local-path binds
+# WaitForFirstConsumer and nothing here ever provisioned from it, so kubezoo's
+# dynamic-provisioning path had NEVER RUN. The first time it did, the tenant
+# could not read, list or delete its own claim: the provisioner creates the
+# PersistentVolume directly upstream as pvc-<uid>, carrying no tenant prefix,
+# and pkg/convert/pvc.go refused any name without one -- failing the whole
+# object, so `kubectl get pvc` returned an error instead of a list.
+CSI_SC=csi-hostpath-sc
+if ! $K get storageclass "$CSI_SC" >/dev/null 2>&1; then
+  bad "CSI storage class" "$CSI_SC is missing -- up.sh installs the driver and creates it; the whole section below is skipped rather than reported green"
+else
+
+csi_pvc() { cat <<PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: $1}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: $CSI_SC
+  resources: {requests: {storage: 64Mi}}
+PVC
+}
+csi_pod() { cat <<POD
+apiVersion: v1
+kind: Pod
+metadata: {name: $1}
+spec:
+  securityContext: {fsGroup: 2000}
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","$2"]
+      volumeMounts: [{name: v, mountPath: /data}]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  volumes:
+    - name: v
+      persistentVolumeClaim: {claimName: csi-data}
+POD
+}
+
+# --- unpublished: invisible, and not merely undiscoverable ------------------
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1
+sleep 3
+csi_seen=$($T get storageclass --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+case " $csi_seen " in
+  *" $CSI_SC "*) bad "an unpublished class is hidden" "the tenant sees: $csi_seen" ;;
+  *)             ok  "an unpublished CSI class is not in the tenant's list" ;;
+esac
+expect_denied "a PVC naming an unpublished class" "publish\|forbidden\|not published" -- \
+  $T apply -f <(csi_pvc csi-refused)
+
+# --- published: binds for real, mounts for real ------------------------------
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published=true --overwrite >/dev/null
+for _ in $(seq 20); do $T get storageclass "$CSI_SC" >/dev/null 2>&1 && break; sleep 2; done
+if $T get storageclass "$CSI_SC" >/dev/null 2>&1; then
+  ok "a published class is visible under the name a PVC has to use"
+else
+  bad "published class visibility" "$($T get storageclass "$CSI_SC" 2>&1 | tr '\n' ' ' | cut -c1-140)"
+fi
+
+csi_out=$($T apply -f <(csi_pvc csi-data) 2>&1) \
+  || bad "creating a claim on a published class" "$(tr '\n' ' ' <<<"$csi_out" | cut -c1-160)"
+for _ in $(seq 40); do
+  [ "$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] && break
+  sleep 3
+done
+csi_phase=$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.phase}' 2>&1)
+if [ "$csi_phase" = Bound ]; then
+  ok "the tenant's claim really binds, provisioned by a real CSI driver"
+else
+  bad "the claim binds" "phase='$(cut -c1-120 <<<"$csi_phase")' -- an error here rather than a phase means the claim itself cannot be read, which is the pvc.go bug"
+fi
+# ⚠️ Asserted separately from the phase: the failure was that reading the claim
+# ERRORED, so a check that only looked for "not Bound" would have reported the
+# wrong thing. The volume name is what could not be converted.
+csi_vol=$($T get persistentvolumeclaims csi-data -o jsonpath='{.spec.volumeName}' 2>&1)
+csi_up=$($K -n "$NS" get pvc csi-data -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+if [ -n "$csi_up" ] && [ "$csi_vol" = "$csi_up" ]; then
+  ok "and the tenant reads back the volume's real name, which is the only name it has"
+else
+  bad "reading a dynamically provisioned claim" "tenant got '$(cut -c1-120 <<<"$csi_vol")', upstream says '$csi_up'"
+fi
+
+$T apply -f <(csi_pod csi-writer 'echo tenant-data > /data/f && sleep 3600') >/dev/null 2>&1
+for _ in $(seq 40); do
+  [ "$($T get pod csi-writer -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+if [ "$($T get pod csi-writer -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ]; then
+  ok "a tenant Pod mounting that volume reaches Running"
+else
+  bad "mounting the volume" "$($K -n "$NS" describe pod csi-writer 2>&1 | tail -4 | tr '\n' ' ' | cut -c1-200)"
+fi
+# ⚠️ Read through the tenant's own exec. Inspecting the host would prove the
+# driver works, which was never in doubt; the claim is that the TENANT's
+# workload can use it.
+csi_content=$($T exec csi-writer -- cat /data/f 2>&1 | tr -d '\r\n')
+[ "$csi_content" = tenant-data ] && ok "and what it wrote into the volume reads back" \
+  || bad "using the volume" "got: $(cut -c1-140 <<<"$csi_content")"
+
+# --- retired: still visible, no new claims, existing keeps working -----------
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published=deprecated --overwrite >/dev/null
+sleep 5
+$T get storageclass "$CSI_SC" >/dev/null 2>&1 \
+  && ok "a retired class is still VISIBLE, so an existing reference stays explicable" \
+  || bad "retired class visibility" "the tenant can no longer see the class its own claim names"
+expect_denied "a NEW claim on a retired class" "publish\|forbidden\|deprecat" -- \
+  $T apply -f <(csi_pvc csi-after-retire)
+
+# ⭐ The load-bearing half, and the easy one to fake: the SAME claim that existed
+# before the label changed. Rebuilding one here would assert nothing about
+# "existing".
+[ "$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] \
+  && ok "the EXISTING claim is still Bound after its class was retired" \
+  || bad "an existing claim survives retirement" "phase=$($T get persistentvolumeclaims csi-data -o jsonpath='{.status.phase}' 2>&1 | cut -c1-120)"
+
+# ⚠️ A Pod RESTART is what a tenant actually hits -- a rollout, a drained node.
+# The refusal is on the claim, so this has to keep working; if it does not,
+# retiring a class is an outage rather than a wind-down.
+$T delete pod csi-writer --wait=true >/dev/null 2>&1
+$T apply -f <(csi_pod csi-reader 'sleep 3600') >/dev/null 2>&1
+for _ in $(seq 40); do
+  [ "$($T get pod csi-reader -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+csi_content=$($T exec csi-reader -- cat /data/f 2>&1 | tr -d '\r\n')
+if [ "$csi_content" = tenant-data ]; then
+  ok "a NEW Pod still mounts the existing claim, and the data survived the restart"
+else
+  bad "remounting after retirement" "phase=$($T get pod csi-reader -o jsonpath='{.status.phase}' 2>&1) got: $(cut -c1-140 <<<"$csi_content")"
+fi
+
+# --- what the driver produces, and what the tenant may see of it -------------
+# A real driver creates VolumeAttachments. kubezoo does not serve them and
+# should not: spec.nodeName names a machine, which is what Node and
+# ResourceSlice were withheld for.
+csi_va=$($K get volumeattachments --no-headers 2>/dev/null | wc -l)
+[ "$csi_va" -ge 1 ] || bad "the driver attaches" "no VolumeAttachment exists, so the check below proves nothing about a resource that is in use"
+for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
+  csi_out=$($T get "$csi_res" 2>&1)
+  if grep -qiE "not found|doesn't have a resource type|error|forbidden" <<<"$csi_out"; then
+    ok "a tenant cannot address $csi_res"
+  else
+    bad "$csi_res is exposed" "the tenant got: $(tr '\n' ' ' <<<"$csi_out" | cut -c1-140)"
+  fi
+done
+
+# Put the class back the way up.sh leaves it.
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1
+fi
+
+echo
 echo "== cleanup =="
 if [ -n "${POOL_NODE:-}" ]; then
   if [ -n "${POOL_WAS:-}" ]; then

@@ -316,6 +316,59 @@ kubectl --kubeconfig "$LAB/ctrl-zoo.kubeconfig" config use-context c >/dev/null
 # KUBEZOO_CONTRACT_DIR overrides it, which is what you want when editing both at
 # once. It prints which one it used, because "am I testing the tagged policies or
 # my edits" is precisely the question that goes wrong quietly.
+echo "== CSI driver =="
+# ⭐ A REAL CSI driver, not the local-path provisioner kind ships with. The
+# difference is the point: local-path binds WaitForFirstConsumer and the lab
+# never actually provisioned from it, so kubezoo's dynamic-provisioning path had
+# never run. The first time it did, a tenant could not read, list or delete its
+# own claim -- the provisioner creates the PersistentVolume directly upstream as
+# pvc-<uid>, which carries no tenant prefix. See pkg/convert/pvc.go.
+#
+# ⚠️ Kept out of the cluster-creation branch on purpose: it must be installed
+# even when the cluster is being reused, and skipped cheaply when it is already
+# there. The CSIDriver object is what says so.
+if kubectl --context "kind-$CLUSTER" get csidriver hostpath.csi.k8s.io >/dev/null 2>&1; then
+  echo "csi: hostpath driver already installed"
+else
+  if [ ! -d "$LAB/csi-driver-host-path" ]; then
+    git clone -q --depth 1 https://github.com/kubernetes-csi/csi-driver-host-path.git \
+      "$LAB/csi-driver-host-path" || {
+      echo "FATAL: could not fetch the CSI hostpath driver. The storage section of" >&2
+      echo "       verify.sh asserts against a real driver and would otherwise report" >&2
+      echo "       failures that are about this fetch, not about kubezoo." >&2
+      exit 1
+    }
+  fi
+  # deploy.sh uses plain kubectl, i.e. the current context -- which up.sh has
+  # already pointed at this cluster.
+  ( cd "$LAB/csi-driver-host-path" && bash deploy/kubernetes-latest/deploy.sh ) \
+    >"$LAB/csi-deploy.log" 2>&1 || {
+    echo "FATAL: the CSI hostpath driver failed to deploy; see $LAB/csi-deploy.log" >&2
+    exit 1
+  }
+  for _ in $(seq 40); do
+    ready=$(kubectl --context "kind-$CLUSTER" get pod csi-hostpathplugin-0 \
+      -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null | tr ' ' '\n' | grep -c true)
+    [ "${ready:-0}" -ge 8 ] && break
+    sleep 5
+  done
+  echo "csi: hostpath driver installed"
+fi
+# ⚠️ deploy.sh does NOT create a StorageClass. Unlabelled on purpose: the tenant
+# must not see it until verify.sh publishes it, which is the first state of the
+# matrix.
+kubectl --context "kind-$CLUSTER" apply -f - >/dev/null <<'SCEOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: csi-hostpath-sc}
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+SCEOF
+kubectl --context "kind-$CLUSTER" label storageclass csi-hostpath-sc \
+  storageclass.kubezoo.io/published- >/dev/null 2>&1 || true
+
 echo "== policies =="
 if [ -n "${KUBEZOO_CONTRACT_DIR:-}" ]; then
   CONTRACT=$KUBEZOO_CONTRACT_DIR

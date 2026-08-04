@@ -169,6 +169,33 @@ GPU,**必须先打这个标签**。
 一个全集群 pod informer,内存与全集群 pod 数成正比。要按设备计费时再开,见
 `pkg/clusterresourcequota/controllers/webhook.go` 的注释。
 
+### ⭐ CSI:租户拿到 StorageClass,拿不到别的任何一个
+
+`storage.k8s.io` 组里 kubezoo **只提供两个资源**:`storageclasses`、`volumeattributesclasses`,
+都是只读的发布类。CSI 的其余四个资源**一个都不提供,而且都是有意的**
+(2026-08 用真实 CSI 驱动逐个查实,不是按名字推断):
+
+| 资源 | 里面是什么(实测) | 判断 |
+|---|---|---|
+| `volumeattachments` | `nodeName: kz-audit3-control-plane` + PV 名 | ⛔ **不给**。`spec.nodeName` 就是**机器名**,和 Node / ResourceSlice 被收回是同一件事;而且它是挂载机械,租户对它无事可做 |
+| `csinodes` | 对象**名字就是节点名**,内含 `nodeID` + `topologyKeys` | ⛔ **不给**。这个对象**整体就是一台机器**。读它的是 kubelet 和调度器,都在平台侧 |
+| `csidrivers` | 平台装了哪些驱动及其能力 | ⛔ **不给**。租户选的是**存储类**,驱动是它背后的实现细节;把清单给出去等于给一份"该查哪些 CVE"的底账。**和 DeviceClass / ResourceSlice 同一条道理:租户要一个类,找硬件是平台的事** |
+| `csistoragecapacities` | 平台按拓扑分段的容量 | ⛔ **不给**。它虽然是命名空间级,但描述的是**平台**的容量、住在驱动自己的 namespace 里。放进租户可寻址的位置就是"平台配置落在租户侧"那类错位 |
+
+⚠️ **不给不损失能力,这是实测的**:租户经 kubezoo **真建 PVC、真动态供给、真绑定、真挂进 Pod
+并读写**,全程不需要上面任何一个(`verify.sh` 的 CSI 段 12 条断言)。
+
+⛔ **`VolumeSnapshot` 目前给不了,原因是结构性的,不是没做。**
+它是 CRD(`snapshot.storage.k8s.io`),而 kubezoo 给租户的 CRD **一律加租户前缀到 API 组上**
+⇒ 租户自己装的快照 CRD 变成 `<租户ID>-snapshot.storage.k8s.io`,
+而平台的 snapshot-controller 盯的是原组名,**永远看不见租户的快照对象** ——
+装得上、建得了、**永远不会被调谐**。
+⇒ 要给租户快照,只能走"系统 CRD 共享"那条路(见 `TODO-kaaas.md` §W,当时决定
+**先不实现,触发条件是出现第一个真实消费者**)。**VolumeSnapshot 就是那个消费者。**
+⚠️ 那一条当年被推迟的理由在这里原样成立:平台的 snapshot-controller 用**平台凭据**调谐
+**租户写的 spec**(`spec.source.persistentVolumeClaimName` 指向租户 namespace)⇒ confused deputy,
+**必须针对这个具体 operator 做审查**,不能泛泛开一个"共享 CRD"机制了事。
+
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,
 于是三条策略永远不就绪,**`pods` 的 webhook 根本没注册**,
