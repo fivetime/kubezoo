@@ -21,6 +21,11 @@ package app
 
 import (
 	"context"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clientgodynamic "k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+
 	stdx509 "crypto/x509"
 	"fmt"
 	"net"
@@ -417,6 +422,7 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 				proxyConfig.ingressClassInformers.Start(context.Done())
 				proxyConfig.volumeAttributesClassInformers.Start(context.Done())
 				proxyConfig.deviceClassInformers.Start(context.Done())
+				proxyConfig.snapshotClassInformers.Start(context.Done())
 				return nil
 			})
 		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("published-class-informers-synced",
@@ -425,7 +431,8 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 					return proxyConfig.publishedStorageClasses.HasSynced() &&
 						proxyConfig.publishedIngressClasses.HasSynced() &&
 						proxyConfig.publishedVolumeAttributesClasses.HasSynced() &&
-						proxyConfig.publishedDeviceClasses.HasSynced(), nil
+						proxyConfig.publishedDeviceClasses.HasSynced() &&
+						proxyConfig.publishedSnapshotClasses.HasSynced(), nil
 				}, context.Done())
 			})
 	}
@@ -599,7 +606,8 @@ type ProxyConfig struct {
 	// Never nil once the config is built: publishing nothing is a real answer,
 	// and a nil would send storageclasses down the tenant-proxy path, which would
 	// prefix names that belong to the platform.
-	publishedStorageClasses publishedclass.Set
+	publishedStorageClasses  publishedclass.Set
+	publishedSnapshotClasses publishedclass.Set
 	// publishedIngressClasses is the same for ingress classes, consumed by
 	// pkg/convert's ingress transformer rather than by a storage: a tenant may
 	// have IngressClasses of its own, so what the label decides there is which
@@ -631,6 +639,7 @@ type ProxyConfig struct {
 	ingressClassInformers          informers.SharedInformerFactory
 	volumeAttributesClassInformers informers.SharedInformerFactory
 	deviceClassInformers           informers.SharedInformerFactory
+	snapshotClassInformers         dynamicinformer.DynamicSharedInformerFactory
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -697,6 +706,7 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
 		config.Subresource == "" {
 		config.PublishedStorageClasses = c.publishedStorageClasses
+		config.PublishedSnapshotClasses = c.publishedSnapshotClasses
 		config.PublishedVolumeAttributesClasses = c.publishedVolumeAttributesClasses
 	}
 	config.TypeConverter = c.typeConverter
@@ -800,6 +810,31 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		}))
 	deviceClassInformer := deviceClassInformers.Resource().V1().DeviceClasses().Informer()
 
+	// ⭐ A fifth, and the first that is a CUSTOM RESOURCE. VolumeSnapshotClass is
+	// defined by the platform's snapshot CRDs, so there is no typed informer for
+	// it -- a dynamic one, filtered by the same label, fills the same Set.
+	//
+	// ⚠️ The GVR is resolved whether or not the CRD is installed. A cluster
+	// without snapshots gets an informer that lists nothing, the Set stays empty,
+	// and every snapshot class a tenant could name is refused -- which is right,
+	// because there are none.
+	// ⚠️ A second dynamic client. The one above is kubezoo-contract's own
+	// interface, which the informer factory does not accept -- and quietly using
+	// the wrong one would not compile here but would elsewhere.
+	k8sDynamicClient, err := clientgodynamic.NewForConfig(upstreamConfig)
+	if err != nil {
+		return nil, err
+	}
+	snapshotClassInformers := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		k8sDynamicClient, 10*time.Minute, metav1.NamespaceAll,
+		func(options *metav1.ListOptions) {
+			options.LabelSelector = publishedclass.PublishedSelector(
+				common.VolumeSnapshotClassPublishedLabelKey).String()
+		})
+	snapshotClassInformer := snapshotClassInformers.ForResource(schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotclasses",
+	}).Informer()
+
 	publishedStorageClasses := publishedclass.New("storageclass",
 		common.StorageClassPublishedLabelKey,
 		storageClassInformer.GetStore(), storageClassInformer.HasSynced, o.PublicStorageClasses)
@@ -820,8 +855,15 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	publishedDeviceClasses := publishedclass.New("deviceclass",
 		common.DeviceClassPublishedLabelKey,
 		deviceClassInformer.GetStore(), deviceClassInformer.HasSynced, nil)
+	// ⭐ Same defaults as the two above: nothing published until an operator says
+	// so. A VolumeSnapshotClass names the driver, the deletion policy and which of
+	// the platform's secrets the snapshotter uses -- a tier that is sold, not one
+	// a tenant picks.
+	publishedSnapshotClasses := publishedclass.New("volumesnapshotclass",
+		common.VolumeSnapshotClassPublishedLabelKey,
+		snapshotClassInformer.GetStore(), snapshotClassInformer.HasSynced, nil)
 
-	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses)
+	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses, sharedCRDGroup)
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)
@@ -859,6 +901,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		upstreamMaster:  upstreamMaster,
 
 		publishedStorageClasses:          publishedStorageClasses,
+		publishedSnapshotClasses:         publishedSnapshotClasses,
 		publishedIngressClasses:          publishedIngressClasses,
 		publishedVolumeAttributesClasses: publishedVolumeAttributesClasses,
 		maxNamespacesPerTenant:           o.MaxNamespacesPerTenant,
@@ -868,6 +911,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		ingressClassInformers:            ingressClassInformers,
 		volumeAttributesClassInformers:   volumeAttributesClassInformers,
 		deviceClassInformers:             deviceClassInformers,
+		snapshotClassInformers:           snapshotClassInformers,
 		publishedDeviceClasses:           publishedDeviceClasses,
 	}, nil
 }
@@ -912,7 +956,7 @@ func buildGenericConfig(
 	// rather than everything the scheme knows about.
 	discoveryProxy, lastErr = proxy.NewDiscoveryProxy(proxyConfig.discoveryClient,
 		proxyConfig.crdInformers.Apiextensions().V1().CustomResourceDefinitions().Lister(),
-		ServedAPIGroups())
+		ServedAPIGroups(), sharedCRDResources)
 	if lastErr != nil {
 		return
 	}

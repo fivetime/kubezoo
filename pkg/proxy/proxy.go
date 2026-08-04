@@ -114,6 +114,10 @@ type tenantProxy struct {
 	// and which it has retired, so that a create can be refused before it
 	// provisions anything. Nil on every resource but persistentvolumeclaims.
 	publishedStorageClasses publishedclass.Set
+	// publishedSnapshotClasses answers which volume snapshot classes the platform
+	// offers. A CR, so it is fed by a dynamic informer rather than a typed one --
+	// the Set does not care which.
+	publishedSnapshotClasses publishedclass.Set
 	// publishedVolumeAttributesClasses is the same for
 	// spec.volumeAttributesClassName -- a field the tenant may CHANGE on a bound
 	// claim, so its check is not create-only.
@@ -225,6 +229,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		dynamicClient: config.DynamicClient,
 
 		publishedStorageClasses:          config.PublishedStorageClasses,
+		publishedSnapshotClasses:         config.PublishedSnapshotClasses,
 		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
 		maxNamespaces:                    config.MaxNamespaces,
 		maxCRDs:                          config.MaxCRDs,
@@ -673,6 +678,16 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// Before forwardApply, so that a server-side apply is refused too -- that is
 	// the path `kubectl apply --server-side` takes for an object that does not
 	// exist yet, and it is the common way PVCs get created.
+	// ⭐ Snapshots, beside storage classes and for the same reason: publication is
+	// the authorization. And the pre-provisioned refusal beside it, which is the
+	// escape the whole snapshot integration is shaped around -- see
+	// pkg/proxy/volumesnapshot.go and docs/design-volumesnapshot-cn.md.
+	if err := tp.refuseUnpublishedSnapshotClass(obj); err != nil {
+		return nil, err
+	}
+	if err := tp.refusePreProvisionedSnapshot(obj); err != nil {
+		return nil, err
+	}
 	if err := tp.refuseUnpublishedStorageClass(obj); err != nil {
 		return nil, err
 	}

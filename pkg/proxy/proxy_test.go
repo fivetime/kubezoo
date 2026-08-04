@@ -788,6 +788,12 @@ func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
 		"refuseUnpublishedStorageClass": "a retired class refuses NEW references only -- existing " +
 			"claims have to stay writable by their owner, which is the whole point of retiring " +
 			"rather than deleting",
+		"refuseUnpublishedSnapshotClass": "same as the storage class: a retired class refuses NEW " +
+			"snapshots only, and spec.volumeSnapshotClassName is immutable, so refusing on update " +
+			"would fail every later write to a snapshot the tenant cannot repair",
+		"refusePreProvisionedSnapshot": "spec.source is immutable upstream, so a tenant cannot " +
+			"repair a snapshot it already has; refusing on update would fail every later write -- " +
+			"a label, a finalizer -- to an object that is not going to change",
 		"refuseTooManyNamespaces": "a ceiling on how many exist, and only a create adds one",
 		"refuseTooManyCRDs": "same: a ceiling on how many exist. A tenant over the limit must " +
 			"still be able to write and delete the CRDs it has, since deleting one is its only " +

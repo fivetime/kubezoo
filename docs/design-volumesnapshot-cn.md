@@ -1,7 +1,7 @@
 # 给租户卷快照:定案与依据(#104)
 
 > 状态:**决策已定,依据已查实**;实现进行中。
-> 依据全部来自 external-snapshotter `c3a43e4` 与 k8s 1.36 源码实读,不是按同构推。
+> 依据全部来自 external-snapshotter `c3a43e4`(本地 /root/external-snapshotter) 与 k8s 1.36 源码实读,不是按同构推。
 
 ## 0. 先更正一条我写错的结论
 

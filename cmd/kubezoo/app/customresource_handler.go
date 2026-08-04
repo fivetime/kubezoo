@@ -1176,6 +1176,34 @@ func (r *crdHandler) getTenantCRD(ctx context.Context, name string) (*apiextensi
 		return nil, fmt.Errorf("tenantID doesn't exist in context")
 	}
 
+	// ⭐ A shared platform CRD is served under its real group, to every tenant.
+	//
+	// The tenant's own CRDs are found by prefixing the group, which is what makes
+	// them the tenant's: nobody else can address that name. A platform CRD has no
+	// prefix and belongs to no tenant by that rule, which is why tenants could not
+	// see one at all -- and why "kubezoo cannot offer volume snapshots" read as
+	// structural when it was a missing feature. Snapshots are the case that forced
+	// it: the CRD comes with the platform's Ceph, not with a tenant.
+	//
+	// ⛔ An ALLOWLIST, not a label an operator can set. TODO-kaaas.md §W deferred
+	// sharing system CRDs precisely because a platform controller reconciling a
+	// tenant's spec with platform credentials has to be reviewed one operator at a
+	// time; a generic switch turns that review into something nobody does. Each
+	// entry here means someone read that controller. See
+	// docs/design-volumesnapshot-cn.md for what reading it looked like.
+	//
+	// ⚠️ Confinement does NOT come from this list. The resources a shared group
+	// exposes are declared separately, and the namespaced ones are prefixed like
+	// any other namespaced object. What this list decides is only whether the
+	// group is addressable at all.
+	if sharedCRD(name) {
+		crd, err := r.crdLister.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		return crd, nil
+	}
+
 	// convert to tenant crd name in upstream cluster
 	name = util.ConvertCRDNameToUpstream(name, tenantID)
 	crd, err := r.crdLister.Get(name)

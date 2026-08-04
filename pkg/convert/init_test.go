@@ -52,7 +52,7 @@ func TestNativeObjectConvertorConvertTenantObjectToUpstreamObject(t *testing.T) 
 		},
 	}
 
-	c, _ := InitConvertors(checkGroupKind, FakeListEmptyTenantCRDsFunc, nil)
+	c, _ := InitConvertors(checkGroupKind, FakeListEmptyTenantCRDsFunc, nil, nil)
 	err := c.ConvertTenantObjectToUpstreamObject(&pod, tenant, true)
 	if err != nil {
 		t.Errorf("Failed to convert tenant object to upstream object")
@@ -80,7 +80,7 @@ func TestNativeObjectConvertorConvertUpstreamObjectToTenantObject(t *testing.T) 
 		},
 	}
 
-	c, _ := InitConvertors(checkGroupKind, FakeListEmptyTenantCRDsFunc, nil)
+	c, _ := InitConvertors(checkGroupKind, FakeListEmptyTenantCRDsFunc, nil, nil)
 	err := c.ConvertUpstreamObjectToTenantObject(&pod, tenant, true)
 	if err != nil {
 		t.Errorf("Failed to convert tenant object to upstream object")
@@ -106,6 +106,7 @@ func TestWebhookConfigurationsAreWired(t *testing.T) {
 			return true, false, nil
 		},
 		FakeListEmptyTenantCRDsFunc,
+		nil,
 		nil,
 	)
 	registered := native.(*nativeObjectConvertor).nativeKindToConvertors
@@ -140,6 +141,7 @@ func TestPVAndPVCAreWired(t *testing.T) {
 		},
 		FakeListEmptyTenantCRDsFunc,
 		nil,
+		nil,
 	)
 	registered := native.(*nativeObjectConvertor).nativeKindToConvertors
 
@@ -167,6 +169,7 @@ func TestAccessReviewsAreWired(t *testing.T) {
 			return true, false, nil
 		},
 		FakeListEmptyTenantCRDsFunc,
+		nil,
 		nil,
 	)
 	registered := native.(*nativeObjectConvertor).nativeKindToConvertors

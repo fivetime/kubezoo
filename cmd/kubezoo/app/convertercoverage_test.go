@@ -59,7 +59,7 @@ func TestEveryConvertedKindIsServed(t *testing.T) {
 		{Group: "apiextensions.k8s.io", Kind: "CustomResourceDefinition"}: "reaches upstream through the CRD handler, not the generic proxy",
 	}
 
-	native, _ := convert.InitConvertors(nil, nil, nil)
+	native, _ := convert.InitConvertors(nil, nil, nil, nil)
 	kinds := convert.ConvertedKinds(native)
 
 	// ⚠️ A walk that finds nothing passes in silence, which is the failure this

@@ -29,14 +29,36 @@ import (
 
 // CustomResourceTransformer implements the transformation between
 // client and upstream server for custom resource.
-type CustomResourceTransformer struct{}
+type CustomResourceTransformer struct {
+	// isSharedGroup answers whether an API group is one the platform shares with
+	// every tenant under its real name, rather than one of the tenant's own.
+	isSharedGroup func(group string) bool
+}
 
 var _ ObjectTransformer = &CustomResourceTransformer{}
 
 // NewCustomResourceTransformer initiates a CustomResourceTransformer
 // which implements the ObjectTransformer interfaces.
-func NewCustomResourceTransformer() ObjectTransformer {
-	return &CustomResourceTransformer{}
+func NewCustomResourceTransformer(isSharedGroup func(string) bool) ObjectTransformer {
+	return &CustomResourceTransformer{isSharedGroup: isSharedGroup}
+}
+
+// shared reports whether an apiVersion belongs to a platform CRD group that
+// tenants address under its real name.
+//
+// ⛔ Without this the group would be prefixed on the way up and REFUSED on the
+// way back -- and refusing a conversion fails the whole object, so one shared
+// object would make `kubectl get` return an error instead of a list. That is
+// the third time today the same shape has turned up: pkg/convert/pvc.go for a
+// dynamically provisioned volume, the dead VolumeAttachment convertor, and here.
+// A reference kubezoo did not write cannot be attributed, and what cannot be
+// attributed is left alone rather than turned into an error.
+func (t *CustomResourceTransformer) shared(apiVersion string) bool {
+	if t.isSharedGroup == nil {
+		return false
+	}
+	group, _, _ := strings.Cut(apiVersion, "/")
+	return t.isSharedGroup(group)
 }
 
 // Forward transforms tenant object reference to upstream object reference.
@@ -46,6 +68,11 @@ func (t *CustomResourceTransformer) Forward(obj runtime.Object, tenantID string)
 		return nil, errors.New("fail to assert runtime object to the unstructured object")
 	}
 	groupVersion := u.GetAPIVersion()
+	if t.shared(groupVersion) {
+		// The tenant addressed the real group and the platform's controller
+		// watches the real group. Nothing to translate.
+		return u, nil
+	}
 	u.SetAPIVersion(util.AddTenantIDPrefix(tenantID, groupVersion))
 	rewriteManagedFieldVersions(u, func(version string) string {
 		return util.AddTenantIDPrefix(tenantID, version)
@@ -60,6 +87,9 @@ func (t *CustomResourceTransformer) Backward(obj runtime.Object, tenantID string
 		return nil, errors.New("fail to assert runtime object to the unstructured object")
 	}
 	groupVersion := u.GetAPIVersion()
+	if t.shared(groupVersion) {
+		return u, nil
+	}
 	if !strings.HasPrefix(groupVersion, tenantID) {
 		return nil, errors.Errorf("invalid apiVersion %s in cr %s, tenant id is %s", groupVersion, u.GetName(), tenantID)
 	}

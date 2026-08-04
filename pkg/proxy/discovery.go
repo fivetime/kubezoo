@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	openapi_v2 "github.com/google/gnostic-models/openapiv2"
 	v1 "k8s.io/apiextensions-apiserver/pkg/client/listers/apiextensions/v1"
@@ -68,10 +69,19 @@ type discoveryProxy struct {
 	// servedGroups are the API groups this build installs storage for, which is
 	// what may be advertised. The scheme knows many more.
 	servedGroups map[string]bool
+	// sharedResources are the platform's own CRD groups a tenant addresses under
+	// their real names, and -- per group -- exactly which resources of them.
+	//
+	// ⚠️ Advertising a group advertises everything upstream reports in it, which
+	// for snapshots would include volumesnapshotcontents: the one resource the
+	// design refuses, because its snapshotHandle is another tenant's data. So the
+	// resource list is filtered against this map rather than passed through.
+	sharedResources map[string]map[string]bool
 }
 
 func NewDiscoveryProxy(discoveryClient *discovery.DiscoveryClient,
-	crdLister v1.CustomResourceDefinitionLister, servedGroups map[string]bool) (DiscoveryProxy, error) {
+	crdLister v1.CustomResourceDefinitionLister, servedGroups map[string]bool,
+	sharedResources map[string]map[string]bool) (DiscoveryProxy, error) {
 	if discoveryClient == nil {
 		return nil, fmt.Errorf("discoveryClient is nil")
 	}
@@ -81,7 +91,8 @@ func NewDiscoveryProxy(discoveryClient *discovery.DiscoveryClient,
 	if len(servedGroups) == 0 {
 		return nil, fmt.Errorf("servedGroups is empty; discovery would advertise nothing")
 	}
-	return &discoveryProxy{discoveryClient: discoveryClient, crdLister: crdLister, servedGroups: servedGroups}, nil
+	return &discoveryProxy{discoveryClient: discoveryClient, crdLister: crdLister,
+		servedGroups: servedGroups, sharedResources: sharedResources}, nil
 }
 
 // ServerGroups returns the supported groups for tenant, with information like supported versions and the
@@ -96,12 +107,13 @@ func (dp *discoveryProxy) ServerGroups(tenantID string) (*metav1.APIGroupList, e
 	if err != nil {
 		return nil, err
 	}
-	return filterAPIGroupList(groupList, grm, tenantID, dp.servedGroups), nil
+	return filterAPIGroupList(groupList, grm, tenantID, dp.servedGroups, dp.sharedResources), nil
 }
 
 // filterAPIGroupList filter the apigroup according to the tenantId prefix.
 func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupResourcesMap,
-	tenantID string, servedGroups map[string]bool) *metav1.APIGroupList {
+	tenantID string, servedGroups map[string]bool,
+	sharedResources map[string]map[string]bool) *metav1.APIGroupList {
 	if apiGroupList == nil {
 		return nil
 	}
@@ -127,6 +139,14 @@ func filterAPIGroupList(apiGroupList *metav1.APIGroupList, grm util.CustomGroupR
 		// including ones with no storage installed here, and a tenant then finds
 		// them in `api-resources` and gets an error from every call.
 		if servedGroups[groupName] {
+			filtered.Groups = append(filtered.Groups, apiGroupList.Groups[i])
+			continue
+		}
+		// ⭐ A platform CRD group shared with every tenant, under its real name.
+		// Not converted: there is no tenant prefix to take off, which is the
+		// whole point -- the tenant addresses snapshot.storage.k8s.io, the same
+		// string the platform's controller watches.
+		if len(sharedResources[groupName]) > 0 {
 			filtered.Groups = append(filtered.Groups, apiGroupList.Groups[i])
 			continue
 		}
@@ -176,6 +196,8 @@ func (dp *discoveryProxy) ServerVersionsForGroup(tenantID, group string) (*metav
 		group = customResourceUpstreamGroup
 	case dp.servedGroups[group]:
 		// A native group this build installs storage for.
+	case len(dp.sharedResources[group]) > 0:
+		// A shared platform CRD group, addressed under its real name.
 	default:
 		return nil, notATenantsGroup(group)
 	}
@@ -201,6 +223,8 @@ func (dp *discoveryProxy) ServerResourcesForGroupVersion(tenantID, group, versio
 		group = customResourceUpstreamGroup
 	case dp.servedGroups[group]:
 		// A native group this build installs storage for.
+	case len(dp.sharedResources[group]) > 0:
+		// A shared platform CRD group, addressed under its real name.
 	default:
 		return nil, notATenantsGroup(group)
 	}
@@ -209,6 +233,24 @@ func (dp *discoveryProxy) ServerResourcesForGroupVersion(tenantID, group, versio
 		return nil, err
 	}
 	util.ConvertUpstreamResourceListToTenant(tenantID, resourceList)
+	// ⛔ A shared group is advertised resource by resource, not wholesale.
+	// Upstream reports everything the CRDs define, and for snapshots that
+	// includes volumesnapshotcontents -- the one this design refuses, because a
+	// tenant able to create one could import another tenant's data by naming its
+	// snapshotHandle. Discovery is not authorization, and the write guards refuse
+	// it anyway; but advertising a resource a tenant must not use invites the
+	// call and makes the refusal look like a bug.
+	if allowed := dp.sharedResources[group]; len(allowed) > 0 {
+		kept := resourceList.APIResources[:0]
+		for _, r := range resourceList.APIResources {
+			// A subresource is written parent/sub; it lives or dies with its parent.
+			parent, _, _ := strings.Cut(r.Name, "/")
+			if allowed[parent] {
+				kept = append(kept, r)
+			}
+		}
+		resourceList.APIResources = kept
+	}
 	return resourceList, nil
 }
 

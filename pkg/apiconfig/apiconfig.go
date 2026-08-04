@@ -93,6 +93,11 @@ type StorageConfig struct {
 	// into a read-only list of storage classes.
 	PublishedStorageClasses publishedclass.Set
 
+	// PublishedSnapshotClasses is the same thing for VolumeSnapshotClass, which
+	// is a custom resource -- so the Set behind it is fed by a dynamic informer.
+	// The Set interface does not care which kind of informer fills it.
+	PublishedSnapshotClasses publishedclass.Set
+
 	// PublishedVolumeAttributesClasses does the same for
 	// spec.volumeAttributesClassName. Nil disables the check.
 	//

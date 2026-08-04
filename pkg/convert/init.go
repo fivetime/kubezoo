@@ -33,7 +33,7 @@ import (
 // ones those are comes from a label on the IngressClass, so the answer can
 // change without restarting -- see pkg/publishedclass.
 func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListTenantCRDsFunc,
-	publishedIngressClasses publishedclass.Set) (nativeConvertor, customConvertor common.ObjectConvertor) {
+	publishedIngressClasses publishedclass.Set, isSharedGroup func(group string) bool) (nativeConvertor, customConvertor common.ObjectConvertor) {
 	ownerReferenceTransformer := NewOwnerReferenceTransformer(checkGroupKind)
 	objectReferenceTransformer := NewObjectReferenceTransformer(checkGroupKind)
 	defaultConvertor := NewDefaultConvertor(ownerReferenceTransformer)
@@ -198,6 +198,6 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 	}
 
 	nativeConvertor = NewNativeObjectConvertor(defaultConvertor, nativeKindToConvertors)
-	customConvertor = NewCrossReferenceConverter(defaultConvertor, NewCustomResourceTransformer())
+	customConvertor = NewCrossReferenceConverter(defaultConvertor, NewCustomResourceTransformer(isSharedGroup))
 	return nativeConvertor, customConvertor
 }

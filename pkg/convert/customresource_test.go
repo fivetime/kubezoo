@@ -36,7 +36,7 @@ func TestCustomResourceTransformerForward(t *testing.T) {
 	un.SetNamespace("mynamespace")
 	un.SetName("myname")
 
-	c := NewCustomResourceTransformer()
+	c := NewCustomResourceTransformer(nil)
 	obj, err := c.Forward(&un, tenant)
 	if err != nil {
 		t.Errorf("Failed to forward with err %s", err)
@@ -62,7 +62,7 @@ func TestCustomResourceTransformerBackward(t *testing.T) {
 	un.SetNamespace("mynamespace")
 	un.SetName("myname")
 
-	c := NewCustomResourceTransformer()
+	c := NewCustomResourceTransformer(nil)
 	obj, err := c.Backward(&un, tenant)
 	if err != nil {
 		t.Errorf("Failed to forward with err %s", err)
