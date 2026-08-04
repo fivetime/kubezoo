@@ -146,6 +146,29 @@ kubectl label volumeattributesclass gold volumeattributesclass.kubezoo.io/publis
 
 ⚠️ 与存储类不同,这里留空是**真的"不套用任何档位"**,没有 `setdefault` 那样的上游插件会替它填。
 
+### ⭐ DeviceClass(DRA):第四个,而且是**开组时就接上的**那个
+
+`spec.devices.requests[].deviceClassName` 决定租户拿到**哪种硬件** —— 哪块 GPU、哪个档位。
+
+```bash
+kubectl label deviceclass a100-shared deviceclass.kubezoo.io/published=true
+```
+
+**默认一个都不发布**,和 VolumeAttributesClass 一样。理由比那个更硬:`resource.k8s.io`
+这个组**在此之前根本不对租户开放**,不存在任何"以前能用"的行为要兼容。
+
+⚠️ **不发布 = 租户建不了 ResourceClaim**(它必须指定一个 deviceClassName)。要给租户
+GPU,**必须先打这个标签**。
+
+⛔ **`resourceslices` 对租户完全不服务,这是有意的、也不要去"补上"。**
+它带 `spec.nodeName`、`spec.nodeSelector` 和每台机器的设备清单 —— 那是平台的硬件底账,
+和当年把 Node 从租户视图里收回是同一件事。租户要的是**一个设备类**,找硬件是调度器的活。
+
+⚠️ **设备级配额目前不生效。** `ClusterResourceQuota` 能按对象数限
+(`count/resourceclaims.resource.k8s.io`),但**数不了"几张 GPU"** —— 那需要给配额组件
+一个全集群 pod informer,内存与全集群 pod 数成正比。要按设备计费时再开,见
+`pkg/clusterresourcequota/controllers/webhook.go` 的注释。
+
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,
 于是三条策略永远不就绪,**`pods` 的 webhook 根本没注册**,
