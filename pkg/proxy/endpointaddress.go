@@ -151,9 +151,16 @@ func (tp *tenantProxy) addressBelongsToAPod(ctx context.Context, address string,
 			}
 		}
 	}
-	// A pod with no IP yet is not a forgery; it is a race with the scheduler.
-	if len(ips) == 0 {
-		return nil
-	}
+	// ⛔ A pod with no addresses is REFUSED, and the first version of this waved it
+	// through with the comment "a pod with no IP yet is not a forgery; it is a
+	// race with the scheduler". That was wrong: a pod that never schedules has no
+	// IP for as long as it exists, so the exemption was not a race window, it was
+	// the steady state of an object a tenant can create on purpose -- and every
+	// address passed through it.
+	//
+	// The cost is the real race, an endpoint written before its pod has an
+	// address, and it is the right thing to refuse: an endpoint that names an
+	// address the pod does not have yet is wrong now and only accidentally right
+	// later.
 	return refuse(fmt.Sprintf("address %q is not one of pod %q's addresses", address, targetRef.Name))
 }

@@ -820,6 +820,18 @@ func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
 			"way back under",
 	}
 
+	// ⭐ The mirror of createOnly, and it needs the same thing: a reason. A guard
+	// can be legitimately update-only -- a subresource write is always an update,
+	// and upstream's pod strategy drops status on a create, so there is no create
+	// to guard. What it may NOT be is absent from one of the two update paths,
+	// which is checked below exactly as create-only guards are checked for Create.
+	updateOnly := map[string]string{
+		"refuseTenantWrittenPodAddresses": "pods/status is a subresource, so every write to it " +
+			"is an update; a pod Create has its status dropped by upstream's strategy " +
+			"(pkg/registry/core/pod/strategy.go PrepareForCreate), so there is no create path " +
+			"on which a tenant could set an address",
+	}
+
 	// A guard that appears on ANY write path has to appear on all of them, unless
 	// it is create-only on purpose. Guards nothing calls are a separate problem
 	// and not this test's.
@@ -834,6 +846,17 @@ func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
 			}
 		}
 		if !present {
+			continue
+		}
+		if _, deliberate := updateOnly[name]; deliberate {
+			// Still checked, and for the same reason: a guard excused from Create had
+			// better be on BOTH update paths, or a tenant reaches the unguarded one by
+			// choosing PUT over PATCH.
+			for _, path := range []string{"Update", "guaranteedUpdate"} {
+				if !called[path][name] {
+					t.Errorf("%s is listed as update-only but does not run on %s", name, path)
+				}
+			}
 			continue
 		}
 		if _, deliberate := createOnly[name]; deliberate {

@@ -3935,6 +3935,70 @@ endpoints:
     targetRef: {kind: Pod, name: csi-reader, namespace: default}
 EP
 
+# --- the field the endpoint guard was trusting -----------------------------
+# ⛔ kubezoo serves pods/status and a tenant is "*" on "*" in its own namespaces,
+# so it could write status.podIPs -- the very field refuseForgedEndpointAddress
+# reads to decide whether an endpoint address is real. The guard shipped
+# validating a tenant-written value against a tenant-written value.
+#
+# ⭐ And the forged address is reachable on its own: the apiserver's pods/proxy
+# subresource dials status.podIP straight from the control plane.
+$T apply -f - >/dev/null 2>&1 <<'PS'
+apiVersion: v1
+kind: Pod
+metadata: {name: status-probe}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+PS
+for _ in $(seq 40); do
+  [ "$($T get pod status-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+# ⚠️ Asserted on the END STATE, not on a refusal, and that is deliberate. The
+# guard refuses a CHANGE to these fields, but a tenant's patch may also come back
+# having changed nothing for a reason nobody here has established -- in the lab it
+# did exactly that, "patched (no change)", while upstream's podStatusStrategy
+# PrepareForUpdate demonstrably does NOT preserve the old podIPs. What matters is
+# not which layer says no; it is that the address a pod claims is not the
+# tenant's to choose. An assertion on the refusal alone would have gone red for a
+# property that holds.
+$T patch pod status-probe --subresource=status --type=merge \
+  -p '{"status":{"podIPs":[{"ip":"10.99.99.99"}]}}' >/dev/null 2>&1
+ps_ip=$($K -n "$NS" get pod status-probe -o jsonpath='{.status.podIPs[0].ip}' 2>/dev/null)
+if [ "$ps_ip" = 10.99.99.99 ]; then
+  bad "a tenant cannot choose its pod's address" "status.podIPs is now $ps_ip -- refuseForgedEndpointAddress reads this field to decide whether an endpoint address is real, so a tenant that can write it validates its own forgery"
+else
+  ok "a tenant cannot choose the address its own pod claims (still $ps_ip)"
+fi
+# ⭐ Positive control: a readiness gate is a tenant's controller writing
+# status.conditions, and refusing the whole subresource to close four fields
+# would have taken that away. Without this the section would pass just as well
+# if pods/status were refused outright.
+expect_allowed "while a condition on the same subresource still writes" \
+  $T patch pod status-probe --subresource=status --type=merge \
+    -p '{"status":{"conditions":[{"type":"kubezoo.io/probe","status":"True","lastTransitionTime":"2024-01-01T00:00:00Z"}]}}'
+
+# ⚠️ And the exemption that was not a race: a pod that never schedules has no
+# address for as long as it exists, so "no IPs yet" was a permanent hole rather
+# than a window. Asserted with a targetRef to a pod that HAS an address but a
+# different one, and to one that has none at all.
+expect_denied "an endpoint naming a pod that has no address" "not one of pod" -- \
+  $T apply -f - <<'EPX'
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata: {name: forged3, labels: {kubernetes.io/service-name: whatever}}
+addressType: IPv4
+ports: [{port: 80}]
+endpoints:
+  - addresses: ["10.99.99.98"]
+    targetRef: {kind: Pod, name: status-probe, namespace: default}
+EPX
+
 # --- the URL that is not called a URL --------------------------------------
 # ⛔ kubezoo refuses a webhook's clientConfig.url because "a URL cannot be
 # confined to the tenant; use clientConfig.service". That reasoning assumes a
