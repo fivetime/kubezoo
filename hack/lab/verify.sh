@@ -628,7 +628,7 @@ PROBE
 S=/var/run/secrets/kubernetes.io/serviceaccount
 NS=$(cat $S/namespace 2>/dev/null)
 BODY=$(curl -sk -H "Authorization: Bearer $(cat $S/token)" \
-  "https://ZOOHOST:6443/api/v1/namespaces/$NS/configmaps?limit=1" 2>&1)
+  "https://ZOOHOST:6443/api/v1/namespaces/$NS/pods?limit=1" 2>&1)
 ANS=$(echo "$BODY" | tr ',{' '\n\n' | grep -o '"namespace":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "believes=[$NS] answers=[$ANS] raw=[$(echo "$BODY" | head -c 120 | tr -d '\n')]"
 PROBE

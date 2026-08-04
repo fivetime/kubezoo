@@ -223,6 +223,35 @@ done
 
 **不删就等于没封。**
 
+### 1.1.5 ⚠️ 升级到含 #101 的版本:租户工作负载会**滚一次**
+
+这个版本让 Pod 里的 `/var/run/secrets/kubernetes.io/serviceaccount/namespace`
+显示**租户视角**的 namespace 名(原先是上游名 `<租户ID>-default`)。
+
+做法是在 **pod 模板**上加一条注解 + 一个 `kube-api-access-kubezoo` 卷。改了
+`spec.template` 就等于改了 Deployment/StatefulSet 的模板 ⇒ **每个租户的工作负载
+在下一次被写入时会滚动一次**。不是自动发生的:kubezoo 只在**请求经过它**时改写,
+所以存量对象要等到租户自己下一次写它,或者你主动 touch 一遍。
+
+- **不改也能跑**:存量 Pod 一切照旧,只是它们里面的 namespace 名仍是上游名。
+- **要立刻生效**就 touch 一遍(会滚):
+
+```bash
+for ns in $(kubectl get ns -l kubezoo.io/tenant -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl -n "$ns" get deploy,sts,ds -o name | while read -r o; do
+    kubectl -n "$ns" annotate "$o" kubezoo.io/rollout-at="$(date -Is)" --overwrite
+  done
+done
+```
+
+⚠️ **存量 Pod 不会被改,也不该被改** —— `spec.volumes` 存下之后不可变,
+改它会让上游拒掉那次写,租户就再也动不了自己正在跑的 Pod。
+
+⭐ 这个改动**解决的是静默故障**:租户自己装的 operator(凡是 kubebuilder /
+controller-runtime 写的、只 watch 自己 namespace 的)原先 list/watch 都成功、
+缓存却永远命中不了,**没有报错、没有日志、没有事件**。cert-manager 没暴露它,
+因为它 watch 全集群。
+
 ### 1.2 ⛔⛔ 租户网络必须够不到上游 apiserver —— 这条是承重前提
 
 ⭐ **这是整套隔离的地基,而且它不在代码里。** 平台的判断建立在"租户到控制平面只有
