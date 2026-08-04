@@ -38,6 +38,10 @@ type ProxyOptions struct {
 	PublicStorageClasses []string
 	// MaxNamespacesPerTenant caps how many namespaces one tenant may own. Zero
 	// means no cap, which is what an upgrade gets.
+	// MaxCRDsPerTenant caps how many CustomResourceDefinitions one tenant may
+	// own. Zero means no cap.
+	MaxCRDsPerTenant int
+
 	MaxNamespacesPerTenant int
 	// MaxClusterRoleBindingsPerTenant caps how many ClusterRoleBindings one
 	// tenant may own. Zero means no cap.
@@ -87,6 +91,16 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 			"refused, while it stays visible and every claim that already uses it keeps working, so tenants "+
 			"have a window to migrate. This flag is unioned with the labelled set and kept so that an "+
 			"upgrade does not silently un-publish anything.")
+	fs.IntVar(&o.MaxCRDsPerTenant, "max-crds-per-tenant", o.MaxCRDsPerTenant,
+		"the most CustomResourceDefinitions one tenant may own, or 0 for no limit, which is "+
+			"the default. A ceiling on a shared-structure amplifier, and a heavier one than "+
+			"--max-namespaces-per-tenant because it does not go away between requests: every "+
+			"tenant CRD is a real CRD upstream, so it enters that cluster's discovery document "+
+			"and its OpenAPI, which every client of the cluster downloads -- tenant or not -- "+
+			"and kubezoo keeps an informer over all of them with a type converter each. One "+
+			"tenant's CRDs make every other tenant's kubectl slower, and the others can do "+
+			"nothing about it. Refuses new ones only: a tenant over the limit keeps its "+
+			"existing CRDs writable, since deleting one is its only way back under.")
 	fs.IntVar(&o.MaxNamespacesPerTenant, "max-namespaces-per-tenant", o.MaxNamespacesPerTenant,
 		"the most namespaces one tenant may own, or 0 for no limit, which is the default. "+
 			"This is a ceiling on a shared-cluster amplifier rather than a billing control: a "+

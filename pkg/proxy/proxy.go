@@ -28,6 +28,7 @@ import (
 	"github.com/fivetime/kubezoo-gateway/pkg/proxy/pod"
 	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 
+	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -119,6 +120,9 @@ type tenantProxy struct {
 	// maxNamespaces caps how many namespaces this tenant may own; zero means no
 	// cap. Nil on every resource but namespaces.
 	maxNamespaces int
+	// maxCRDs caps how many CustomResourceDefinitions this tenant may own; zero
+	// means no cap.
+	maxCRDs int
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -215,6 +219,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		publishedStorageClasses:          config.PublishedStorageClasses,
 		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
 		maxNamespaces:                    config.MaxNamespaces,
+		maxCRDs:                          config.MaxCRDs,
 		convertor:                        config.Convertor,
 		groupVersionKindFunc:             config.GroupVersionKindFunc,
 		tableConvertor:                   tc,
@@ -636,6 +641,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	if err := tp.refuseTooManyNamespaces(ctx, obj, tenantID); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseTooManyCRDs(ctx, obj, tenantID); err != nil {
 		return nil, err
 	}
 	// nil: nothing is stored, so every address named here is newly claimed.
@@ -1215,6 +1223,82 @@ func (tp *tenantProxy) refuseNodePorts(obj, old runtime.Object) error {
 				"first-come-first-served basis. Nothing in this platform's data plane "+
 				"reaches your pods through it.",
 		)})
+}
+
+// crdGVR is how a CustomResourceDefinition is addressed through the dynamic
+// client, which is the only way to count them from here.
+var crdGVR = schema.GroupVersionResource{
+	Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions",
+}
+
+// refuseTooManyCRDs caps how many CustomResourceDefinitions one tenant may own.
+//
+// ⛔ A ceiling on a shared-structure amplifier, and a worse one than namespaces
+// because it does not go away between requests. Every tenant CRD is a real CRD
+// upstream, so it lands in that cluster's discovery document and its OpenAPI --
+// which EVERY client of that cluster downloads, tenant or not. kubezoo holds
+// its own informer over all of them and builds a type converter per CRD. One
+// tenant with ten thousand CRDs makes every other tenant's kubectl slower, and
+// there is nothing the other tenants can do about it.
+//
+// ⚠️ Namespaces cost per request (the cross-namespace fan-out); this costs
+// continuously, whether the tenant that created them ever uses them again.
+//
+// ⭐ CREATE only, like the namespace cap and for the same reason: a tenant over
+// the limit still has to be able to write and delete the CRDs it already has --
+// deleting one is the only way back under the limit.
+//
+// ⚠️ A counting failure ALLOWS. An upstream hiccup must not reach a tenant as a
+// quota it cannot see and cannot explain; the two are indistinguishable from
+// where the tenant stands.
+func (tp *tenantProxy) refuseTooManyCRDs(ctx context.Context, obj runtime.Object,
+	tenantID string) error {
+
+	if tp.maxCRDs <= 0 {
+		return nil
+	}
+	if _, ok := obj.(*apiextensions.CustomResourceDefinition); !ok {
+		return nil
+	}
+	owned, err := tp.countTenantCRDs(ctx, tenantID)
+	if err != nil {
+		klog.Errorf("counting tenant %s's CRDs to apply --max-crds-per-tenant: %v", tenantID, err)
+		return nil
+	}
+	if owned < tp.maxCRDs {
+		return nil
+	}
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, "",
+		fmt.Errorf("this tenant already owns %d custom resource definitions and the limit is %d; "+
+			"delete one you no longer need, or ask the platform to raise the limit",
+			owned, tp.maxCRDs))
+}
+
+// countTenantCRDs counts the CRDs whose API group belongs to this tenant.
+//
+// ⚠️ Counted by GROUP prefix, not by name. A tenant's CRD is prefixed on its
+// group -- pkg/convert's CRD transformer rewrites spec.group -- and the object's
+// name is derived from it (<plural>.<group>), so matching on the name would work
+// by accident today and stop working the moment naming changes. The group is
+// where the tenancy actually lives.
+func (tp *tenantProxy) countTenantCRDs(ctx context.Context, tenantID string) (int, error) {
+	list, err := tp.dynamicClient.Resource(crdGVR).List(asTenantAdmin(ctx, tenantID), metav1.ListOptions{})
+	if err != nil {
+		return 0, err
+	}
+	prefix := tenantID + "-"
+	owned := 0
+	for i := range list.Items {
+		group, found, err := unstructured.NestedString(list.Items[i].Object, "spec", "group")
+		if err != nil || !found {
+			continue
+		}
+		if strings.HasPrefix(group, prefix) {
+			owned++
+		}
+	}
+	return owned, nil
 }
 
 // refuseTooManyNamespaces caps how many namespaces one tenant may own.

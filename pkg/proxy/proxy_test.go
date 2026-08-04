@@ -789,6 +789,9 @@ func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
 			"claims have to stay writable by their owner, which is the whole point of retiring " +
 			"rather than deleting",
 		"refuseTooManyNamespaces": "a ceiling on how many exist, and only a create adds one",
+		"refuseTooManyCRDs": "same: a ceiling on how many exist. A tenant over the limit must " +
+			"still be able to write and delete the CRDs it has, since deleting one is its only " +
+			"way back under",
 	}
 
 	// A guard that appears on ANY write path has to appear on all of them, unless

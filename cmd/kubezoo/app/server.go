@@ -610,6 +610,10 @@ type ProxyConfig struct {
 	// maxNamespacesPerTenant is a ceiling on the fan-out amplifier: a tenant's
 	// cross-namespace list costs one upstream request per namespace it owns.
 	maxNamespacesPerTenant int
+	// maxCRDsPerTenant is a ceiling on a shared-structure amplifier: a tenant's
+	// CRDs enter the upstream cluster's discovery and OpenAPI, which every client
+	// of that cluster downloads.
+	maxCRDsPerTenant int
 	// maxClusterRoleBindingsPerTenant is the second multiplier: each binding is
 	// stored once per namespace the tenant owns.
 	maxClusterRoleBindingsPerTenant int
@@ -650,6 +654,14 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// carries the same Resource string, and a status write is not a claim.
 	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
 		config.MaxNamespaces = c.maxNamespacesPerTenant
+	}
+	// ⚠️ Its own branch, on its own resource. Setting MaxCRDs beside MaxNamespaces
+	// above compiles, runs, and caps nothing: that branch is reached only for the
+	// namespaces endpoint, so the field lands on a storage config that never sees
+	// a CRD. The comment above is about exactly this hazard and I still did it.
+	if config.Kind.Group == "apiextensions.k8s.io" &&
+		config.Resource == "customresourcedefinitions" && config.Subresource == "" {
+		config.MaxCRDs = c.maxCRDsPerTenant
 	}
 	if config.Kind.Group == "rbac.authorization.k8s.io" &&
 		config.Resource == "clusterrolebindings" && config.Subresource == "" {
@@ -808,6 +820,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		publishedIngressClasses:          publishedIngressClasses,
 		publishedVolumeAttributesClasses: publishedVolumeAttributesClasses,
 		maxNamespacesPerTenant:           o.MaxNamespacesPerTenant,
+		maxCRDsPerTenant:                 o.MaxCRDsPerTenant,
 		maxClusterRoleBindingsPerTenant:  o.MaxClusterRoleBindingsPerTenant,
 		classInformers:                   classInformers,
 		ingressClassInformers:            ingressClassInformers,

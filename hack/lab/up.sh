@@ -165,6 +165,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --public-storage-classes=${PUBLIC_STORAGE_CLASSES:-} \
   --max-namespaces-per-tenant=${MAX_NAMESPACES_PER_TENANT:-16} \
   --max-cluster-role-bindings-per-tenant=${MAX_CRB_PER_TENANT:-24} \
+  --max-crds-per-tenant=${MAX_CRDS_PER_TENANT:-6} \
   >"$LAB/kubezoo.log" 2>&1 &
 
 for i in $(seq 60); do

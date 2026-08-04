@@ -104,6 +104,10 @@ type StorageConfig struct {
 	// cap. Set only on the namespaces resource.
 	MaxNamespaces int
 
+	// MaxCRDs caps how many CustomResourceDefinitions one tenant may own. Zero
+	// means no cap.
+	MaxCRDs int
+
 	// MaxClusterRoleBindings caps how many a tenant may own. Zero means no cap.
 	// Set only on the clusterrolebindings resource.
 	MaxClusterRoleBindings int

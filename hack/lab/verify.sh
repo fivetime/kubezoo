@@ -3023,6 +3023,60 @@ EOF
 fi
 
 echo
+echo "== the platform caps how many custom resource definitions a tenant may own =="
+# ⛔ A ceiling on a SHARED-STRUCTURE amplifier, and a heavier one than the
+# namespace cap because it does not go away between requests. Every tenant CRD is
+# a real CRD upstream, so it enters that cluster's discovery document and its
+# OpenAPI -- which every client of the cluster downloads, tenant or not -- and
+# kubezoo keeps an informer over all of them with a type converter each.
+#
+# ⚠️ This section creates CRDs and does not delete them all, so it takes the same
+# kind of hostage as a quota fixture. It runs near the end for that reason, and
+# it counts what already exists first rather than assuming it starts from zero --
+# earlier sections create CRDs of their own.
+crd_before=$($K get crd --no-headers 2>/dev/null | grep -c "^${TID}-" || true)
+crd_cap=${MAX_CRDS_PER_TENANT:-6}
+crd_made=0
+crd_refusal=""
+for i in $(seq $((crd_cap + 2))); do
+  crd_out=$($T apply -f - 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: capwidget${i}s.cap${i}.example}
+spec:
+  group: cap${i}.example
+  names: {plural: capwidget${i}s, singular: capwidget${i}, kind: CapWidget${i}}
+  scope: Namespaced
+  versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object}}}]
+EOF
+)
+  if [ $? -eq 0 ]; then
+    crd_made=$((crd_made + 1))
+  else
+    crd_refusal=$crd_out
+    break
+  fi
+done
+if grep -q "custom resource definitions and the limit is" <<<"$crd_refusal"; then
+  ok "a tenant cannot own more custom resource definitions than the platform allows"
+else
+  bad "a tenant cannot own more custom resource definitions than the platform allows" \
+      "made $crd_made past a starting count of $crd_before with a cap of $crd_cap; last answer: $(tr '\n' ' ' <<<"${crd_refusal:-<all accepted>}" | cut -c1-160)"
+fi
+
+# ⭐ The half that makes the cap survivable, and the reason it is CREATE-only:
+# a tenant at its limit must still be able to delete, or it has no way back
+# under. Refusing every write would leave it stuck at the ceiling forever.
+if $T delete crd capwidget1s.cap1.example >/dev/null 2>&1; then
+  ok "and a tenant at the limit can still delete one to get back under it"
+else
+  bad "a tenant at the limit can still delete one" "the delete was refused, so the cap is a trap"
+fi
+for i in $(seq $((crd_cap + 2))); do
+  $T delete crd "capwidget${i}s.cap${i}.example" >/dev/null 2>&1
+done
+
+echo
 echo "== the platform caps how many cluster role bindings a tenant may own =="
 # ⛔ THIS RUNS SECOND-TO-LAST, immediately before the section that takes the
 # tenant's RoleBinding away -- which has to stay last, so this cannot be after it. Filling a
