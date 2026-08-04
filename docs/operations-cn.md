@@ -333,6 +333,27 @@ kubectl get ns -L kubezoo.io/tenant --no-headers | awk '{print $NF}' | sort | un
 ⚠️ 计数失败时**放行**,不拒绝:上游抖一下不该让租户看成配额 —— 它分不清这两者。
 日志里会有一条 `counting tenant ... to apply --max-namespaces-per-tenant`。
 
+### 另外两个同类上限
+
+同一个想法的另外两维,**都默认 0 = 不限**,失败模式和上面一致(只拒新建、计数失败放行):
+
+| 参数 | 封的是什么放大 |
+|---|---|
+| `--max-cluster-role-bindings-per-tenant` | 租户的**一条** CRB 会投影成**每个租户 namespace 一条** RoleBinding ⇒ 成本是 **namespace 数 × CRB 数** |
+| `--max-crds-per-tenant` | 每个租户 CRD 都是上游一个**真** CRD ⇒ 进上游 discovery 与 OpenAPI,**该集群的每个客户端都要下载**;kubezoo 侧还有一个 informer 缓存全部 CRD + 逐个类型转换器 |
+
+⭐ **CRD 那条与前两者有个本质区别**:namespace 和 CRB 的代价是**每次请求**付的,CRD 的代价是
+**常驻**的 —— 租户建完再也不用,别的租户照样天天付。所以它是三者里最该设的。
+
+```bash
+# 每个租户现有多少 CRD(按 group 前缀,不是按名字)
+kubectl get crd -o custom-columns='GROUP:.spec.group' --no-headers \
+  | grep -oE '^[0-9]{6}-' | sort | uniq -c | sort -rn
+```
+
+⚠️ 三个上限都**只拒新建**,存量一律照常可写可删。这不是宽容:**删掉一个是超限租户回到
+限额内唯一的路**,拒掉它的删除等于把上限做成了陷阱。
+
 ---
 
 ## 2.6 ⭐ 租户凭据:发一次,不留底
