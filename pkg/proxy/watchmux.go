@@ -31,7 +31,6 @@ import (
 
 	"github.com/fivetime/kubezoo-contract/pkg/common"
 	kubezoodynamic "github.com/fivetime/kubezoo-contract/pkg/dynamic"
-	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
 // initialEventsEndAnnotation marks the bookmark that says a WatchList has
@@ -108,10 +107,7 @@ var _ watch.Interface = &watchMux{}
 func newWatchMux(ctx context.Context, tp *tenantProxy, tenantID string,
 	options metav1.ListOptions, namespaces []string) (*watchMux, error) {
 
-	gv := tp.kind.GroupVersion()
-	if tp.isCustomResource {
-		gv.Group = util.AddTenantIDPrefix(tenantID, gv.Group)
-	}
+	gv := tp.upstreamGroupVersion(tenantID)
 
 	m := &watchMux{
 		resource:      tp.dynamicClient.Resource(gv.WithResource(tp.resource)),

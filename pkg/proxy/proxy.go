@@ -72,6 +72,9 @@ type tenantProxy struct {
 	subresource      string
 	shortNames       []string
 	isCustomResource bool
+	// isSharedGroup reports whether this proxy's group is a platform CRD group
+	// shared with tenants under its real name. See upstreamGroupVersion.
+	isSharedGroup func(group string) bool
 	// hideProjected is set on the RoleBinding endpoint a tenant talks to, and
 	// cleared on the inner proxy the ClusterRoleBinding projection drives --
 	// which is the same resource and must be able to see and write the records.
@@ -218,6 +221,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		kind:             config.Kind,
 		namespaceScoped:  config.NamespaceScoped,
 		isCustomResource: config.IsCustomResource,
+		isSharedGroup:    config.IsSharedGroup,
 		hideProjected: config.Resource == "rolebindings" && config.Subresource == "" &&
 			config.Kind.Group == "rbac.authorization.k8s.io",
 		resource:      config.Resource,
@@ -263,10 +267,7 @@ func (tp *tenantProxy) getClient(ctx context.Context) (dynamic.ResourceInterface
 		return nil, fmt.Errorf("missing requestInfo")
 	}
 	var client dynamic.ResourceInterface
-	gv := tp.kind.GroupVersion()
-	if tp.isCustomResource {
-		gv.Group = util.AddTenantIDPrefix(tenantID, gv.Group)
-	}
+	gv := tp.upstreamGroupVersion(tenantID)
 	client = tp.dynamicClient.Resource(gv.WithResource(tp.resource))
 	if tp.namespaceScoped && len(requestInfo.Namespace) != 0 {
 		namespace := util.UpstreamNamespace(tenantID, requestInfo.Namespace)
@@ -1885,4 +1886,30 @@ func checkPreconditions(preconditions *metav1.Preconditions, obj runtime.Object)
 		return fmt.Errorf("Precondition failed: ResourceVersion in precondition: %v, ResourceVersion in object meta: %v", *preconditions.ResourceVersion, objMeta.GetResourceVersion())
 	}
 	return nil
+}
+
+
+// upstreamGroupVersion is the group/version this proxy addresses upstream.
+//
+// ⛔ A custom resource carries the tenant prefix on its group -- that is what
+// makes it the tenant's, and what keeps two tenants' CRDs of the same name
+// apart. A SHARED platform group does not: it exists upstream under its real
+// name, which is also the name the platform's own controller watches. Prefixing
+// it addresses a group that does not exist, and every request 404s.
+//
+// ⚠️ Found only by running it. Discovery advertised the group correctly and the
+// CRD handler routed it correctly, and the request still failed -- the prefix is
+// applied THREE separate times, in the read path, the fanout and the watch mux,
+// and each one had to be found. A group being reachable and a group being
+// FORWARDABLE are different things.
+func (tp *tenantProxy) upstreamGroupVersion(tenantID string) schema.GroupVersion {
+	gv := tp.kind.GroupVersion()
+	if !tp.isCustomResource {
+		return gv
+	}
+	if tp.isSharedGroup != nil && tp.isSharedGroup(gv.Group) {
+		return gv
+	}
+	gv.Group = util.AddTenantIDPrefix(tenantID, gv.Group)
+	return gv
 }

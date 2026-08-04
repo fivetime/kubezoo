@@ -199,10 +199,7 @@ func (tp *tenantProxy) listAcrossNamespaces(ctx context.Context, options *metav1
 		return nil, apierrors.NewBadRequest("the continue parameter points past the end of this tenant's namespaces")
 	}
 
-	gv := tp.kind.GroupVersion()
-	if tp.isCustomResource {
-		gv.Group = util.AddTenantIDPrefix(tenantID, gv.Group)
-	}
+	gv := tp.upstreamGroupVersion(tenantID)
 	resource := tp.dynamicClient.Resource(gv.WithResource(tp.resource))
 
 	gathered := &unstructured.UnstructuredList{Items: make([]unstructured.Unstructured, 0)}

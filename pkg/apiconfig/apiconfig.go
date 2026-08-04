@@ -49,6 +49,15 @@ type StorageConfig struct {
 
 	IsCustomResource bool
 
+	// IsSharedGroup answers whether an API group is one the platform shares with
+	// every tenant under its REAL name -- a platform CRD, not one of the tenant's.
+	//
+	// ⛔ Load-bearing on the write path, not only in discovery. A custom resource
+	// is forwarded upstream with the tenant prefix on its group, which is what
+	// makes it the tenant's; a shared group has no prefix upstream either, so
+	// prefixing it addresses a group that does not exist and every request 404s.
+	IsSharedGroup func(group string) bool
+
 	IsConnecter bool
 
 	// TypeConverter reads an object against its schema, which is what lets a

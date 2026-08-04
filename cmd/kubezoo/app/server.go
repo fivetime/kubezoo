@@ -687,6 +687,14 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// tenant's own object first and fall back to these numbers, so a storage
 	// without the lister could only ever enforce the platform default and would
 	// silently ignore a raised limit.
+	// ⛔ The snapshot class check, and the shared-group answer, are given to EVERY
+	// storage rather than only to snapshot ones -- because a custom resource's
+	// storage is built in customresource_handler.go, which does not know which
+	// group it is building for until it has the CRD. Restricting either of these
+	// with a group check here would compile, run, and enforce nothing on the one
+	// path that needs them: the same trap the MaxCRDs comment below records.
+	config.PublishedSnapshotClasses = c.publishedSnapshotClasses
+	config.IsSharedGroup = sharedCRDGroup
 	config.Tenants = c.tenants
 	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
 		config.MaxNamespaces = c.maxNamespacesPerTenant

@@ -371,6 +371,7 @@ func (r *crdHandler) serveResource(w http.ResponseWriter, req *http.Request, req
 		Resource:         requestScope.Resource.Resource,
 		NamespaceScoped:  crdInfo.spec.Scope == apiextensionsv1.NamespaceScoped,
 		IsCustomResource: true,
+		IsSharedGroup:    sharedCRDGroup,
 		NewFunc:          storage.NewFunc,
 		NewListFunc:      storage.NewListFunc,
 	}
@@ -436,6 +437,7 @@ func (r *crdHandler) serveStatus(w http.ResponseWriter, req *http.Request, reque
 		Subresource:      "status",
 		NamespaceScoped:  crdInfo.spec.Scope == apiextensionsv1.NamespaceScoped,
 		IsCustomResource: true,
+		IsSharedGroup:    sharedCRDGroup,
 		NewFunc:          storage.New,
 	}
 	r.upstreamConfig.ApplyToStorage(config)
@@ -473,6 +475,7 @@ func (r *crdHandler) serveScale(w http.ResponseWriter, req *http.Request, reques
 		Subresource:      "scale",
 		NamespaceScoped:  crdInfo.spec.Scope == apiextensionsv1.NamespaceScoped,
 		IsCustomResource: true,
+		IsSharedGroup:    sharedCRDGroup,
 		NewFunc:          storage.New,
 	}
 	r.upstreamConfig.ApplyToStorage(config)
@@ -1196,11 +1199,9 @@ func (r *crdHandler) getTenantCRD(ctx context.Context, name string) (*apiextensi
 	// exposes are declared separately, and the namespaced ones are prefixed like
 	// any other namespaced object. What this list decides is only whether the
 	// group is addressable at all.
-	klog.V(0).Infof("DBG getTenantCRD name=%q shared=%v", name, sharedCRD(name))
 	if sharedCRD(name) {
 		crd, err := r.crdLister.Get(name)
 		if err != nil {
-			klog.V(0).Infof("DBG shared lister miss %q: %v", name, err)
 			return nil, err
 		}
 		return crd, nil
