@@ -185,16 +185,28 @@ GPU,**必须先打这个标签**。
 ⚠️ **不给不损失能力,这是实测的**:租户经 kubezoo **真建 PVC、真动态供给、真绑定、真挂进 Pod
 并读写**,全程不需要上面任何一个(`verify.sh` 的 CSI 段 12 条断言)。
 
-⛔ **`VolumeSnapshot` 目前给不了,原因是结构性的,不是没做。**
-它是 CRD(`snapshot.storage.k8s.io`),而 kubezoo 给租户的 CRD **一律加租户前缀到 API 组上**
-⇒ 租户自己装的快照 CRD 变成 `<租户ID>-snapshot.storage.k8s.io`,
-而平台的 snapshot-controller 盯的是原组名,**永远看不见租户的快照对象** ——
-装得上、建得了、**永远不会被调谐**。
-⇒ 要给租户快照,只能走"系统 CRD 共享"那条路(见 `TODO-kaaas.md` §W,当时决定
-**先不实现,触发条件是出现第一个真实消费者**)。**VolumeSnapshot 就是那个消费者。**
-⚠️ 那一条当年被推迟的理由在这里原样成立:平台的 snapshot-controller 用**平台凭据**调谐
-**租户写的 spec**(`spec.source.persistentVolumeClaimName` 指向租户 namespace)⇒ confused deputy,
-**必须针对这个具体 operator 做审查**,不能泛泛开一个"共享 CRD"机制了事。
+⚠️ **`VolumeSnapshot` 今天给不了,但那是"还没做",不是"做不到"。**
+
+⛔ **这里先纠正一个说法。** 曾写过"结构性给不了:快照 CRD 会被加上租户前缀,平台
+snapshot-controller 永远看不见" —— 那只在**租户自己装 CRD** 时成立。
+平台提供 Ceph 时,**快照 CRD 由平台装**,组名就是 `snapshot.storage.k8s.io`,
+根本不走加前缀那条路。真正的拦路点是:kubezoo 判定一个 CRD 属于哪个租户**只看名字前缀**
+(`util.ListCRDsForTenant` → `UpstreamObjectBelongsToTenant`),平台 CRD 不带前缀
+⇒ 不属于任何租户 ⇒ 租户看不见。**这是缺一个功能,不是缺一条可能性。**
+
+三个对象各自的形状(做之前先看清楚,不要按"都是 CRD"一概而论):
+
+| 对象 | 作用域 | 要怎么处理 |
+|---|---|---|
+| `VolumeSnapshot` | **命名空间级** | 按普通命名空间资源前缀 namespace。`spec.source.persistentVolumeClaimName` 是**同 namespace 内的名字**,落到 `<租户ID>-default` 后解析到租户自己的 PVC ⇒ **这个字段没有跨租户可达性** |
+| `VolumeSnapshotClass` | 集群级、平台所有 | **第五个发布类**,和 StorageClass 完全同构 |
+| `VolumeSnapshotContent` | 集群级,控制器建 `snapcontent-<uid>` | ⭐ **和动态供给的 PV 同一形状**:上游直接建、不带租户前缀。要么不提供给租户(如动态供给下的 PV),要么套用 `pkg/convert/pvc.go` 那条"无法归属就原样返回"的规则 |
+
+⛔ **真正需要设计的只剩一处,而且它和 PV 那次的跨租户逃逸同源**:租户建**预置(pre-provisioned)**
+快照时,`spec.source.volumeSnapshotContentRef` 指向**别的租户的** VolumeSnapshotContent。
+上游可能有双向绑定校验(content 的 `spec.volumeSnapshotRef` 要指回来),
+但 **PV 那次的教训正是"按同构推是错的"** —— 必须去 external-snapshotter 源码查实,
+不能假设。见任务 #104。
 
 ⛔ **`READY=<none>` 不是"还在同步",是"这条策略什么都没在做"。**
 实测发生过:一条我们自己的 VAP 拦住了 Kyverno 注册自身 webhook 所需的写入,

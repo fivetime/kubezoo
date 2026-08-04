@@ -3649,56 +3649,6 @@ for _ in $(seq 30); do
 done
 
 echo
-echo "== a request into a namespace the tenant does not have reads as NotFound =="
-# Upstream refuses it with Forbidden, because a namespace that does not exist has
-# no RoleBinding, while a cluster-admin doing the same gets NotFound. Tools read
-# the difference as fatal versus routine: helm checks whether a chart's resources
-# already exist before creating the namespace, and on Forbidden it gives up
-# without ever attempting the create.
-missing_out=$($T get configmap nothing-here -n does-not-exist 2>&1)
-if grep -q NotFound <<<"$missing_out"; then
-  ok "a missing namespace reads as NotFound, not Forbidden"
-else
-  bad "missing-namespace error" "got: $(tr '\n' ' ' <<<"$missing_out" | cut -c1-140)"
-fi
-# And a real permission problem in a namespace that does exist must still say so,
-# or this reshaping is hiding failures instead of correcting one.
-#
-# ⚠️ This runs last, and deliberately, and it has to stay last. Producing a
-# genuine denial means taking the tenant's RoleBinding away, and the authorizer
-# serves a stale yes for a moment after the delete and a stale no for a moment
-# after the controller puts it back -- measured at 29s to be put back. Anything
-# scheduled after this runs inside a window where the tenant has no rights in its
-# own namespace, and fails on work that has nothing to do with it. Six sections
-# were once appended below this one and two of them failed for exactly that
-# reason, with error messages -- AlreadyExists, Forbidden -- that pointed
-# anywhere but here.
-$K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
-# ⚠️ A budget, not a fixed sleep. Deleting the binding does not deny anything
-# until the authorizer's RBAC cache catches up, and how long that takes depends
-# on what else the apiserver is doing -- measured at under a second on an idle
-# tenant and past two seconds at the end of this run. A `sleep 2` here passed or
-# failed on load, which is the worst kind of assertion: it reported a product
-# defect when the product was fine, and would have reported nothing if the
-# reshaping really had gone too wide on a quiet day. The upper bound is the
-# controller putting the binding back, measured at 29s.
-#
-# Not a configmap: the tenant's own ClusterRoleBinding grants those across its
-# namespaces now, so withdrawing the binding kubezoo issues no longer takes them
-# away -- which is correct, and would make this measure nothing.
-denied_out=""
-for _ in $(seq 20); do
-  denied_out=$($T get serviceaccount default 2>&1)
-  grep -q -i forbidden <<<"$denied_out" && break
-  sleep 1
-done
-if grep -q -i forbidden <<<"$denied_out"; then
-  ok "a genuine denial in an existing namespace is still Forbidden"
-else
-  bad "denial reshaping is too wide" "got: $(tr '\n' ' ' <<<"$denied_out" | cut -c1-140)"
-fi
-
-echo
 echo "== storage a tenant can actually use: a real CSI driver, end to end =="
 # ⭐ LAST, and that placement is the hostage rule: this section relabels a shared
 # StorageClass, so anything after it would inherit whichever state it left
@@ -3754,7 +3704,10 @@ case " $csi_seen " in
   *" $CSI_SC "*) bad "an unpublished class is hidden" "the tenant sees: $csi_seen" ;;
   *)             ok  "an unpublished CSI class is not in the tenant's list" ;;
 esac
-expect_denied "a PVC naming an unpublished class" "publish\|forbidden\|not published" -- \
+# ⚠️ Matched on the words the refusal actually uses. An assertion that only
+# checks "was it refused" cannot tell the class check apart from anything else
+# that might refuse the same write -- quota, policy, a typo in the manifest.
+expect_denied "a PVC naming an unpublished class" "no storage class .* is available" -- \
   $T apply -f <(csi_pvc csi-refused)
 
 # --- published: binds for real, mounts for real ------------------------------
@@ -3812,7 +3765,11 @@ sleep 5
 $T get storageclass "$CSI_SC" >/dev/null 2>&1 \
   && ok "a retired class is still VISIBLE, so an existing reference stays explicable" \
   || bad "retired class visibility" "the tenant can no longer see the class its own claim names"
-expect_denied "a NEW claim on a retired class" "publish\|forbidden\|deprecat" -- \
+# ⭐ "is being retired" specifically, not merely "refused": the retired state has
+# to be distinguishable from the unpublished one, or this assertion would still
+# pass if the label were simply removed -- which is a different decision with a
+# different meaning, and the reason the two states exist separately.
+expect_denied "a NEW claim on a retired class" "is being retired" -- \
   $T apply -f <(csi_pvc csi-after-retire)
 
 # ⭐ The load-bearing half, and the easy one to fake: the SAME claim that existed
@@ -3856,6 +3813,71 @@ done
 # Put the class back the way up.sh leaves it.
 $K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1
 fi
+
+echo
+echo "== a request into a namespace the tenant does not have reads as NotFound =="
+# Upstream refuses it with Forbidden, because a namespace that does not exist has
+# no RoleBinding, while a cluster-admin doing the same gets NotFound. Tools read
+# the difference as fatal versus routine: helm checks whether a chart's resources
+# already exist before creating the namespace, and on Forbidden it gives up
+# without ever attempting the create.
+missing_out=$($T get configmap nothing-here -n does-not-exist 2>&1)
+if grep -q NotFound <<<"$missing_out"; then
+  ok "a missing namespace reads as NotFound, not Forbidden"
+else
+  bad "missing-namespace error" "got: $(tr '\n' ' ' <<<"$missing_out" | cut -c1-140)"
+fi
+# And a real permission problem in a namespace that does exist must still say so,
+# or this reshaping is hiding failures instead of correcting one.
+#
+# ⚠️ This runs last, and deliberately, and it has to stay last. Producing a
+# genuine denial means taking the tenant's RoleBinding away, and the authorizer
+# serves a stale yes for a moment after the delete and a stale no for a moment
+# after the controller puts it back -- measured at 29s to be put back. Anything
+# scheduled after this runs inside a window where the tenant has no rights in its
+# own namespace, and fails on work that has nothing to do with it. Six sections
+# were once appended below this one and two of them failed for exactly that
+# reason, with error messages -- AlreadyExists, Forbidden -- that pointed
+# anywhere but here.
+$K -n "$NS" delete rolebinding kubezoo:tenant-admin >/dev/null 2>&1
+# ⚠️ A budget, not a fixed sleep. Deleting the binding does not deny anything
+# until the authorizer's RBAC cache catches up, and how long that takes depends
+# on what else the apiserver is doing -- measured at under a second on an idle
+# tenant and past two seconds at the end of this run. A `sleep 2` here passed or
+# failed on load, which is the worst kind of assertion: it reported a product
+# defect when the product was fine, and would have reported nothing if the
+# reshaping really had gone too wide on a quiet day. The upper bound is the
+# controller putting the binding back, measured at 29s.
+#
+# Not a configmap: the tenant's own ClusterRoleBinding grants those across its
+# namespaces now, so withdrawing the binding kubezoo issues no longer takes them
+# away -- which is correct, and would make this measure nothing.
+denied_out=""
+for _ in $(seq 20); do
+  denied_out=$($T get serviceaccount default 2>&1)
+  grep -q -i forbidden <<<"$denied_out" && break
+  sleep 1
+done
+if grep -q -i forbidden <<<"$denied_out"; then
+  ok "a genuine denial in an existing namespace is still Forbidden"
+else
+  bad "denial reshaping is too wide" "got: $(tr '\n' ' ' <<<"$denied_out" | cut -c1-140)"
+fi
+
+# ⭐ And give the tenant its rights back before returning, rather than leaving
+# "this section must stay last" as a convention someone has to read.
+#
+# ⚠️ I appended a section below this one anyway, and got exactly what the comment
+# above predicts: a Forbidden that points at storage. A comment that has already
+# been ignored once is not a guard. Waiting here turns the ordering requirement
+# into a mechanism -- the section cleans up after itself, so appending below it
+# becomes merely slow rather than wrong.
+for _ in $(seq 40); do
+  $T get serviceaccount default >/dev/null 2>&1 && break
+  sleep 1
+done
+$T get serviceaccount default >/dev/null 2>&1 \
+  || echo "  NOTE the tenant's RoleBinding has not come back; anything after this may fail for that reason"
 
 echo
 echo "== cleanup =="
