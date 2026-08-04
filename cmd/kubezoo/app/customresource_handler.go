@@ -1196,9 +1196,11 @@ func (r *crdHandler) getTenantCRD(ctx context.Context, name string) (*apiextensi
 	// exposes are declared separately, and the namespaced ones are prefixed like
 	// any other namespaced object. What this list decides is only whether the
 	// group is addressable at all.
+	klog.V(0).Infof("DBG getTenantCRD name=%q shared=%v", name, sharedCRD(name))
 	if sharedCRD(name) {
 		crd, err := r.crdLister.Get(name)
 		if err != nil {
+			klog.V(0).Infof("DBG shared lister miss %q: %v", name, err)
 			return nil, err
 		}
 		return crd, nil
