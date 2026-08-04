@@ -132,14 +132,33 @@ func TestWebhookBackwardRestoresTheNamespace(t *testing.T) {
 	}
 }
 
-// TestWebhookBackwardRejectsAForeignNamespace guards the read path: an upstream
-// object naming another tenant's namespace should be refused rather than trimmed
-// into something that looks like it belongs to this tenant.
-func TestWebhookBackwardRejectsAForeignNamespace(t *testing.T) {
+// TestWebhookBackwardDoesNotDisguiseAForeignNamespace guards what the previous
+// version of this test SAID it guarded: an upstream object naming another
+// tenant's namespace must not be trimmed into something that looks like it
+// belongs to this one.
+//
+// ⚠️ It used to assert a REFUSAL instead, which is a different thing and a worse
+// one. Refusing fails the whole object, and one failed object fails the whole
+// list -- a tenant with a single misconfigured webhook configuration could see
+// none of its own. The disguising it feared does not happen either way:
+// trimIfAttributable only strips a prefix that matches, so a foreign namespace
+// comes back verbatim and reads as what it is.
+//
+// ⭐ And such an object can only be the platform's doing: Forward prefixes with
+// the REQUESTING tenant's id unconditionally, and the read path already hides
+// cluster-scoped objects whose name lacks that prefix. A tenant seeing that its
+// own webhook points somewhere it cannot reach is better served than a tenant
+// whose list simply errors.
+func TestWebhookBackwardDoesNotDisguiseAForeignNamespace(t *testing.T) {
 	config := validatingConfig(serviceRef("222222-default"), nil, nil)
 
-	if _, err := NewWebhookConfigurationTransformer().Backward(config, testTenant); err == nil {
-		t.Error("Backward accepted a clientConfig pointing at another tenant's namespace")
+	out, err := NewWebhookConfigurationTransformer().Backward(config, testTenant)
+	if err != nil {
+		t.Fatalf("Backward refused instead of showing it: %v", err)
+	}
+	got := out.(*admissioninternal.ValidatingWebhookConfiguration).Webhooks[0].ClientConfig.Service.Namespace
+	if got != "222222-default" {
+		t.Errorf("a foreign namespace came back as %q; it must not be disguised as this tenant's", got)
 	}
 }
 

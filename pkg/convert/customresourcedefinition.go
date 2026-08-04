@@ -127,11 +127,10 @@ func backwardCRDConversionWebhook(crd *crdinternal.CustomResourceDefinition, ten
 	if clientConfig == nil || clientConfig.Service == nil || len(clientConfig.Service.Namespace) == 0 {
 		return nil
 	}
-	if !strings.HasPrefix(clientConfig.Service.Namespace, tenantID+"-") {
-		return errors.Errorf("crd %s: conversion webhook points at namespace %s, which does not "+
-			"belong to tenant %s", crd.Name, clientConfig.Service.Namespace, tenantID)
-	}
-	clientConfig.Service.Namespace = util.TrimTenantIDPrefix(tenantID, clientConfig.Service.Namespace)
+	// Same as the admission webhook's: the forward direction prefixes
+	// unconditionally, so this can only fail for an object kubezoo did not write --
+	// and failing it takes out the tenant's whole CRD list. See trimIfAttributable.
+	clientConfig.Service.Namespace = trimIfAttributable(clientConfig.Service.Namespace, tenantID)
 	return nil
 }
 

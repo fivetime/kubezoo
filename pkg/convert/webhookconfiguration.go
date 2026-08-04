@@ -17,8 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"strings"
-
 	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -150,11 +148,14 @@ func backwardWebhookClientConfig(clientConfig *admissioninternal.WebhookClientCo
 	if clientConfig.Service == nil || len(clientConfig.Service.Namespace) == 0 {
 		return nil
 	}
-	if !strings.HasPrefix(clientConfig.Service.Namespace, tenantID+"-") {
-		return errors.Errorf("webhook %s: clientConfig points at namespace %s, which does not belong to tenant %s",
-			webhookName, clientConfig.Service.Namespace, tenantID)
-	}
-	clientConfig.Service.Namespace = util.TrimTenantIDPrefix(tenantID, clientConfig.Service.Namespace)
+	// ⚠️ Refusing here failed the whole object, and so the whole list -- a tenant
+	// with one such webhook configuration could see none of them. The forward
+	// direction is where a bad namespace has to be refused, and it is: it gets the
+	// tenant's prefix put on unconditionally, so it can only ever name the
+	// tenant's own. Reading one back that does not carry the prefix means
+	// something outside kubezoo wrote it; showing it as it is beats hiding
+	// everything. See trimIfAttributable.
+	clientConfig.Service.Namespace = trimIfAttributable(clientConfig.Service.Namespace, tenantID)
 	return nil
 }
 

@@ -494,6 +494,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseUnpublishedVolumeAttributesClass(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseExternalNameService(obj); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -723,6 +726,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	// nil: nothing is stored, so every address named here is newly claimed.
+	if err := tp.refuseExternalNameService(obj); err != nil {
+		return nil, err
+	}
 	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
 		return nil, err
 	}
@@ -1863,6 +1869,13 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		if err := tp.refuseUnpublishedVolumeAttributesClass(updated, original); err != nil {
 			return nil, false, err
 		}
+		// ⭐ PATCH too, and the parity test named exactly this attack: create an
+		// ordinary Service, write the webhook against it, then patch the type to
+		// ExternalName. Nothing revalidates the webhook -- the resolver runs at
+		// call time -- so this write is the last chance to refuse it.
+		if err := tp.refuseExternalNameService(updated); err != nil {
+			return nil, false, err
+		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
 			return nil, false, err
 		}
@@ -1929,4 +1942,60 @@ func (tp *tenantProxy) upstreamGroupVersion(tenantID string) schema.GroupVersion
 	}
 	gv.Group = util.AddTenantIDPrefix(tenantID, gv.Group)
 	return gv
+}
+
+// refuseExternalNameService stops a tenant reconstituting the one webhook
+// capability kubezoo refuses outright.
+//
+// ⛔ MEASURED AGAINST SOURCE, THREE PLACES. pkg/convert/webhookconfiguration.go
+// refuses clientConfig.url, and says why: "a URL cannot be confined to the
+// tenant; use clientConfig.service to name a service in one of your namespaces".
+// That reasoning has an unstated premise -- that a Service in the tenant's own
+// namespace can only reach the tenant's own pods. True of ClusterIP. FALSE of
+// ExternalName: upstream's ResolveCluster
+// (staging/src/k8s.io/apiserver/pkg/util/proxy/proxy.go) has
+//
+//     case svc.Spec.Type == v1.ServiceTypeExternalName:
+//         return &url.URL{Scheme: "https", Host: JoinHostPort(svc.Spec.ExternalName, port)}
+//
+// so a tenant writes an ExternalName Service in its own namespace, points a
+// webhook's clientConfig.service at it -- the APPROVED path -- and the apiserver
+// dials an arbitrary host and port FROM THE CONTROL PLANE'S NETWORK NAMESPACE,
+// carrying an AdmissionReview. No tenant NetworkPolicy and no data-plane
+// construct reaches that connection.
+//
+// ⚠️ Not gated on --enable-aggregator-routing. That flag chooses between two
+// resolvers and BOTH reach this: the default NewClusterIPServiceResolver calls
+// ResolveCluster, which is the function above.
+//
+// ⚠️ TLS is not a container either. The caBundle is the tenant's own and the
+// ServerName is <svc>.<tid>-<ns>.svc, a name whose CA the tenant controls, so it
+// can present a matching certificate on any host it likes.
+//
+// ⭐ Refused on the SERVICE rather than in the webhook path, and that is the
+// whole design decision. Checking it where the webhook is written leaves a
+// timing hole: create an ordinary Service, write the webhook against it, then
+// patch the Service to ExternalName -- and nothing revalidates the webhook,
+// because the resolver runs at call time. Closing that hole means checking the
+// SERVICE write, which is this. The precise fix and the blunt one converge.
+//
+// ⚠️ The cost, stated rather than hidden: a tenant loses ExternalName entirely,
+// including the legitimate use of aliasing an external name into cluster DNS. It
+// can still use that external name directly. Giving it back needs a way to keep
+// the control plane from resolving it -- which is upstream's behaviour, not
+// kubezoo's -- so it is not a label away.
+func (tp *tenantProxy) refuseExternalNameService(obj runtime.Object) error {
+	svc, ok := obj.(*core.Service)
+	if !ok || svc.Spec.Type != core.ServiceTypeExternalName {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Service"}, svc.Name,
+		field.ErrorList{field.Forbidden(
+			field.NewPath("spec", "type"),
+			"an ExternalName service is a URL the control plane will follow: an admission "+
+				"webhook naming it makes the apiserver connect to that host from its own "+
+				"network, which is the reason clientConfig.url is refused. Point your "+
+				"workloads at the external name directly instead.",
+		)})
 }

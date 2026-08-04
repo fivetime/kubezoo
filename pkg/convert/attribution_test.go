@@ -60,7 +60,20 @@ func TestNoBackwardRefusesAnUnattributableReference(t *testing.T) {
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Name.Name != "Backward" || fn.Body == nil {
+			if !ok || fn.Body == nil {
+				continue
+			}
+			// ⛔ Not only methods literally called Backward. This walked those alone,
+			// and backwardWebhookClientConfig -- a plain function that Backward calls
+			// three lines later -- refused an unattributable namespace the whole time.
+			// The same blind spot as TestEveryWritePathRunsTheSameGuards reading one
+			// file: the check's own COVERAGE was never checked, twice in one day.
+			//
+			// ⚠️ Matched by name rather than by following the call graph, on purpose.
+			// A call-graph walk would also drag in Forward's helpers, where refusing is
+			// correct -- a tenant writing a bad reference SHOULD be told so. It is only
+			// the READ direction where refusing costs a tenant sight of everything.
+			if fn.Name.Name != "Backward" && !strings.HasPrefix(fn.Name.Name, "backward") {
 				continue
 			}
 			checked++
@@ -74,7 +87,7 @@ func TestNoBackwardRefusesAnUnattributableReference(t *testing.T) {
 					return false
 				}
 				ifStmt, ok := n.(*ast.IfStmt)
-				if !ok || !guardsOnTenantPrefix(ifStmt.Cond) || !returnsError(ifStmt.Body) {
+				if !ok || !guardsOnTenantPrefix(ifStmt.Cond) || !returnsError(ifStmt.Body, fn) {
 					return true
 				}
 				t.Errorf("%s: %s refuses a reference that does not carry the tenant prefix.\n"+
@@ -88,8 +101,8 @@ func TestNoBackwardRefusesAnUnattributableReference(t *testing.T) {
 	}
 	// ⚠️ A walk that finds no Backward at all would pass in silence, which is the
 	// failure this test exists to prevent.
-	if checked < 8 {
-		t.Fatalf("only %d Backward methods were walked; the parse is not finding them", checked)
+	if checked < 10 {
+		t.Fatalf("only %d backward-direction functions were walked; the parse is not finding them", checked)
 	}
 }
 
@@ -127,19 +140,41 @@ func mentionsTenantID(e ast.Expr) bool {
 	return found
 }
 
-// returnsError reports whether a block returns a non-nil error from a Backward,
-// which returns (runtime.Object, error) -- two results, the last one the error.
+// returnsError reports whether a block returns a non-nil error from fn.
 //
-// ⚠️ The result count is part of the test, not decoration: without it a closure
-// returning one string counted as an error return.
-func returnsError(body *ast.BlockStmt) bool {
+// ⚠️ Decided from fn's SIGNATURE, not from a fixed result count. A first version
+// required exactly two results, because a Backward returns (runtime.Object,
+// error) -- and that quietly stopped seeing helpers that return an error alone,
+// which is what backwardWebhookClientConfig is. Requiring two results fixed a
+// false positive and bought a false negative, which is the same trade
+// TestEveryWritePathRunsTheSameGuards went through: direct calls only were too
+// noisy, the full closure too quiet, and neither said anything true.
+func returnsError(body *ast.BlockStmt, fn *ast.FuncDecl) bool {
+	results := fn.Type.Results
+	if results == nil || len(results.List) == 0 {
+		return false
+	}
+	last := results.List[len(results.List)-1]
+	id, ok := last.Type.(*ast.Ident)
+	if !ok || id.Name != "error" {
+		return false
+	}
+	want := 0
+	for _, f := range results.List {
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		want += n
+	}
+
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if _, isFunc := n.(*ast.FuncLit); isFunc {
 			return false
 		}
 		ret, ok := n.(*ast.ReturnStmt)
-		if !ok || len(ret.Results) != 2 {
+		if !ok || len(ret.Results) != want {
 			return true
 		}
 		last := ret.Results[len(ret.Results)-1]
