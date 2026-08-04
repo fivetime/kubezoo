@@ -17,8 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"strings"
-
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	internal "k8s.io/kubernetes/pkg/apis/core"
@@ -202,11 +200,13 @@ func (v *PVTranformer) Backward(obj runtime.Object, tenantID string) (runtime.Ob
 		return nil, errors.Errorf("fail to assert the runtime object to the internal version of persistentvolume")
 	}
 
+	// ⚠️ A claimRef the tenant did not write -- an operator pre-binding a volume,
+	// anything created upstream -- used to fail the whole PersistentVolume list
+	// rather than the one object. refuseUnreservedPV is what confines a tenant's
+	// volumes, and it runs on the WRITE path; nothing here is load-bearing for
+	// that. See trimIfAttributable.
 	if pv.Spec.ClaimRef != nil && len(pv.Spec.ClaimRef.Namespace) > 0 {
-		if !strings.HasPrefix(pv.Spec.ClaimRef.Namespace, tenantID) {
-			return nil, errors.Errorf("invalid namespace %s in pv %s claim ref, tenant id is %s", pv.Spec.ClaimRef.Namespace, pv.Name, tenantID)
-		}
-		pv.Spec.ClaimRef.Namespace = util.TrimTenantIDPrefix(tenantID, pv.Spec.ClaimRef.Namespace)
+		pv.Spec.ClaimRef.Namespace = trimIfAttributable(pv.Spec.ClaimRef.Namespace, tenantID)
 	}
 
 	return pv, nil

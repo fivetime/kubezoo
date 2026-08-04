@@ -17,8 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"strings"
-
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	rbacinternal "k8s.io/kubernetes/pkg/apis/rbac"
@@ -63,11 +61,12 @@ func (t *ClusterRoleBindingTransformer) Backward(obj runtime.Object, tenantID st
 	if err := transformSubjectList(crb.Subjects, tenantID, transformSubjectToTenant); err != nil {
 		return nil, errors.WithMessagef(err, "failed to transform subjects to tenant for clusterRoleBinding %s", crb.Name)
 	}
+	// ⚠️ This erred while its twin in rolebinding.go had already been fixed, with
+	// the reason written out beside it. A fix does not spread by itself, and two
+	// convertors for the same concept behaving differently is the bug before it
+	// is anything else. See trimIfAttributable.
 	if crb.RoleRef.Kind == "ClusterRole" {
-		if !strings.HasPrefix(crb.RoleRef.Name, tenantID) {
-			return nil, errors.Errorf("invalid roleRef name %s in clusterRoleBinding %s, tenant id is %s", crb.RoleRef.Name, crb.Name, tenantID)
-		}
-		crb.RoleRef.Name = util.TrimTenantIDPrefix(tenantID, crb.RoleRef.Name)
+		crb.RoleRef.Name = trimIfAttributable(crb.RoleRef.Name, tenantID)
 	}
 	return crb, nil
 }

@@ -17,12 +17,8 @@ limitations under the License.
 package convert
 
 import (
-	"strings"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	internal "k8s.io/kubernetes/pkg/apis/core"
-
-	"github.com/pkg/errors"
 
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
@@ -98,25 +94,24 @@ func (t *objectReferenceTransformer) Backward(or *internal.ObjectReference, tena
 		}
 		return or, nil
 	}
+	// ⚠️ An Event names whatever it is about, and controllers write events about
+	// objects a tenant never touched. Failing the conversion took out the whole
+	// event list, which is the first thing anyone reads when something is wrong.
+	// See trimIfAttributable.
 	if namespaced && len(or.Namespace) != 0 {
-		if !strings.HasPrefix(or.Namespace, tenantID) {
-			return nil, errors.Errorf("objectReference: %+v, namespace: %s must have tenantID prefix: %s", or, or.Namespace, tenantID)
-		}
-		or.Namespace = util.TrimTenantIDPrefix(tenantID, or.Namespace)
+		or.Namespace = trimIfAttributable(or.Namespace, tenantID)
 	}
 
 	if !namespaced && len(or.Name) != 0 {
-		if !strings.HasPrefix(or.Name, tenantID) {
-			return nil, errors.Errorf("objectReference: %+v, name: %s must have tenantID prefix: %s", or, or.Name, tenantID)
-		}
-		or.Name = util.TrimTenantIDPrefix(tenantID, or.Name)
+		or.Name = trimIfAttributable(or.Name, tenantID)
 	}
 
+	// ⚠️ Missed by hand and caught by the guard. An event about an object in a
+	// SHARED platform CRD group -- a snapshot -- carries an apiVersion with no
+	// tenant prefix by design, and this would have failed every event that
+	// mentioned one.
 	if customResourceGroup && len(or.APIVersion) != 0 {
-		if !strings.HasPrefix(or.APIVersion, tenantID) {
-			return nil, errors.Errorf("objectReference: %+v, apiVersion: %s must have tenantID prefix: %s", or, or.Name, tenantID)
-		}
-		or.APIVersion = util.TrimTenantIDPrefix(tenantID, or.APIVersion)
+		or.APIVersion = trimIfAttributable(or.APIVersion, tenantID)
 	}
 	return or, nil
 }

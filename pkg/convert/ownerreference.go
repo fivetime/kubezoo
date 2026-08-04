@@ -17,9 +17,6 @@ limitations under the License.
 package convert
 
 import (
-	"fmt"
-	"strings"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -90,11 +87,12 @@ func (t *ownerReferenceTransformer) Backward(or *metav1.OwnerReference, tenantID
 		// }
 		or.Name = util.TrimTenantIDPrefix(tenantID, or.Name)
 	}
+	// ⚠️ The cluster-scoped name check above was commented out by whoever hit this
+	// first; the apiVersion one was left. A SHARED platform CRD group carries no
+	// prefix by design, so an owner reference into one -- a snapshot, say -- would
+	// have failed every object that had it. See trimIfAttributable.
 	if customResourceGroup {
-		if !strings.HasPrefix(or.APIVersion, tenantID) {
-			return nil, fmt.Errorf("ownerReference: %+v, apiVersion: %s must have tenantID prefix: %s", or, or.Name, tenantID)
-		}
-		or.APIVersion = util.TrimTenantIDPrefix(tenantID, or.APIVersion)
+		or.APIVersion = trimIfAttributable(or.APIVersion, tenantID)
 	}
 	return or, nil
 }

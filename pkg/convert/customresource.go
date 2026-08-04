@@ -90,10 +90,10 @@ func (t *CustomResourceTransformer) Backward(obj runtime.Object, tenantID string
 	if t.shared(groupVersion) {
 		return u, nil
 	}
-	if !strings.HasPrefix(groupVersion, tenantID) {
-		return nil, errors.Errorf("invalid apiVersion %s in cr %s, tenant id is %s", groupVersion, u.GetName(), tenantID)
-	}
-	u.SetAPIVersion(util.TrimTenantIDPrefix(tenantID, groupVersion))
+	// ⚠️ This refused instead of trimming, which failed the whole object and so
+	// the whole list. The managed-field rewrite below already had the right rule
+	// written into it, three lines away -- and the rule did not carry across.
+	u.SetAPIVersion(trimIfAttributable(groupVersion, tenantID))
 	rewriteManagedFieldVersions(u, func(version string) string {
 		if !strings.HasPrefix(version, tenantID) {
 			// Written before the versions were rewritten, or by something that
