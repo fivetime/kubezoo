@@ -101,6 +101,15 @@ type StorageConfig struct {
 	// changes. See tenantProxy.refuseUnpublishedVolumeAttributesClass.
 	PublishedVolumeAttributesClasses publishedclass.Set
 
+	// PublishedDeviceClasses lets a guard refuse a ResourceClaim that names a
+	// DeviceClass the platform has not published.
+	//
+	// ⚠️ NOT PublishedClasses. That field CHANGES WHAT THE STORAGE IS -- a
+	// read-only view of the platform's own objects -- and setting it here would
+	// replace the ResourceClaim endpoint with a list of device classes. It
+	// compiles.
+	PublishedDeviceClasses publishedclass.Set
+
 	// Tenants reads the Tenant objects, so that a per-tenant capacity can be
 	// raised by editing one object rather than by restarting the gateway.
 	//

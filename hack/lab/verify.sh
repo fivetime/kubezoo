@@ -3236,6 +3236,104 @@ fi
 $T delete service extip-probe >/dev/null 2>&1
 
 echo
+echo "== a tenant asks for DEVICES by class, and only the classes it was offered =="
+# ⛔ A DeviceClass selects hardware -- which GPUs, at which tier -- and a
+# ResourceClaim reaches it BY NAME from inside a tenant's namespace. Same shape
+# as storageClassName, ingressClassName and volumeAttributesClassName, all three
+# of which arrived as "the field is passed through, so naming the platform's own
+# object simply works" and were fixed afterwards. This one was wired as the API
+# group was opened, so there is no version in which it works.
+$K apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: lab-offered
+  labels: {deviceclass.kubezoo.io/published: "true"}
+spec: {}
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata: {name: lab-withheld}
+spec: {}
+EOF
+dc_seen=""
+for _ in $(seq 20); do
+  dc_seen=$($T get deviceclasses --no-headers 2>&1)
+  grep -q lab-offered <<<"$dc_seen" && break
+  sleep 2
+done
+if grep -q "lab-offered" <<<"$dc_seen"; then
+  ok "a published device class is discoverable by the tenant"
+else
+  bad "a published device class is discoverable" "$(tr '\n' ' ' <<<"$dc_seen" | cut -c1-160)"
+fi
+# ⚠️ The control. Without it the assertion above passes just as well if every
+# device class were visible.
+if grep -q "lab-withheld" <<<"$dc_seen"; then
+  bad "an unpublished device class stays invisible" \
+      "the tenant can enumerate hardware tiers it was not offered"
+else
+  ok "while one the platform did not publish stays invisible"
+fi
+
+expect_allowed "a tenant may claim a device of a class it was offered" \
+  $T -n default apply -f - <<EOF
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata: {name: offered-claim}
+spec:
+  devices:
+    requests:
+    - name: d
+      exactly: {deviceClassName: lab-offered, allocationMode: ExactCount, count: 1}
+EOF
+
+# ⭐⭐ The claim that matters: naming a class the platform kept is refused, not
+# silently served.
+expect_denied "and may not claim one of a class it was not offered" \
+  "not offered to this tenant" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata: {name: withheld-claim}
+spec:
+  devices:
+    requests:
+    - name: d
+      exactly: {deviceClassName: lab-withheld, allocationMode: ExactCount, count: 1}
+EOF
+
+# ⚠️ firstAvailable is a LIST of alternatives and every entry is a class the
+# claim may end up using. Checking only the first would let an unpublished one
+# through as the fallback -- which is how a tenant would reach for it.
+expect_denied "nor as a fallback among alternatives" \
+  "not offered to this tenant" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata: {name: fallback-claim}
+spec:
+  devices:
+    requests:
+    - name: d
+      firstAvailable:
+      - {name: a, deviceClassName: lab-offered, allocationMode: ExactCount, count: 1}
+      - {name: b, deviceClassName: lab-withheld, allocationMode: ExactCount, count: 1}
+EOF
+
+# ⛔ ResourceSlice is the platform's hardware inventory: spec.nodeName,
+# spec.nodeSelector and the devices of each machine. Nodes were withdrawn from
+# tenants for exactly that, and this is the same thing under another name.
+if $T get resourceslices >/dev/null 2>&1; then
+  bad "a tenant cannot read the platform's device inventory" \
+      "resourceslices is served to tenants -- that is every machine's name and hardware"
+else
+  ok "and cannot read the platform's per-node device inventory at all"
+fi
+$T -n default delete resourceclaim offered-claim >/dev/null 2>&1
+$K delete deviceclass lab-offered lab-withheld >/dev/null 2>&1
+
+echo
 echo "== a tenant cannot open a port on the platform's nodes =="
 # ⛔ A tenant has no node concept: it owns none of the machines, decides where
 # nothing lands, and cannot address one. A port opened on EVERY node is therefore

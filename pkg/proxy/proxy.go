@@ -125,6 +125,9 @@ type tenantProxy struct {
 	// maxCRDs caps how many CustomResourceDefinitions this tenant may own; zero
 	// means no cap.
 	maxCRDs int
+	// publishedDeviceClasses is the set of DRA hardware tiers the platform offers
+	// this tenant; naming any other is refused.
+	publishedDeviceClasses publishedclass.Set
 	// tenants reads the Tenant objects, so a per-tenant cap can be raised by
 	// editing one object instead of restarting the gateway.
 	tenants tenantlister.TenantLister
@@ -225,6 +228,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
 		maxNamespaces:                    config.MaxNamespaces,
 		maxCRDs:                          config.MaxCRDs,
+		publishedDeviceClasses:           config.PublishedDeviceClasses,
 		tenants:                          config.Tenants,
 		convertor:                        config.Convertor,
 		groupVersionKindFunc:             config.GroupVersionKindFunc,
@@ -490,6 +494,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseNodePorts(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseUnpublishedDeviceClass(obj); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refusePlatformQuotaWrite(obj); err != nil {
 		return nil, false, err
 	}
@@ -683,6 +690,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 	// nil for the same reason: on a create there is no port to have kept.
 	if err := tp.refuseNodePorts(obj, nil); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseUnpublishedDeviceClass(obj); err != nil {
 		return nil, err
 	}
 	// ⚠️ Needed on the CREATE path specifically, not only on the update paths.
@@ -1819,6 +1829,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseNodePorts(updated, original); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refuseUnpublishedDeviceClass(updated); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refusePlatformQuotaWrite(updated); err != nil {

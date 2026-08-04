@@ -70,9 +70,24 @@ func NewAdmission(ctx context.Context, client client.Client) (*Admission, error)
 	// time it was deployed.
 	//
 	// Rather than feed it a cluster-wide pod informer it has no other use for,
-	// tell it what kubezoo actually serves. Tenants have no access to
-	// resource.k8s.io at all -- apigroups.go does not expose it -- so there is
-	// no DRA usage to charge anyone for, and disabling it skips the branch.
+	// tell it what to evaluate. Disabling the group skips the branch.
+	//
+	// ⚠️ THE ORIGINAL REASON FOR DISABLING IT NO LONGER HOLDS, and the setting is
+	// kept for a different one. It used to say tenants had no access to
+	// resource.k8s.io at all; apigroups.go now serves ResourceClaim,
+	// ResourceClaimTemplate and a published view of DeviceClass. So there IS
+	// tenant DRA usage.
+	//
+	// ⭐ What is lost by leaving it disabled is DEVICE-LEVEL accounting -- how
+	// many GPUs a tenant holds -- which is what the DRA evaluators compute and
+	// what needs the pod informer. Plain object counts are unaffected: a tenant
+	// quota naming count/resourceclaims.resource.k8s.io is served by the generic
+	// object-count evaluator, which needs none of this.
+	//
+	// ⛔ So a platform selling devices by the unit cannot rely on this component
+	// for it yet. Enabling it means giving the quota component a cluster-wide pod
+	// informer, whose memory is proportional to every pod in the cluster -- a
+	// real cost to weigh when device billing actually exists, rather than now.
 	//
 	// The nil lister func is deliberate and matches upstream: admission measures
 	// the incoming object rather than recomputing usage from a lister.

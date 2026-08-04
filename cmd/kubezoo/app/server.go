@@ -416,6 +416,7 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 				proxyConfig.classInformers.Start(context.Done())
 				proxyConfig.ingressClassInformers.Start(context.Done())
 				proxyConfig.volumeAttributesClassInformers.Start(context.Done())
+				proxyConfig.deviceClassInformers.Start(context.Done())
 				return nil
 			})
 		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("published-class-informers-synced",
@@ -423,7 +424,8 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 				return utilwait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 					return proxyConfig.publishedStorageClasses.HasSynced() &&
 						proxyConfig.publishedIngressClasses.HasSynced() &&
-						proxyConfig.publishedVolumeAttributesClasses.HasSynced(), nil
+						proxyConfig.publishedVolumeAttributesClasses.HasSynced() &&
+						proxyConfig.publishedDeviceClasses.HasSynced(), nil
 				}, context.Done())
 			})
 	}
@@ -607,6 +609,9 @@ type ProxyConfig struct {
 	// read-only view and by the PVC endpoint, which refuses a claim naming one
 	// that is not published.
 	publishedVolumeAttributesClasses publishedclass.Set
+	// publishedDeviceClasses is the fourth: the DRA hardware tiers a platform
+	// offers.
+	publishedDeviceClasses publishedclass.Set
 	// maxNamespacesPerTenant is a ceiling on the fan-out amplifier: a tenant's
 	// cross-namespace list costs one upstream request per namespace it owns.
 	maxNamespacesPerTenant int
@@ -625,6 +630,7 @@ type ProxyConfig struct {
 	classInformers                 informers.SharedInformerFactory
 	ingressClassInformers          informers.SharedInformerFactory
 	volumeAttributesClassInformers informers.SharedInformerFactory
+	deviceClassInformers           informers.SharedInformerFactory
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -646,6 +652,20 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	}
 	if config.Kind.Group == "storage.k8s.io" && config.Resource == "volumeattributesclasses" {
 		config.PublishedClasses = c.publishedVolumeAttributesClasses
+	}
+	// ⚠️ Turns this endpoint into a read-only view of the platform's published
+	// device classes, exactly like the two above. Assigning the OTHER field --
+	// the one the guards read -- would leave it an ordinary tenant proxy over
+	// the platform's DeviceClasses, which compiles and is the opposite of the
+	// intent.
+	if config.Kind.Group == "resource.k8s.io" && config.Resource == "deviceclasses" {
+		config.PublishedClasses = c.publishedDeviceClasses
+	}
+	// ⭐ And the guard's own field, on the resources that REFERENCE a device
+	// class rather than on the class endpoint itself.
+	if config.Kind.Group == "resource.k8s.io" &&
+		(config.Resource == "resourceclaims" || config.Resource == "resourceclaimtemplates") {
+		config.PublishedDeviceClasses = c.publishedDeviceClasses
 	}
 	// ⚠️ A different field, on a different resource, doing a different thing:
 	// this leaves the PVC endpoint an ordinary tenant proxy and only lets it
@@ -772,6 +792,13 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 				common.VolumeAttributesClassPublishedLabelKey).String()
 		}))
 	volumeAttributesClassInformer := volumeAttributesClassInformers.Storage().V1().VolumeAttributesClasses().Informer()
+	// A fourth, and the last of this shape: DRA device classes.
+	deviceClassInformers := informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = publishedclass.PublishedSelector(
+				common.DeviceClassPublishedLabelKey).String()
+		}))
+	deviceClassInformer := deviceClassInformers.Resource().V1().DeviceClasses().Informer()
 
 	publishedStorageClasses := publishedclass.New("storageclass",
 		common.StorageClassPublishedLabelKey,
@@ -785,6 +812,14 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	publishedVolumeAttributesClasses := publishedclass.New("volumeattributesclass",
 		common.VolumeAttributesClassPublishedLabelKey,
 		volumeAttributesClassInformer.GetStore(), volumeAttributesClassInformer.HasSynced, nil)
+	// ⭐ No flag counterpart either, and for a stronger reason than the third:
+	// this API group was not served to tenants at all until now, so there is no
+	// behaviour whatsoever to stay compatible with. Publishing none means no
+	// tenant can name a DeviceClass, which is the right default for hardware a
+	// platform sells.
+	publishedDeviceClasses := publishedclass.New("deviceclass",
+		common.DeviceClassPublishedLabelKey,
+		deviceClassInformer.GetStore(), deviceClassInformer.HasSynced, nil)
 
 	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses)
 
@@ -832,6 +867,8 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		classInformers:                   classInformers,
 		ingressClassInformers:            ingressClassInformers,
 		volumeAttributesClassInformers:   volumeAttributesClassInformers,
+		deviceClassInformers:             deviceClassInformers,
+		publishedDeviceClasses:           publishedDeviceClasses,
 	}, nil
 }
 

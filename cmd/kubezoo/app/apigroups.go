@@ -21,6 +21,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/node"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"k8s.io/kubernetes/pkg/apis/rbac"
+	resourceapi "k8s.io/kubernetes/pkg/apis/resource"
 	"k8s.io/kubernetes/pkg/apis/storage"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
@@ -985,6 +987,61 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					NamespaceScoped: false,
 					NewFunc:         func() runtime.Object { return &storage.VolumeAttributesClass{} },
 					NewListFunc:     func() runtime.Object { return &storage.VolumeAttributesClassList{} },
+				},
+			},
+		},
+	},
+
+	// ⭐ DRA (dynamic resource allocation). GA and locked on since 1.35, so the
+	// upstream cluster serves it whether or not tenants do; what decides is
+	// whether kubezoo declares it here.
+	//
+	// ⛔ THREE OF THE FOUR RESOURCES, and the one left out is the point.
+	// ResourceSlice carries spec.nodeName, spec.nodeSelector and the device
+	// inventory of each machine -- the platform's hardware, per node, for every
+	// tenant to read. That is the same thing Nodes were withdrawn for: a
+	// description of the infrastructure a tenant shares with everyone else, and
+	// a list of what to look up when something there has a CVE. A tenant does
+	// not need it: it asks for a DEVICE CLASS and the scheduler finds the
+	// hardware.
+	{
+		resourcev1.GroupName,
+		map[string]map[string]*apiconfig.StorageConfig{
+			"v1": {
+				// The tenant's own objects, namespaced like everything else.
+				"resourceclaims": {
+					Kind:            resourcev1.SchemeGroupVersion.WithKind("ResourceClaim"),
+					Resource:        "resourceclaims",
+					NamespaceScoped: true,
+					NewFunc:         func() runtime.Object { return &resourceapi.ResourceClaim{} },
+					NewListFunc:     func() runtime.Object { return &resourceapi.ResourceClaimList{} },
+				},
+				"resourceclaims/status": {
+					Kind:            resourcev1.SchemeGroupVersion.WithKind("ResourceClaim"),
+					Resource:        "resourceclaims",
+					Subresource:     "status",
+					NamespaceScoped: true,
+					NewFunc:         func() runtime.Object { return &resourceapi.ResourceClaim{} },
+				},
+				"resourceclaimtemplates": {
+					Kind:            resourcev1.SchemeGroupVersion.WithKind("ResourceClaimTemplate"),
+					Resource:        "resourceclaimtemplates",
+					NamespaceScoped: true,
+					NewFunc:         func() runtime.Object { return &resourceapi.ResourceClaimTemplate{} },
+					NewListFunc:     func() runtime.Object { return &resourceapi.ResourceClaimTemplateList{} },
+				},
+				// ⚠️ Same shape as StorageClass and VolumeAttributesClass: the
+				// PLATFORM's object, discoverable only where it has been
+				// published, and read-only. A DeviceClass is a hardware tier a
+				// platform sells -- naming one is asking for that hardware -- so
+				// it defaults to publishing NOTHING, like VolumeAttributesClass
+				// and unlike StorageClass, which had existing behaviour to keep.
+				"deviceclasses": {
+					Kind:            resourcev1.SchemeGroupVersion.WithKind("DeviceClass"),
+					Resource:        "deviceclasses",
+					NamespaceScoped: false,
+					NewFunc:         func() runtime.Object { return &resourceapi.DeviceClass{} },
+					NewListFunc:     func() runtime.Object { return &resourceapi.DeviceClassList{} },
 				},
 			},
 		},
