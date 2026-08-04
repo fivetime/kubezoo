@@ -695,6 +695,27 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// path that needs them: the same trap the MaxCRDs comment below records.
 	config.PublishedSnapshotClasses = c.publishedSnapshotClasses
 	config.IsSharedGroup = sharedCRDGroup
+	// ⛔ AND the storage/attributes class sets, to EVERY storage rather than to
+	// the persistentvolumeclaims one below. refuseUnpublishedEphemeralClasses runs
+	// on pod-carrying kinds -- a Pod, a Deployment, a Job -- because a generic
+	// ephemeral volume's claim is created by kube-controller-manager and never
+	// passes through the PVC endpoint at all. Left on the PVC branch alone the
+	// guard reads a nil Set and returns on its first line: it compiles, it runs,
+	// and it refuses nothing.
+	//
+	// ⚠️ Stated as the rule it is, not as a war story: a Set a guard READS belongs
+	// on every storage, and only the STORAGE-REPLACING assignment below
+	// (PublishedClasses, which turns an endpoint into a read-only list) may be
+	// conditional on the resource.
+	//
+	// ⛔ An earlier version of this comment claimed a lab failure proved the point.
+	// It did not: that failure turned out to be a mistyped pattern in the
+	// assertion, and the guard had been refusing correctly all along. The rule
+	// above still holds -- a nil Set makes the guard return on its first line --
+	// but it was reasoned, not measured, and saying otherwise would have left the
+	// next reader with a false account of how this was found.
+	config.PublishedStorageClasses = c.publishedStorageClasses
+	config.PublishedVolumeAttributesClasses = c.publishedVolumeAttributesClasses
 	config.Tenants = c.tenants
 	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
 		config.MaxNamespaces = c.maxNamespacesPerTenant
@@ -713,9 +734,8 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	}
 	if config.Kind.Group == "" && config.Resource == "persistentvolumeclaims" &&
 		config.Subresource == "" {
-		config.PublishedStorageClasses = c.publishedStorageClasses
-		config.PublishedSnapshotClasses = c.publishedSnapshotClasses
-		config.PublishedVolumeAttributesClasses = c.publishedVolumeAttributesClasses
+		// (set unconditionally above; kept here only as the place the PVC-specific
+		// reasoning is written down)
 	}
 	config.TypeConverter = c.typeConverter
 	config.ProxyTransport = c.proxyTransport

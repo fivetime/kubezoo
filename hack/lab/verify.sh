@@ -3812,6 +3812,99 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
 done
 
 
+# --- the other way into storage from a pod spec ----------------------------
+# ⛔ A generic ephemeral volume embeds a whole PVC template, and the claim is
+# created by kube-controller-manager's ephemeral controller straight upstream --
+# it never passes through kubezoo, so the guard that matches
+# *core.PersistentVolumeClaim never sees it. #105 refused the inline csi volume
+# in this same pod spec; this is the second door in the same room.
+#
+# ⚠️ The class is UNPUBLISHED at this point in the section, which is what makes
+# this a test of publication rather than of syntax.
+# ⚠️ The class is RETIRED at this point in the section, not unpublished, so the
+# refusal says so. A first version matched the unpublished wording and failed
+# while the guard was working perfectly -- and the failure text ("refused, but
+# not by ...") is the only reason that was obvious rather than a hunt.
+expect_denied "an ephemeral volume on a retired class" "is being retired" -- \
+  $T apply -f - <<'EPH'
+apiVersion: v1
+kind: Pod
+metadata: {name: eph-refused}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      volumeMounts: [{name: v, mountPath: /data}]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  volumes:
+    - name: v
+      ephemeral:
+        volumeClaimTemplate:
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: csi-hostpath-sc
+            resources: {requests: {storage: 64Mi}}
+EPH
+# ⚠️ And through a TEMPLATE, patched in afterwards -- a Deployment's volumes are
+# mutable, so a create-only guard would be reachable by writing twice.
+expect_denied "and one inside a Deployment template" "is being retired" -- \
+  $T apply -f - <<'EPH'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: eph-deploy}
+spec:
+  replicas: 0
+  selector: {matchLabels: {app: eph}}
+  template:
+    metadata: {labels: {app: eph}}
+    spec:
+      containers:
+        - name: c
+          image: busybox
+          command: ["sh","-c","sleep 3600"]
+          volumeMounts: [{name: v, mountPath: /data}]
+          securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+            runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+      volumes:
+        - name: v
+          ephemeral:
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                storageClassName: csi-hostpath-sc
+                resources: {requests: {storage: 64Mi}}
+EPH
+# ⭐ Positive control, and it is not decoration: without it this section would
+# pass just as well if the guard refused EVERY ephemeral volume, which would be a
+# different bug wearing the same green.
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published=true --overwrite >/dev/null
+for _ in $(seq 20); do $T get storageclass "$CSI_SC" >/dev/null 2>&1 && break; sleep 2; done
+expect_allowed "an ephemeral volume on a published class" \
+  $T apply -f - <<'EPH'
+apiVersion: v1
+kind: Pod
+metadata: {name: eph-ok}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      volumeMounts: [{name: v, mountPath: /data}]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  volumes:
+    - name: v
+      ephemeral:
+        volumeClaimTemplate:
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: csi-hostpath-sc
+            resources: {requests: {storage: 64Mi}}
+EPH
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1
+
 # --- an endpoint address has to be one of your own pods' -------------------
 # ⛔ Seventh spec, seventh time all three layers were empty: the convertors
 # translate targetRef and nothing else, no policy mentions endpoints, and

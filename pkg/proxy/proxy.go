@@ -500,6 +500,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseForgedEndpointAddress(ctx, obj); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseUnpublishedEphemeralClasses(obj, original); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -733,6 +736,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	if err := tp.refuseForgedEndpointAddress(ctx, obj); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseUnpublishedEphemeralClasses(obj, nil); err != nil {
 		return nil, err
 	}
 	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
@@ -1883,6 +1889,13 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseForgedEndpointAddress(ctx, updated); err != nil {
+			return nil, false, err
+		}
+		// ⚠️ A template's volumes ARE mutable, unlike a live pod's: refusing only
+		// on create would leave "create the workload clean, then patch the
+		// ephemeral volume in" wide open -- the same two-step the parity test
+		// named for the inline csi volume.
+		if err := tp.refuseUnpublishedEphemeralClasses(updated, original); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
