@@ -226,6 +226,49 @@ kubectl -n <租户ID>-default exec <pod> -- \
 "经不经都行"这件事,而没有任何告警会说这话。**纳入变更评审**:动 CNI、动 kubetron
 数据面、加节点、改 NetworkPolicy 之后都要重跑上面两条。
 
+### 1.2.5 ⛔⛔ 租户负载要能连上 kubezoo:一个地址 + 一张证书,缺一不可
+
+⚠️ §1.2 讲的是**租户不能连上游**;这一条讲的是**租户必须能连 kubezoo**。两条都成立
+才叫"唯一入口"。而这一条**踩坑的方式特别隐蔽:整套隔离测试可以全绿,而租户的负载
+一个都连不上** —— 因为测试通常从运维的机器上发请求,那和 Pod 走的是**不同的 CA、
+不同的名字解析**。
+
+**两个前提,`tenant-api-endpoint.yaml` 的注释里都写着:**
+
+**① 地址占位符必须替换。** `KUBEZOO_ADDRESS_PLACEHOLDER` 会被注入每个租户 Pod 的
+`KUBERNETES_SERVICE_HOST`。没换 = 租户负载解析一个字面量,**连不上任何 apiserver**。
+
+**② 必须是 DNS 名,不能是 IP。** ⭐ 这条容易想错:**TLS 的 SNI 只携带主机名,
+客户端连裸 IP 时根本不发 SNI**。所以给 IP 的话 kubezoo 无法按 SNI 选证书,
+只会回落到默认那张,报错长这样:
+
+```
+tls: failed to verify certificate: x509: certificate is valid for 127.0.0.1, not 10.x.x.x
+```
+
+**③ 证书必须由 Pod 信任的 CA 签发。** Pod 用
+`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` 校验,那是**上游集群的 CA**。
+kubezoo 自己 CA 签的证书对 Pod 没有意义。
+
+⇒ **两张证书并存**,用 `--tls-sni-cert-key` 按名字分:
+
+| 谁 | 走哪张 | 信任的 CA |
+|---|---|---|
+| 人 / CI 的 kubeconfig | 默认证书 | kubezoo 自己的 CA |
+| 租户 Pod | SNI 证书 | **上游集群的 CA** |
+
+⚠️ 这两条路径**本来就该信任不同的 CA**,硬统一成一张要么让人换 CA、要么让 Pod
+信任一个它没有的根。
+
+**自查(必须从 Pod 里做,不能从运维机器)**:
+
+```bash
+kubectl -n <租户ID>-default exec <pod> -- \
+  sh -c 'curl -sS --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+    -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+    https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/version'
+```
+
 ### 1.3 ⛔⛔ 配额组件必须**先于**租户控制器启动 —— 顺序错了会静默失效
 
 租户级配额(`Tenant.spec.quota`)由两个独立进程接力,而**接力棒只递一次**:

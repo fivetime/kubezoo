@@ -159,6 +159,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=true \
   --api-audiences=$UPSTREAM_SA_ISSUER \
+  --tls-sni-cert-key=$PKI/kubezoo/pod-facing.pem,$PKI/kubezoo/pod-facing-key.pem \
   --audit-policy-file=$ZOO/config/setup/audit-policy.yaml \
   --audit-log-path=$LAB/kubezoo-audit.log \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
@@ -330,6 +331,44 @@ if [ -z "$CONTRACT" ] || [ ! -f "$CONTRACT/hack/lab/policies.sh" ]; then
   exit 1
 fi
 # bash, not exec: files in the module cache are read-only and not executable.
-bash "$CONTRACT/hack/lab/policies.sh" "kind-$CLUSTER" "${TENANT_DOMAIN_SUFFIX:-apps.example.com}"
+# ⛔ The kubezoo address is passed, and leaving it out is not cosmetic: the
+# tenant-api-endpoint policy injects it as KUBERNETES_SERVICE_HOST into every
+# tenant Pod, and an unsubstituted placeholder means no tenant workload can
+# reach any API server at all. The lab ran that way until a real operator was
+# installed and every one of its pods failed to resolve the literal string.
+#
+# ⚠️ The same address the pod-facing certificate was signed for. A certificate
+# for a name nothing connects to fails exactly like no certificate, and says as
+# little.
+# ⭐ A NAME, not the gateway IP. A client connecting to a bare IP sends no TLS
+# SNI, so kubezoo cannot pick the pod-facing certificate and answers with its
+# default one -- which a Pod's CA bundle cannot verify. This is also the shape a
+# real deployment has: a Service name, as the policy's own comment says.
+KUBEZOO_GATEWAY_IP=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' \
+  | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)
+KUBEZOO_POD_ADDRESS=kubezoo.default.svc
+# A Service with no selector, and endpoints pointing back at the host where
+# kubezoo runs. In a deployment kubezoo is a Pod and this is an ordinary
+# Service; here the endpoint is outside the cluster, which kube-proxy handles
+# the same way it handles any external endpoint.
+kubectl --context "kind-$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Service
+metadata: {name: kubezoo, namespace: default}
+spec:
+  ports: [{name: https, port: 6443, targetPort: 6443, protocol: TCP}]
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: kubezoo
+  namespace: default
+  labels: {kubernetes.io/service-name: kubezoo}
+addressType: IPv4
+ports: [{name: https, port: 6443, protocol: TCP}]
+endpoints: [{addresses: ["$KUBEZOO_GATEWAY_IP"], conditions: {ready: true}}]
+EOF
+bash "$CONTRACT/hack/lab/policies.sh" "kind-$CLUSTER" "${TENANT_DOMAIN_SUFFIX:-apps.example.com}" \
+  "$KUBEZOO_POD_ADDRESS"
 
 echo "lab up: upstream ctx = kind-kz-audit3, zoo admin ctx = zoo"

@@ -614,6 +614,8 @@ type ProxyConfig struct {
 	// CRDs enter the upstream cluster's discovery and OpenAPI, which every client
 	// of that cluster downloads.
 	maxCRDsPerTenant int
+	// tenants lets the caps read a per-tenant limit instead of only the flags.
+	tenants tenantlister.TenantLister
 	// maxClusterRoleBindingsPerTenant is the second multiplier: each binding is
 	// stored once per namespace the tenant owns.
 	maxClusterRoleBindingsPerTenant int
@@ -652,6 +654,11 @@ func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	// classes, and it would compile.
 	// The subresource check is not decoration: persistentvolumeclaims/status
 	// carries the same Resource string, and a status write is not a claim.
+	// ⭐ Given to every storage, not just the capped ones: the caps read the
+	// tenant's own object first and fall back to these numbers, so a storage
+	// without the lister could only ever enforce the platform default and would
+	// silently ignore a raised limit.
+	config.Tenants = c.tenants
 	if config.Kind.Group == "" && config.Resource == "namespaces" && config.Subresource == "" {
 		config.MaxNamespaces = c.maxNamespacesPerTenant
 	}
@@ -967,6 +974,12 @@ func buildGenericConfig(
 	// until the server is assembled, so its position here is free.
 	genericConfig.BuildHandlerChainFunc = NewBuildHandlerChanFunc(discoveryProxy,
 		controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Lister())
+	// ⭐ Set here for the same reason the line above is: the informers do not
+	// exist until the control plane config does, and the storage configs are not
+	// built until later. Without it the caps can only ever see the flags, so a
+	// tenant given a raised limit on its own object is refused at the default --
+	// with the refusal naming a number nobody set for it.
+	proxyConfig.tenants = controlPlaneConfig.tenantInformers.Tenant().V1alpha1().Tenants().Lister()
 
 	// The upstream client goes in so that ServiceAccount tokens can be
 	// authenticated: validating a bound token means reading the pod and service

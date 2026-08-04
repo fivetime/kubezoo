@@ -37,6 +37,8 @@ import (
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/klog"
+
+	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
@@ -87,6 +89,9 @@ type clusterRoleBindingProjection struct {
 
 	// maxBindings caps how many a tenant may own; zero means no cap.
 	maxBindings int
+	// tenants reads the Tenant objects, so a per-tenant cap can be raised by
+	// editing one object instead of restarting the gateway.
+	tenants tenantlister.TenantLister
 	// counter reads the records, so the cap can be tested without an upstream.
 	// Defaults to inner.List.
 	counter func(context.Context, *metainternalversion.ListOptions) (runtime.Object, error)
@@ -137,6 +142,7 @@ func newClusterRoleBindingProjection(config apiconfig.StorageConfig) (rest.Stora
 		newListFunc:    config.NewListFunc,
 		tableConvertor: tableConvertor,
 		maxBindings:    config.MaxClusterRoleBindings,
+		tenants:        config.Tenants,
 		counter:        lister.List,
 	}, nil
 }
@@ -309,7 +315,9 @@ func (p *clusterRoleBindingProjection) Create(ctx context.Context, obj runtime.O
 // what it owns, and an upstream blip must not look like a quota to someone who
 // cannot tell the two apart.
 func (p *clusterRoleBindingProjection) refuseTooManyBindings(ctx context.Context) error {
-	if p.maxBindings <= 0 {
+	tenantID, _ := util.TenantFrom(ctx)
+	limit := maxClusterRoleBindingsFor(p.tenants, tenantID, p.maxBindings)
+	if limit <= 0 {
 		return nil
 	}
 	scoped, err := withProjectedSelector(&metainternalversion.ListOptions{})
@@ -327,7 +335,7 @@ func (p *clusterRoleBindingProjection) refuseTooManyBindings(ctx context.Context
 		klog.Errorf("counting cluster role bindings: expected a RoleBindingList, got %T", obj)
 		return nil
 	}
-	if len(list.Items) < p.maxBindings {
+	if len(list.Items) < limit {
 		return nil
 	}
 	return apierrors.NewForbidden(
@@ -335,7 +343,7 @@ func (p *clusterRoleBindingProjection) refuseTooManyBindings(ctx context.Context
 		fmt.Errorf("this tenant already owns %d cluster role bindings and the limit is %d; "+
 			"each one is stored in every namespace you own, so they cost bindings times "+
 			"namespaces. Delete one you no longer need, or ask the platform to raise the limit",
-			len(list.Items), p.maxBindings))
+			len(list.Items), limit))
 }
 
 func (p *clusterRoleBindingProjection) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo,

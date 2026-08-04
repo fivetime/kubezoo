@@ -186,6 +186,61 @@ base64file() {
     return 1
 }
 
+# gen_pod_facing_cert signs a SECOND serving certificate for kubezoo, with the
+# UPSTREAM cluster's CA.
+#
+# ⛔ WITHOUT IT NO TENANT WORKLOAD CAN REACH KUBEZOO AT ALL, and the lab looked
+# fine anyway for as long as nothing tried. A tenant Pod validates the API server
+# with /var/run/secrets/kubernetes.io/serviceaccount/ca.crt, which is the
+# UPSTREAM cluster's CA -- kubezoo's own CA means nothing to it. The default
+# serving certificate above is signed by kubezoo's CA, which is right for the
+# kubeconfigs handed to people, and useless to a Pod.
+#
+# ⭐ Both, by SNI, rather than replacing one with the other: the host's kubectl
+# keeps trusting kubezoo's CA, and a Pod reaching the address below gets a
+# certificate its own CA bundle can verify.
+#
+# ⚠️ tenant-api-endpoint.yaml states this prerequisite in its own comments, and
+# the lab did not honour it. It surfaced only when a real operator was installed
+# -- every earlier assertion about ServiceAccounts spoke to kubezoo FROM THE HOST,
+# which is a different CA and a different name resolution than the path a tenant
+# workload actually takes.
+gen_pod_facing_cert() {
+    local gateway
+    gateway=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
+        | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)
+    if [ -z "$gateway" ]; then
+        echo "gen_pod_facing_cert: could not find the kind network gateway" >&2
+        return 1
+    fi
+    local up=$KUBEZOO_DIR/upstream-ca
+    mkdir -p "$up"
+    docker cp kz-audit3-control-plane:/etc/kubernetes/pki/ca.crt "$up/ca.crt" >/dev/null 2>&1
+    docker cp kz-audit3-control-plane:/etc/kubernetes/pki/ca.key "$up/ca.key" >/dev/null 2>&1
+    if [ ! -s "$up/ca.crt" ] || [ ! -s "$up/ca.key" ]; then
+        echo "gen_pod_facing_cert: could not copy the upstream CA out of the kind node" >&2
+        return 1
+    fi
+    # ⚠️ The SAN is a NAME, not the gateway IP, and that is not a preference.
+    # TLS SNI carries a hostname; a client connecting to a bare IP sends no SNI
+    # at all, so --tls-sni-cert-key keyed on an IP can never match and kubezoo
+    # falls back to its default certificate -- which a Pod's CA bundle cannot
+    # verify. Measured: "certificate is valid for 127.0.0.1, not 172.18.0.1".
+    #
+    # ⭐ Which is also the production shape: a deployment reaches kubezoo through
+    # a Service name, as tenant-api-endpoint.yaml already says. The lab now does
+    # the same, with a Service whose endpoints point back at the host.
+    openssl req -new -newkey rsa:2048 -nodes \
+        -keyout "$KUBEZOO_DIR/pod-facing-key.pem" -out "$up/pod-facing.csr" \
+        -subj "/CN=kubezoo" >/dev/null 2>&1
+    openssl x509 -req -in "$up/pod-facing.csr" \
+        -CA "$up/ca.crt" -CAkey "$up/ca.key" -CAcreateserial \
+        -out "$KUBEZOO_DIR/pod-facing.pem" -days 3650 \
+        -extfile <(printf "subjectAltName=DNS:kubezoo.default.svc,DNS:kubezoo.default.svc.cluster.local,DNS:kubezoo.default,IP:%s,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n" "$gateway") \
+        >/dev/null 2>&1
+    echo "pod-facing cert for kubezoo.default.svc (via $gateway), signed by the upstream CA"
+}
+
 gen_quota_webhook_cert() {
 
     QUOTA_WEBHOOK_HOSTNAMES=kubezoo-cluster-resource-quota.default,kubezoo-cluster-resource-quota.default.svc
@@ -350,6 +405,7 @@ print_kubezoo_parameters() {
 gen_pki_setup_ctx() {
     get_upstream_pki_kind
     gen_kubezoo_pki
+    gen_pod_facing_cert
     gen_quota_webhook_cert
     create_pki_secret
     set_context

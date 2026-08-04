@@ -45,6 +45,8 @@ import (
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/klog"
+
+	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 	"k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/printers"
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
@@ -123,6 +125,9 @@ type tenantProxy struct {
 	// maxCRDs caps how many CustomResourceDefinitions this tenant may own; zero
 	// means no cap.
 	maxCRDs int
+	// tenants reads the Tenant objects, so a per-tenant cap can be raised by
+	// editing one object instead of restarting the gateway.
+	tenants tenantlister.TenantLister
 
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
@@ -220,6 +225,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		publishedVolumeAttributesClasses: config.PublishedVolumeAttributesClasses,
 		maxNamespaces:                    config.MaxNamespaces,
 		maxCRDs:                          config.MaxCRDs,
+		tenants:                          config.Tenants,
 		convertor:                        config.Convertor,
 		groupVersionKindFunc:             config.GroupVersionKindFunc,
 		tableConvertor:                   tc,
@@ -355,6 +361,31 @@ func (tp *tenantProxy) convertUnstructuredListToOutput(utdList *unstructured.Uns
 // Get finds a resource in the upstream cluster by name and returns it.
 // Although it can return an arbitrary error value, IsNotFound(err) is true for the
 // returned error value err when the specified resource is not found.
+// readForUpdate reads the object an update is about to change.
+//
+// ⛔ NOT tp.Get, and the difference is a permission real Kubernetes does not
+// ask for. On a subresource storage tp.Get reads the SUBRESOURCE path -- `GET
+// issuers/foo/status` -- so upstream authorizes `get` on `issuers/status`. An
+// operator's RBAC grants `update` and `patch` on the status subresource and
+// `get` on the parent, which is what upstream itself requires, and is refused
+// here. cert-manager's chart is exactly that shape, and its controller could
+// not write a single Issuer status:
+//
+//	issuers.cert-manager.io "selfsigned" is forbidden: cannot get resource
+//	"issuers/status" in API group "cert-manager.io"
+//
+// ⭐ Reading the parent is equivalent, not a workaround: a GET on the status
+// subresource returns the whole object, the same one the parent returns. Only
+// the permission asked for differs.
+func (tp *tenantProxy) readForUpdate(ctx context.Context, name string) (runtime.Object, error) {
+	if tp.subresource == "" {
+		return tp.Get(ctx, name, &metav1.GetOptions{})
+	}
+	parent := *tp
+	parent.subresource = ""
+	return parent.Get(ctx, name, &metav1.GetOptions{})
+}
+
 func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
 	if tp.servesRoleBindings() && util.IsManagedBindingName(name) {
 		// Hidden here, so reading one by name has to agree with listing.
@@ -429,7 +460,7 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 		return tp.guaranteedUpdate(ctx, name, objInfo, forceAllowCreate, options)
 	}
 
-	original, err := tp.Get(ctx, name, &metav1.GetOptions{})
+	original, err := tp.readForUpdate(ctx, name)
 	if err != nil && !errors.IsNotFound(err) {
 		return nil, false, err
 	}
@@ -1254,7 +1285,8 @@ var crdGVR = schema.GroupVersionResource{
 func (tp *tenantProxy) refuseTooManyCRDs(ctx context.Context, obj runtime.Object,
 	tenantID string) error {
 
-	if tp.maxCRDs <= 0 {
+	limit := maxCRDsFor(tp.tenants, tenantID, tp.maxCRDs)
+	if limit <= 0 {
 		return nil
 	}
 	if _, ok := obj.(*apiextensions.CustomResourceDefinition); !ok {
@@ -1265,14 +1297,14 @@ func (tp *tenantProxy) refuseTooManyCRDs(ctx context.Context, obj runtime.Object
 		klog.Errorf("counting tenant %s's CRDs to apply --max-crds-per-tenant: %v", tenantID, err)
 		return nil
 	}
-	if owned < tp.maxCRDs {
+	if owned < limit {
 		return nil
 	}
 	return apierrors.NewForbidden(
 		schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}, "",
 		fmt.Errorf("this tenant already owns %d custom resource definitions and the limit is %d; "+
 			"delete one you no longer need, or ask the platform to raise the limit",
-			owned, tp.maxCRDs))
+			owned, limit))
 }
 
 // countTenantCRDs counts the CRDs whose API group belongs to this tenant.
@@ -1323,7 +1355,8 @@ func (tp *tenantProxy) countTenantCRDs(ctx context.Context, tenantID string) (in
 func (tp *tenantProxy) refuseTooManyNamespaces(ctx context.Context, obj runtime.Object,
 	tenantID string) error {
 
-	if tp.maxNamespaces <= 0 {
+	limit := maxNamespacesFor(tp.tenants, tenantID, tp.maxNamespaces)
+	if limit <= 0 {
 		return nil
 	}
 	if _, ok := obj.(*core.Namespace); !ok {
@@ -1338,14 +1371,14 @@ func (tp *tenantProxy) refuseTooManyNamespaces(ctx context.Context, obj runtime.
 			tenantID, err)
 		return nil
 	}
-	if len(owned) < tp.maxNamespaces {
+	if len(owned) < limit {
 		return nil
 	}
 	return apierrors.NewForbidden(
 		schema.GroupResource{Resource: "namespaces"}, "",
 		fmt.Errorf("this tenant already owns %d namespaces and the limit is %d; "+
 			"delete one you no longer need, or ask the platform to raise the limit",
-			len(owned), tp.maxNamespaces))
+			len(owned), limit))
 }
 
 // refuseTenantChosenNode refuses a pod that names the node it wants to run on.
@@ -1736,7 +1769,7 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 	objInfo rest.UpdatedObjectInfo, forceAllowCreate bool, options *metav1.UpdateOptions,
 ) (runtime.Object, bool, error) {
 	for {
-		original, err := tp.Get(ctx, name, &metav1.GetOptions{})
+		original, err := tp.readForUpdate(ctx, name)
 		if err != nil && !errors.IsNotFound(err) {
 			return nil, false, err
 		}

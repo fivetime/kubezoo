@@ -17,6 +17,7 @@ limitations under the License.
 package apiconfig
 
 import (
+	tenantlister "github.com/fivetime/kubezoo-contract/pkg/generated/listers/tenant/v1alpha1"
 	"net/http"
 	"net/url"
 
@@ -100,15 +101,25 @@ type StorageConfig struct {
 	// changes. See tenantProxy.refuseUnpublishedVolumeAttributesClass.
 	PublishedVolumeAttributesClasses publishedclass.Set
 
-	// MaxNamespaces caps how many namespaces one tenant may own. Zero means no
+	// Tenants reads the Tenant objects, so that a per-tenant capacity can be
+	// raised by editing one object rather than by restarting the gateway.
+	//
+	// ⛔ The limits below are only DEFAULTS for a tenant that names none. A flag
+	// cannot express "this tenant may have more", and reaching for one means a
+	// restart of a single-replica StatefulSet -- every tenant's API interrupted
+	// to change a number for one of them.
+	Tenants tenantlister.TenantLister
+
+	// MaxNamespaces is the default cap when a tenant names none. Zero means no
 	// cap. Set only on the namespaces resource.
 	MaxNamespaces int
 
-	// MaxCRDs caps how many CustomResourceDefinitions one tenant may own. Zero
+	// MaxCRDs is the default cap when a tenant names none. Zero
 	// means no cap.
 	MaxCRDs int
 
-	// MaxClusterRoleBindings caps how many a tenant may own. Zero means no cap.
+	// MaxClusterRoleBindings is the default cap when a tenant names none. Zero
+	// means no cap.
 	// Set only on the clusterrolebindings resource.
 	MaxClusterRoleBindings int
 
