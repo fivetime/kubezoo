@@ -5,9 +5,21 @@
 
 ## 0. 一句话:kubezoo 单独装上,隔离是不完整的
 
-kubezoo 是租户的**前门**,它只约束租户本人的 `kubectl`。
-租户的 **Pod 拿 ServiceAccount token 直连上游 apiserver,完全不经过 kubezoo**
-(实测:审计 §S)。所以下面这套策略**不是可选加固,是隔离的一半**。
+⭐ **架构前提:kubezoo 是租户到控制平面的唯一入口。** 这是一个共享控制平面的
+多租户平台,租户负载在自己的网络里(kubetron / OVN),**上游 apiserver 不在它们的
+可达范围内** —— 租户碰不到控制平面,只能经 kubezoo。下面所有判断都建立在这条上;
+它是**部署要求**,不是代码能保证的东西,见 §1.2。
+
+kubezoo 是租户的**前门**。但**前门不做校验**:`tenantProxy` 丢弃全部
+`ValidateObjectFunc`,所以 **kubezoo 从不跑准入** —— 它翻译名字、约束它认识的字段,
+其余一概原样转发。⇒ 下面这套策略**不是可选加固,是隔离的一半**,
+因为**没有别的东西在做准入**。
+
+⚠️ **这一节的理由改过一次,结论没变,值得知道为什么。** 早先写的是"租户的 Pod
+直连上游、完全不经过 kubezoo,所以要策略层兜底"——那在**没有网络隔离**的部署里是实测事实
+(审计 §S)。现在的部署形态把那条路堵上了,但**结论不变**:策略层依然承重,
+只不过承的是"kubezoo 不做准入"这件事,而不再是"有一条绕过前门的路"。
+⛔ 别把前提的变化读成"策略层可以省了"。
 
 **没装策略层的集群,租户可以**(每条都实测过):
 跑出 kata 沙箱、拿全集群最高优先级抢占、建 privileged + hostNetwork 的 Pod、
@@ -160,10 +172,10 @@ hack/lab/verify.sh          # 每条断言都提交一个必须被拒的东西,�
 | `tenant-scheduling.yaml` | Kyverno | 租户可绕过调度器钉节点 |
 | `tenant-placement.yaml` | Kyverno | 租户可自选落点、跑到别人的节点池 |
 | `tenant-deny-binding.yaml` | **原生 VAP** | 租户可把 Pod 直接绑到别的租户节点 |
-| `tenant-frozen-deny-writes.yaml` | **原生 VAP** | **冻结只冻住租户的 kubectl**,它的 Pod 照常读写 |
+| `tenant-frozen-deny-writes.yaml` | **原生 VAP** | 冻结的**上游那一半**。前门的 `WithTenantSuspension` 在缓存里找不到租户时**放行**(故意的,靠上游兜底)—— 没有这条,那次放行就没有兜底 |
 | `tenant-ingress-hostnames.yaml` | **原生 VAP** | 任何租户可抢任何主机名,**先到先得、落败方零报错** |
 | `tenant-own-namespace-name.yaml` | Kyverno | Pod 从 downward API 拿到**上游** namespace 名 ⇒ 经 kubezoo 二次前缀,**operator 读自己的 namespace 全部 NotFound** |
-| `tenant-api-endpoint.yaml` | Kyverno | 租户负载直连上游 ⇒ 冻结绕过、binding 绕过、operator 看不见自己的 CRD 组 |
+| `tenant-api-endpoint.yaml` | Kyverno | 租户负载的 in-cluster 客户端**指不到 kubezoo** ⇒ 在 §1.2 的网络形态下它谁也连不上,operator 全废;网络没隔离时则是直连上游、看不见自己的 CRD 组 |
 
 ### 1.1 ⚠️ 装完必须做一次存量修正
 
@@ -188,7 +200,33 @@ done
 
 **不删就等于没封。**
 
-### 1.2 ⛔⛔ 配额组件必须**先于**租户控制器启动 —— 顺序错了会静默失效
+### 1.2 ⛔⛔ 租户网络必须够不到上游 apiserver —— 这条是承重前提
+
+⭐ **这是整套隔离的地基,而且它不在代码里。** 平台的判断建立在"租户到控制平面只有
+kubezoo 一条路"上;这条路之外若还有第二条,前门上的每一条约束都可以被绕过。
+
+**为什么代码保证不了**:租户 Pod 的 in-cluster 客户端读的是 `KUBERNETES_SERVICE_HOST`,
+而 `tenant-api-endpoint` 策略是**准入时把它改道**到 kubezoo(podspec 同名 env 压过
+kubelet 注入的那个)。**改道不是阻断** —— 上游 apiserver 若在网络上仍然可达,
+一个没被策略覆盖的 Pod(策略挂了、Pod 早于策略创建)拿着投影 SA token 照样连得上。
+
+⇒ **必须在网络层保证**。本平台的做法是租户负载跑在自己的网络里(kubetron / OVN),
+上游 apiserver 不在其可达范围。若你的部署形态不同,等价手段是 NetworkPolicy /
+CNI 策略,把租户 namespace 到 apiserver 的出向流量断掉。
+
+```bash
+# 自查:从一个租户 Pod 里,上游必须连不上,kubezoo 必须连得上
+kubectl -n <租户ID>-default exec <pod> -- \
+  sh -c 'curl -sk -m3 https://kubernetes.default/version >/dev/null && echo "⛔ 上游可达" || echo "✅ 上游不可达"'
+kubectl -n <租户ID>-default exec <pod> -- \
+  sh -c 'curl -sk -m3 https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/version >/dev/null && echo "✅ kubezoo 可达" || echo "⛔ kubezoo 不可达"'
+```
+
+⚠️ **这条破了会静默地破**:租户的东西照常工作(它本来就该经 kubezoo),坏掉的只是
+"经不经都行"这件事,而没有任何告警会说这话。**纳入变更评审**:动 CNI、动 kubetron
+数据面、加节点、改 NetworkPolicy 之后都要重跑上面两条。
+
+### 1.3 ⛔⛔ 配额组件必须**先于**租户控制器启动 —— 顺序错了会静默失效
 
 租户级配额(`Tenant.spec.quota`)由两个独立进程接力,而**接力棒只递一次**:
 
