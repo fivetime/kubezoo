@@ -175,6 +175,12 @@ func place(spec *core.PodSpec, tenantID string) {
 // missing from this switch silently keeps whatever placement the tenant asked
 // for -- there is no error, no log, and nothing that fails to build.
 // TestEveryServedPodCarrierIsPlaced is what makes that impossible to miss.
+// PodSpecOf is exported for pkg/proxy, which refuses inline CSI volumes on the
+// same set of kinds and must not keep a second list of them.
+func PodSpecOf(obj runtime.Object) (*core.PodSpec, error) {
+	return podSpecOf(obj)
+}
+
 func podSpecOf(obj runtime.Object) (*core.PodSpec, error) {
 	_, spec, err := podTemplateOf(obj)
 	return spec, err

@@ -686,15 +686,35 @@ func TestTenantProxyCreateSubresourceAddressesTheParent(t *testing.T) {
 // proxy per guard, and what goes wrong here is an omission, which is a property
 // of the text.
 func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
-	src, err := os.ReadFile("proxy.go")
-	if err != nil {
-		t.Fatalf("reading proxy.go: %v", err)
-	}
+	// ⛔ THE WHOLE PACKAGE, not proxy.go. This read only proxy.go, and four
+	// guards had since been written into files of their own --
+	// refuseUnpublishedDeviceClass, refusePreProvisionedSnapshot,
+	// refuseUnpublishedSnapshotClass, refuseInlineCSIVolume. None of them was
+	// checked, and the createOnly reasons written for two of them were dead
+	// entries nobody was reading. The test reported success about guards it could
+	// not see, which is the failure mode it exists to prevent, turned on itself.
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "proxy.go", src, 0)
+	var files []*ast.File
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parsing proxy.go: %v", err)
+		t.Fatal(err)
 	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, name, nil, 0)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", name, perr)
+		}
+		files = append(files, f)
+	}
+	var decls []ast.Decl
+	for _, f := range files {
+		decls = append(decls, f.Decls...)
+	}
+	file := &ast.File{Name: files[0].Name, Decls: decls}
 
 	// Every method whose name says it refuses something is a guard, so a guard
 	// added later is covered without anyone remembering to list it here.
@@ -706,7 +726,7 @@ func TestEveryWritePathRunsTheSameGuards(t *testing.T) {
 		}
 		guards[fn.Name.Name] = true
 	}
-	if len(guards) < 3 {
+	if len(guards) < 10 {
 		t.Fatalf("found %d guards, expected the several that exist; the detection is wrong", len(guards))
 	}
 

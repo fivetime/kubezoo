@@ -3812,6 +3812,56 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
 done
 
 
+# --- and the way round all of it -------------------------------------------
+# ⛔ An inline csi volume names a DRIVER, not a class: no StorageClass, no claim,
+# nothing for the publication check to look at. Measured before it was refused:
+# with the class UNPUBLISHED the pod was accepted, reached Running, and had the
+# driver's volume mounted. Pod Security does not help and is not meant to --
+# `csi` is on the restricted profile's ALLOWED volume list.
+#
+# ⚠️ Both shapes. A Pod's spec.volumes is immutable so a create is the only way
+# in, but a TEMPLATE's is not: refused at create, a tenant would otherwise create
+# the workload clean and patch the volume in afterwards.
+expect_denied "an inline csi volume in a Pod" "volume provided directly by a CSI driver" -- \
+  $T apply -f - <<'INLINE'
+apiVersion: v1
+kind: Pod
+metadata: {name: inline-csi}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      volumeMounts: [{name: v, mountPath: /data}]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  volumes:
+    - name: v
+      csi: {driver: hostpath.csi.k8s.io}
+INLINE
+expect_denied "and one patched into a Deployment afterwards" "volume provided directly by a CSI driver" -- \
+  $T apply -f - <<'INLINE'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: inline-csi-deploy}
+spec:
+  replicas: 0
+  selector: {matchLabels: {app: inline-csi}}
+  template:
+    metadata: {labels: {app: inline-csi}}
+    spec:
+      containers:
+        - name: c
+          image: busybox
+          command: ["sh","-c","sleep 3600"]
+          volumeMounts: [{name: v, mountPath: /data}]
+          securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+            runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+      volumes:
+        - name: v
+          csi: {driver: hostpath.csi.k8s.io}
+INLINE
+
 # --- snapshots: a tenant's own volume, and only its own --------------------
 # ⭐ The first PLATFORM CRD group tenants address under its real name.
 # snapshot.storage.k8s.io comes with the platform's storage, not with a tenant,

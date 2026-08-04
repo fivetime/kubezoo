@@ -516,6 +516,14 @@ func (tp *tenantProxy) update(ctx context.Context, obj runtime.Object, options *
 	if !ok {
 		return nil, false, fmt.Errorf("missing tenantID in context")
 	}
+	// ⚠️ On the update paths too, and that is the point: a POD's volumes are
+	// immutable, but a TEMPLATE's are not, so a tenant refused at create can
+	// simply create the workload without the volume and patch it in afterwards.
+	// TestEveryWritePathRunsTheSameGuards said exactly that, in those words, the
+	// moment it could see this guard at all.
+	if err := tp.refuseInlineCSIVolume(obj); err != nil {
+		return nil, false, err
+	}
 
 	// A forwarded apply has to know which fields conversion introduced, and the
 	// only way to know is to keep the object as it stood before. Snapshotted only
@@ -660,6 +668,12 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		// stored, so doing it in the convertor would make every update to a pod
 		// that predates this be refused upstream. saprojection.go.
 		convert.ProjectPodNamespace(pod, tenantID)
+		// ⭐ CREATE only: a pod's spec.volumes is immutable once stored, so this is
+		// the only write where an inline CSI volume can appear -- and refusing on
+		// an update would strand a pod that predates the check.
+		if err := RefusePodInlineCSIVolume(pod); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. convert the internal obj to unstructured
@@ -683,6 +697,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	// the authorization. And the pre-provisioned refusal beside it, which is the
 	// escape the whole snapshot integration is shaped around -- see
 	// pkg/proxy/volumesnapshot.go and docs/design-volumesnapshot-cn.md.
+	if err := tp.refuseInlineCSIVolume(obj); err != nil {
+		return nil, err
+	}
 	if err := tp.refuseUnpublishedSnapshotClass(obj); err != nil {
 		return nil, err
 	}
