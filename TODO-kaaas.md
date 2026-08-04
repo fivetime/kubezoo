@@ -188,10 +188,18 @@
       controller-runtime **按对象 namespace 建索引、按 env 那个查** ⇒ 请求通了却读不到。
       ⚠️ 副作用:租户 namespace 名字里 `<租户ID>-` 成了保留字(否则存成双前缀后再也够不到),
       写入口直接拒并说明原因。守卫 8 条,红测红 5 条
-- [ ] ⛔ **仍剩一条**:`/var/run/secrets/kubernetes.io/serviceaccount/namespace` 里还是上游名
-      (kubelet 写的,策略改不动;client-go 的 in-cluster 探测读它)。
-      靠 kubezoo 请求侧兜底 ⇒ 请求能通,但对象里的 namespace 与它认为的不一致。
-      彻底解决要给每个 namespace 生成 ConfigMap 挂到那个路径
+- [x] ✅ **最后一条也做完了**(#101):`/var/run/secrets/kubernetes.io/serviceaccount/namespace`
+      现在是租户视角名。⭐ **来源查错过**:不是 kubelet 写的,是**上游 SA 准入插件**注入的
+      downwardAPI `fieldRef: metadata.namespace`。
+      ⇒ kubezoo 在 pod 模板上盖一条注解携带租户视角名,并**自己注入** `kube-api-access-*` 卷,
+      把那一项改成 `metadata.annotations['kubezoo.io/tenant-namespace']`;上游见到该前缀的卷
+      就不再加自己那份、只接 mount(已核 1.36 源码 `admission.go:423`)。
+      ⭐ **不用每 namespace 一个 ConfigMap**:downwardAPI 允许 annotation 选择器,省掉一整个对象的生命周期。
+      ⭐ **不交给策略层**:Kyverno 不跑是静默的,而这本来就是 kubezoo 自己拥有的名字翻译。
+      ⚠️ **活 Pod 只在 CREATE 做**(`tenantProxy.Create`)—— `spec.volumes` 存下后不可变,
+      在转换器里做会让所有早于此改动的 Pod **再也无法被 update**(placement.go 已付过一次这个学费)。
+      单测 9 条、负向对照 6 条全红;lab 断言"pod 认为的 ns"与"对象回来写的 ns"**两个字符串相等**
+      (只查文件内容的探针挡不住"答案改拼写"这一半)
 
 - [x] ✅ **集群级授权分发给 SA:结构封闭的那一半已做**(审计 §AY)
       判据 = **规则里的 API 组是否全部带租户前缀**(`111111-cert-manager.io` 组名自带租户
@@ -202,16 +210,22 @@
       实测 30s 仍未出现);加了按投影标签选择的 RoleBinding informer 后 **建/删各 ~2s**。
       ⚠️ 这条**不能**在请求路径做:派生的是集群级对象,而请求路径冒充的是租户,租户在集群级什么都没有。
       冻结时一并撤除。守卫 5 条,红测红 1 条(其余四条是安全对照,本来就该两边都绿)
-- [ ] ⛔ **剩下的一半:原生集群级资源的 `list`/`watch`**(CRD / 两种 webhookconfiguration)
-      `resourceNames` 对 list 不生效(**list 请求没有名字**)⇒ 只能走 §AN 的路径绑定组,
-      那意味着**隔离从"RBAC 兜底"退成"kubezoo 过滤正确"**,且暴露面从每租户一个身份
-      变成**每个工作负载**;还要解决"该不该给这个 SA"在热路径上查+缓存陈旧。**需单独决策**
+- [x] ✅ **剩下的一半也做完了(#99,方案 B)**:原生集群级资源的 `list`/`watch`
+      (CRD / 两种 webhookconfiguration)。`resourceNames` 对 list 不生效(**list 请求没有名字**),
+      所以走**每 SA 一个路径绑定组** + `util.ClusterScopedRulesForSA` 把该 SA 要的规则
+      与平台上限**取交集**,精确到具体 SA 而不是整个租户。
+      ⚠️ 代价如实记:隔离确实从"RBAC 兜底"退成"kubezoo 过滤正确" —— 但这条**本来就成立**
+      (租户在上游是 `*` on `*`),不是这次新引入的
 - [ ] ⛔ **建议不做:`certificatesigningrequests` + `signers/approve`**
       租户今天**完全没有**这两项(核过 `clusterScopedRules()`)⇒ 不是"传下去"而是**新开权限**;
       批准 CSR = **签发客户端证书**,身份层的东西。
       ⚠️ 另记:`apiservices` kubezoo 不提供,授权是**惰性的**且没有任何报错指向它
 
-- [ ] ⛔ **P0:投影只能承载命名空间级授权 ⇒ cert-manager 装得进去、跑不起来**(审计 §AR,真装过)
+- [x] ✅ **已解决(#99 + #100):cert-manager 现在真的跑起来了**
+      三个组件 1/1,自签 Certificate 真签发(`CN=probe.example.com`,Secret `probe-cert-tls` 3 个键)。
+      验证脚本在 `scratchpad/certmanager.sh`,**没有**放进 verify.sh(装一次 helm 太慢)。
+      下面是当时的原始记录,留着是因为根因分析仍然准确:
+- [ ] ~~⛔ **P0:投影只能承载命名空间级授权 ⇒ cert-manager 装得进去、跑不起来**~~(审计 §AR,真装过)
       `helm install` 走完全部阶段(6 CRD / 3 Deployment / 13 ClusterRole / 10 CRB / 1 webhook 配置),
       但 3 个 Pod 挂 2 个:cainjector 读 `customresourcedefinitions` 被拒、
       controller 读 `clusterissuers` 被拒、webhook 等不到证书。
@@ -267,6 +281,16 @@
       能自装的是小子集,**平台托管形态因此更重要而不是更不重要**。
       待定路线:给 operator 挂租户 kubeconfig 指向 kubezoo(架构上成立,**未实测**,
       本轮 lab 里 kubezoo 绑 127.0.0.1,Pod 够不着)
+      ---
+      ⭐ **上面三段已被 #99 / #100 / #101 推翻或解决,按顺序更正**:
+      ① "带 ClusterRole 的 chart 装不上" —— **已解决**(§AQ 投影 + §AY 结构封闭派生 + #99 每 SA 交集):
+      cert-manager v1.16.2 的 33 个 RBAC 对象 33/33 装得上,三个组件 1/1,证书真签发。
+      ② "operator 挂 kubeconfig 指向 kubezoo **未实测**" —— **#100 实测了**:up.sh 给 kubezoo
+      加了 pod-facing SNI 证书 + 一个无选择器的 `kubezoo` Service/EndpointSlice 指向 docker 网关,
+      Pod 现在够得着。⚠️ 踩到两个坑:**SNI 键在 IP 上永远不匹配**(裸 IP 客户端不发 SNI),
+      以及**不给 SNI 条目起名字会被默认证书静默抢答**(默认证书 SAN 里正好有那个名字)。
+      ③ Pod 里的 namespace 视图 —— **#101 解决**(见上面 §AX 那条)。
+      ⛔ **仍然成立的只剩一条**:上游授权器缓存延迟那 143ms ⇒ helm 首次可能失败一次、重试即成功
 
 - [x] ✅ **system CRD 共享:FAQ 已是实话;产品决策 = 先不实现**(审计 §W)
       触发重评的条件:**出现第一个真实消费者**(候选:kubetron 网络 CRD)。
