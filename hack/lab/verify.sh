@@ -3677,6 +3677,7 @@ spec:
   resources: {requests: {storage: 64Mi}}
 PVC
 }
+# $3 is the claim to mount, defaulting to the one the section creates.
 csi_pod() { cat <<POD
 apiVersion: v1
 kind: Pod
@@ -3692,7 +3693,7 @@ spec:
         runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
   volumes:
     - name: v
-      persistentVolumeClaim: {claimName: csi-data}
+      persistentVolumeClaim: {claimName: ${3:-csi-data}}
 POD
 }
 
@@ -3809,6 +3810,139 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
     bad "$csi_res is exposed" "the tenant got: $(tr '\n' ' ' <<<"$csi_out" | cut -c1-140)"
   fi
 done
+
+
+# --- snapshots: a tenant's own volume, and only its own --------------------
+# ⭐ The first PLATFORM CRD group tenants address under its real name.
+# snapshot.storage.k8s.io comes with the platform's storage, not with a tenant,
+# so the usual rule -- a CRD belongs to whoever's prefix its group carries --
+# gives it to nobody. docs/design-volumesnapshot-cn.md is the review that an
+# entry in the shared allowlist costs.
+CSI_SNAPC=csi-hostpath-snapclass
+if ! $K get volumesnapshotclass "$CSI_SNAPC" >/dev/null 2>&1; then
+  bad "snapshot class" "$CSI_SNAPC is missing -- up.sh installs external-snapshotter and creates it; the snapshot checks are skipped rather than reported green"
+else
+# ⚠️ The storage class is RETIRED by the time this runs -- the section above
+# leaves it that way on purpose. A snapshot restore creates a NEW claim on it,
+# which is exactly what retirement refuses, so the restore would fail for a
+# reason that has nothing to do with snapshots. Put it back first.
+$K label storageclass "$CSI_SC" storageclass.kubezoo.io/published=true --overwrite >/dev/null
+$K label volumesnapshotclass "$CSI_SNAPC" volumesnapshotclass.kubezoo.io/published=true --overwrite >/dev/null
+sleep 4
+
+csi_disc=$($T api-resources --api-group=snapshot.storage.k8s.io 2>&1)
+grep -q volumesnapshots <<<"$csi_disc" \
+  && ok "a tenant sees snapshot.storage.k8s.io under its real name, not a prefixed one" \
+  || bad "shared group discovery" "$(tr '\n' ' ' <<<"$csi_disc" | cut -c1-180)"
+# ⛔ And not the resource that would let it import another tenant's data.
+grep -q volumesnapshotcontents <<<"$csi_disc" \
+  && bad "volumesnapshotcontents is advertised" "a tenant must not even see it" \
+  || ok "and volumesnapshotcontents is not advertised"
+
+$T apply -f - >/dev/null 2>&1 <<SNAP
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: {name: csi-snap}
+spec:
+  volumeSnapshotClassName: $CSI_SNAPC
+  source: {persistentVolumeClaimName: csi-data}
+SNAP
+for _ in $(seq 40); do
+  [ "$($T get volumesnapshots csi-snap -o jsonpath='{.status.readyToUse}' 2>/dev/null)" = true ] && break
+  sleep 3
+done
+if [ "$($T get volumesnapshots csi-snap -o jsonpath='{.status.readyToUse}' 2>/dev/null)" = true ]; then
+  ok "the platform's snapshot controller really takes a tenant's snapshot"
+else
+  bad "taking a snapshot" "readyToUse='$($T get volumesnapshots csi-snap -o jsonpath='{.status.readyToUse}' 2>&1 | cut -c1-100)' ; $($K -n "$NS" describe volumesnapshot csi-snap 2>&1 | tail -3 | tr '\n' ' ' | cut -c1-200)"
+fi
+# ⭐ The controller writes snapcontent-<uid> straight upstream, with no tenant
+# prefix -- the shape that made a dynamically provisioned claim unreadable.
+# Reading it back at all is the assertion.
+csi_bound=$($T get volumesnapshots csi-snap -o jsonpath='{.status.boundVolumeSnapshotContentName}' 2>&1)
+[[ "$csi_bound" == snapcontent-* ]] \
+  && ok "and the tenant reads back the content name the controller wrote" \
+  || bad "reading the bound content" "got '$(cut -c1-140 <<<"$csi_bound")'"
+
+$T apply -f - >/dev/null 2>&1 <<SNAP
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: csi-restored}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: $CSI_SC
+  resources: {requests: {storage: 64Mi}}
+  dataSource: {name: csi-snap, kind: VolumeSnapshot, apiGroup: snapshot.storage.k8s.io}
+SNAP
+# ⚠️ Asserted before the Pod, so that a refused or unbound claim is not reported
+# as a scheduling problem. It was: the claim was refused because its class had
+# been retired two assertions earlier, and the failure read "pod does not have a
+# host assigned".
+for _ in $(seq 40); do
+  [ "$($T get persistentvolumeclaims csi-restored -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ] && break
+  sleep 3
+done
+if [ "$($T get persistentvolumeclaims csi-restored -o jsonpath='{.status.phase}' 2>/dev/null)" = Bound ]; then
+  ok "a claim whose dataSource is the tenant's snapshot binds"
+else
+  bad "restoring into a claim" "phase='$($T get persistentvolumeclaims csi-restored -o jsonpath='{.status.phase}' 2>&1 | cut -c1-120)' -- an error rather than a phase means the claim itself was refused"
+fi
+$T apply -f <(csi_pod csi-restorer 'sleep 3600' csi-restored) >/dev/null 2>&1
+for _ in $(seq 50); do
+  [ "$($T get pod csi-restorer -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
+  sleep 3
+done
+csi_content=$($T exec csi-restorer -- cat /data/f 2>&1 | tr -d '\r\n')
+[ "$csi_content" = tenant-data ] \
+  && ok "and a claim restored from that snapshot carries the tenant's data" \
+  || bad "restoring from a snapshot" "phase=$($T get pod csi-restorer -o jsonpath='{.status.phase}' 2>&1) got: $(cut -c1-140 <<<"$csi_content")"
+
+# ⛔ The escape the whole integration is shaped around. A VolumeSnapshotContent
+# carries spec.source.snapshotHandle -- the real handle on the storage system --
+# so a tenant able to make one could name another tenant's snapshot, point the
+# reference back at itself (which passes every upstream check, namespace
+# included) and restore a claim from it. Requiring a reference back does NOT
+# help: it reserves the object, it does not stop the payload being someone
+# else's. See docs/design-volumesnapshot-cn.md §3.
+expect_denied "importing a pre-existing snapshot" "cannot be imported" -- \
+  $T apply -f <(cat <<SNAP
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: {name: csi-imported}
+spec:
+  volumeSnapshotClassName: $CSI_SNAPC
+  source: {volumeSnapshotContentName: snapcontent-someone-elses}
+SNAP
+)
+csi_out=$($T apply -f - 2>&1 <<SNAP
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotContent
+metadata: {name: csi-forged}
+spec:
+  deletionPolicy: Delete
+  driver: hostpath.csi.k8s.io
+  source: {snapshotHandle: "someone-elses-handle"}
+  volumeSnapshotRef: {namespace: default, name: csi-snap}
+SNAP
+)
+grep -qiE "not found|doesn't have a resource type|no matches|forbidden|error" <<<"$csi_out" \
+  && ok "and a tenant cannot create a VolumeSnapshotContent at all" \
+  || bad "content creation" "$(tr '\n' ' ' <<<"$csi_out" | cut -c1-180)"
+
+# Publication is the authorization here too.
+$K label volumesnapshotclass "$CSI_SNAPC" volumesnapshotclass.kubezoo.io/published- >/dev/null 2>&1
+sleep 4
+expect_denied "a snapshot on an unpublished class" "no volume snapshot class" -- \
+  $T apply -f <(cat <<SNAP
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: {name: csi-unpublished}
+spec:
+  volumeSnapshotClassName: $CSI_SNAPC
+  source: {persistentVolumeClaimName: csi-data}
+SNAP
+)
+fi
 
 # Put the class back the way up.sh leaves it.
 $K label storageclass "$CSI_SC" storageclass.kubezoo.io/published- >/dev/null 2>&1

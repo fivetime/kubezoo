@@ -354,6 +354,36 @@ else
   done
   echo "csi: hostpath driver installed"
 fi
+# ⭐ Snapshots need three things the driver does not bring: the CRDs, the
+# platform's snapshot controller, and a VolumeSnapshotClass. Without them a
+# tenant's VolumeSnapshot is accepted and never reconciled, which is exactly the
+# silent shape the storage work keeps running into.
+if kubectl --context "kind-$CLUSTER" get crd volumesnapshots.snapshot.storage.k8s.io >/dev/null 2>&1; then
+  echo "csi: snapshot CRDs already installed"
+else
+  if [ ! -d "$LAB/external-snapshotter" ]; then
+    git clone -q --depth 1 https://github.com/kubernetes-csi/external-snapshotter.git \
+      "$LAB/external-snapshotter" || {
+      echo "FATAL: could not fetch external-snapshotter. The snapshot assertions in" >&2
+      echo "       verify.sh would then fail about this fetch rather than about kubezoo." >&2
+      exit 1
+    }
+  fi
+  kubectl --context "kind-$CLUSTER" apply -f "$LAB/external-snapshotter/client/config/crd/" >/dev/null
+  kubectl --context "kind-$CLUSTER" apply -f "$LAB/external-snapshotter/deploy/kubernetes/snapshot-controller/" >/dev/null
+  echo "csi: snapshot CRDs and controller installed"
+fi
+# ⚠️ Unlabelled, like the storage class: verify.sh publishes it and takes it back.
+kubectl --context "kind-$CLUSTER" apply -f - >/dev/null <<'SNAPEOF'
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata: {name: csi-hostpath-snapclass}
+driver: hostpath.csi.k8s.io
+deletionPolicy: Delete
+SNAPEOF
+kubectl --context "kind-$CLUSTER" label volumesnapshotclass csi-hostpath-snapclass \
+  volumesnapshotclass.kubezoo.io/published- >/dev/null 2>&1 || true
+
 # ⚠️ deploy.sh does NOT create a StorageClass. Unlabelled on purpose: the tenant
 # must not see it until verify.sh publishes it, which is the first state of the
 # matrix.
