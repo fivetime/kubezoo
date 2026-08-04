@@ -59,3 +59,21 @@ func (c *nativeObjectConvertor) ConvertUpstreamObjectToTenantObject(obj runtime.
 	}
 	return convertor.ConvertUpstreamObjectToTenantObject(obj, tenantID, isNamespaceScoped)
 }
+
+// ConvertedKinds returns the kinds a native convertor has a special convertor
+// for, so a test can check them against what the server actually serves.
+//
+// ⚠️ Exported for TestEveryConvertedKindIsServed, and read off the built
+// convertor rather than from a list beside it. A second list is a second place
+// to forget something, which is the whole failure this guards.
+func ConvertedKinds(c common.ObjectConvertor) []schema.GroupKind {
+	native, ok := c.(*nativeObjectConvertor)
+	if !ok {
+		return nil
+	}
+	kinds := make([]schema.GroupKind, 0, len(native.nativeKindToConvertors))
+	for gk := range native.nativeKindToConvertors {
+		kinds = append(kinds, gk)
+	}
+	return kinds
+}

@@ -99,10 +99,19 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 			Group: "",
 			Kind:  "PersistentVolume",
 		}: NewCrossReferenceConverter(defaultConvertor, NewPVTransformer()),
-		{
-			Group: "storage.k8s.io",
-			Kind:  "VolumeAttachment",
-		}: NewCrossReferenceConverter(defaultConvertor, NewVolumeAttachmentTransformer()),
+		// ⛔ storage.k8s.io/VolumeAttachment was here and could never run:
+		// apigroups.go does not serve the resource, so no request ever reaches a
+		// convertor keyed on that kind. It is the same shape as the PriorityClass
+		// entry removed below, and the reason for removing it is the same -- an
+		// entry that cannot match reads as "this kind is handled" to the next
+		// person, and would silently reproduce the PersistentVolume bug on the day
+		// the resource started being served.
+		//
+		// ⭐ Found by installing a real CSI driver: it creates VolumeAttachments,
+		// so the objects the dead convertor claimed to handle now genuinely exist.
+		// Tenants still cannot address them and should not -- spec.nodeName names a
+		// machine, which is what Node and ResourceSlice were withheld for.
+		// TestEveryConvertedKindIsServed refuses a new one.
 		{
 			Group: "rbac.authorization.k8s.io",
 			Kind:  "ClusterRole",
