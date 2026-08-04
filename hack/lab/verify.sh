@@ -156,11 +156,30 @@ echo "== setting up tenant $TID =="
 # A terminating namespace still answers `get`, and creating anything inside one
 # fails with "because it is being terminated" -- which arrives as an empty field
 # read further down and looks like a policy stripping it.
-$K delete tenant.tenant.kubezoo.io "$TID" >/dev/null 2>&1
+# ⚠️ Through the ZOO. Tenants live in kubezoo's own etcd and are not an upstream
+# resource, so deleting one with $K is a no-op that reports nothing -- and the
+# wait below then spends its whole budget on namespaces nobody asked to go.
+kubectl --kubeconfig "$ZOOKC" delete tenant "$TID" >/dev/null 2>&1
 for _ in $(seq 40); do
   [ "$($K get ns -l "kubezoo.io/tenant=$TID" --no-headers 2>/dev/null | wc -l)" = 0 ] && break
   sleep 3
 done
+# ⛔ And say so when they do not go, instead of carrying on. Deleting a tenant is
+# ASYNCHRONOUS: the request returns at once and the controller tears the
+# namespaces down afterwards. up.sh wipes kubezoo's etcd, so a run started while
+# the previous teardown is still in flight removes the Tenant object mid-way and
+# the controller never finishes -- the namespaces survive with everything in
+# them, and the next run fails with AlreadyExists on objects it has never heard
+# of, in sections that have nothing to do with any of this. Measured: nine
+# failures across six unrelated sections, from two runs three minutes apart.
+leftover=$($K get ns -l "kubezoo.io/tenant=$TID" --no-headers 2>/dev/null | wc -l)
+if [ "$leftover" != 0 ]; then
+  echo "FATAL: $leftover namespaces of a previous $TID are still here after 120s." >&2
+  echo "       A tenant teardown from an earlier run did not finish -- most likely up.sh wiped" >&2
+  echo "       kubezoo's etcd while it was in flight. Delete them and run again:" >&2
+  echo "         kubectl --context kind-$CLUSTER delete ns -l kubezoo.io/tenant=$TID" >&2
+  exit 1
+fi
 
 kubectl --kubeconfig "$ZOOKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
   --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
@@ -1678,6 +1697,154 @@ else
   bad "deleting it withdraws the grant from every namespace" \
       "$withdrawn -- a copy left behind still grants, and nothing in the tenant's view explains it"
 fi
+
+echo
+echo "== a tenant's CLUSTER-SCOPED custom resources are reachable by its own workloads =="
+# ⛔ The projection is one RoleBinding per namespace, and a RoleBinding can never
+# carry a cluster-scoped grant. So an operator needing its OWN cluster-scoped
+# custom resource -- ClusterIssuer, ClusterPolicy, ClusterSecretStore -- installs
+# cleanly and then cannot run. cert-manager stops exactly there.
+#
+# ⭐ What makes a REAL cluster-wide binding safe here is not filtering, it is the
+# group: `<tid>-something.io` can only ever hold that tenant's objects, because
+# pkg/convert rewrites spec.group on the way in and refuses any other. So there
+# is nothing to keep being right later -- the other tenants' objects are not in
+# that group at all.
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: clusterwidgets.cw.example}
+spec:
+  group: cw.example
+  names: {plural: clusterwidgets, singular: clusterwidget, kind: ClusterWidget}
+  scope: Cluster
+  versions: [{name: v1, served: true, storage: true, schema: {openAPIV3Schema: {type: object}}}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: cs-op}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: cs-op}
+rules:
+- apiGroups: ["cw.example"]
+  resources: ["clusterwidgets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: cs-op}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cs-op}
+subjects: [{kind: ServiceAccount, name: cs-op, namespace: default}]
+EOF
+# ⚠️ Retried: the derivation is a controller reconcile, not part of the write.
+# That is deliberate -- it needs a privilege the tenant does not have, so it
+# cannot happen on the request path -- but it means it arrives afterwards.
+derived=0
+for _ in $(seq 20); do
+  derived=$($K get clusterrolebinding -l kubezoo.io/clusterscoped=true --no-headers 2>/dev/null | grep -c "cs-op" || true)
+  [ "${derived:-0}" -ge 1 ] && break
+  sleep 3
+done
+if [ "${derived:-0}" -ge 1 ]; then
+  ok "a real cluster-wide binding is derived for the tenant's own API group"
+else
+  # ⛔ Carry the evidence into the message. The derivation reads a record, then
+  # its ClusterRole, then filters the rules -- three places it can come up
+  # empty, and "none found" says which of them only by accident. The controller
+  # logs at V(4) and the lab runs it at default verbosity, so its own account of
+  # this is invisible.
+  bad "a real cluster-wide binding is derived for the tenant's own API group" \
+      "record=[$($K -n "$TID-kube-system" get rolebindings -l kubezoo.io/clusterrolebinding=true \
+         -o jsonpath='{range .items[*]}{.metadata.name}->{.roleRef.kind}/{.roleRef.name} {end}' 2>&1 | cut -c1-120)] \
+role-rules=[$($K get clusterrole "$TID-cs-op" -o jsonpath='{.rules[*].apiGroups[*]}' 2>&1 | cut -c1-80)]"
+fi
+
+# ⭐⭐ THE SECURITY ASSERTION. The role above also grants secrets in the CORE
+# group. If that rule were derived too, this tenant's ServiceAccount would read
+# every secret in the cluster -- every other tenant's included. The filter must
+# keep the first rule and drop the second.
+derived_role=$($K get clusterrole -l kubezoo.io/clusterscoped=true -o name 2>/dev/null | grep cs-op | head -1)
+if [ -z "$derived_role" ]; then
+  bad "only the tenant's own API groups are derived" "no derived clusterrole to inspect"
+else
+  derived_groups=$($K get "$derived_role" -o jsonpath='{.rules[*].apiGroups[*]}' 2>/dev/null)
+  if grep -qE "(^| )$TID-cw\.example( |$)" <<<"$derived_groups" && \
+     ! grep -qE '(^| )("" ?|\*)( |$)' <<<" $derived_groups "; then
+    ok "and ONLY the tenant's own API groups are in it, not the core group it also asked for"
+  else
+    bad "only the tenant's own API groups are derived" \
+        "the derived role grants [$derived_groups] cluster-wide -- anything but $TID-* reaches other tenants"
+  fi
+fi
+
+# And it actually works: the SA reads its own cluster-scoped CR through kubezoo.
+CSTOK=$($K -n "$NS" create token cs-op --duration=10m 2>/dev/null)
+if [ -n "$CSTOK" ]; then
+  CSKC=$LAB/verify-cs-sa.kubeconfig; rm -f "$CSKC"
+  kubectl --kubeconfig "$CSKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
+    --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+  kubectl --kubeconfig "$CSKC" config set-credentials sa --token="$CSTOK" >/dev/null
+  kubectl --kubeconfig "$CSKC" config set-context c --cluster=zoo --user=sa >/dev/null
+  kubectl --kubeconfig "$CSKC" config use-context c >/dev/null
+  # Retried: the grant arrives through the upstream authorizer, which lags.
+  cs_ok=no
+  for _ in $(seq 20); do
+    kubectl --kubeconfig "$CSKC" get clusterwidgets >/dev/null 2>&1 && { cs_ok=yes; break; }
+    sleep 2
+  done
+  if [ "$cs_ok" = yes ]; then
+    ok "the tenant's ServiceAccount can list its own cluster-scoped custom resource"
+  else
+    bad "the tenant's ServiceAccount can list its own cluster-scoped custom resource" \
+        "$(kubectl --kubeconfig "$CSKC" get clusterwidgets 2>&1 | head -1 | cut -c1-140)"
+  fi
+  rm -f "$CSKC"
+fi
+
+# ⭐⭐ The other half of the same grant, and it is asked of the UPSTREAM
+# authorizer at CLUSTER scope rather than through kubezoo. That distinction is
+# the assertion: `get secrets -A` through kubezoo means "every namespace of
+# MINE", which the projection grants and should -- the first version of this
+# asked that and failed on a tenant behaving exactly as intended. What must not
+# exist is a grant with no namespace at all, because that one reaches every
+# other tenant.
+cs_sa="system:serviceaccount:$TID-default:cs-op"
+if [ "$($K auth can-i list secrets --as="$cs_sa" 2>/dev/null)" = no ]; then
+  ok "and the same ServiceAccount holds no cluster-wide secrets, which the role also asked for"
+else
+  bad "the derived grant is confined to the tenant's own API groups" \
+      "$cs_sa can list secrets at cluster scope -- the core-group rule was derived too, so every tenant's secrets are readable"
+fi
+# ⚠️ And the positive control for that probe: the same SA must still hold the
+# grant it is supposed to have, at cluster scope, on the tenant's own group.
+# Without this, `can-i` answering no to everything would read as success.
+if [ "$($K auth can-i list clusterwidgets.$TID-cw.example --as="$cs_sa" 2>/dev/null)" = yes ]; then
+  ok "while it does hold the cluster-wide grant on its own group"
+else
+  bad "the derived grant reaches the tenant's own group at cluster scope" \
+      "$cs_sa cannot list its own cluster-scoped custom resource upstream, so the derivation granted nothing"
+fi
+
+$T delete clusterrolebinding cs-op >/dev/null 2>&1
+gone=no
+for _ in $(seq 15); do
+  [ "$($K get clusterrolebinding -l kubezoo.io/clusterscoped=true --no-headers 2>/dev/null | grep -c cs-op || true)" = 0 ] \
+    && { gone=yes; break; }
+  sleep 2
+done
+if [ "$gone" = yes ]; then
+  ok "deleting the binding withdraws the derived cluster-wide grant too"
+else
+  bad "deleting the binding withdraws the derived cluster-wide grant too" \
+      "the derived binding is still there, so the tenant cannot take back a grant it made"
+fi
+$T delete clusterrole cs-op >/dev/null 2>&1
+$T delete crd clusterwidgets.cw.example >/dev/null 2>&1
 
 echo
 echo "== a tenant's ServiceAccount gets the cluster-wide half that is its own =="
