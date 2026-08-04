@@ -206,13 +206,6 @@ base64file() {
 # which is a different CA and a different name resolution than the path a tenant
 # workload actually takes.
 gen_pod_facing_cert() {
-    local gateway
-    gateway=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
-        | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)
-    if [ -z "$gateway" ]; then
-        echo "gen_pod_facing_cert: could not find the kind network gateway" >&2
-        return 1
-    fi
     local up=$KUBEZOO_DIR/upstream-ca
     mkdir -p "$up"
     docker cp kz-audit3-control-plane:/etc/kubernetes/pki/ca.crt "$up/ca.crt" >/dev/null 2>&1
@@ -236,9 +229,14 @@ gen_pod_facing_cert() {
     openssl x509 -req -in "$up/pod-facing.csr" \
         -CA "$up/ca.crt" -CAkey "$up/ca.key" -CAcreateserial \
         -out "$KUBEZOO_DIR/pod-facing.pem" -days 3650 \
-        -extfile <(printf "subjectAltName=DNS:kubezoo.default.svc,DNS:kubezoo.default.svc.cluster.local,DNS:kubezoo.default,IP:%s,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n" "$gateway") \
+        -extfile <(printf "subjectAltName=DNS:kubezoo.default.svc,DNS:kubezoo.default.svc.cluster.local\nextendedKeyUsage=serverAuth\n") \
         >/dev/null 2>&1
-    echo "pod-facing cert for kubezoo.default.svc (via $gateway), signed by the upstream CA"
+    # ⚠️ NO IP SANs, and no 127.0.0.1 in particular. The default certificate
+    # already carries kubezoo.default.svc among its names, so both would claim
+    # the same one and --tls-sni-cert-key is given an explicit name in up.sh to
+    # settle it. Putting 127.0.0.1 here as well would let this certificate --
+    # signed by a CA the host does not trust -- answer the host's own kubectl.
+    echo "pod-facing cert for kubezoo.default.svc, signed by the upstream CA"
 }
 
 gen_quota_webhook_cert() {

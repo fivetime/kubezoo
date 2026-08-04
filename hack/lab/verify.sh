@@ -1847,6 +1847,118 @@ $T delete clusterrole cs-op >/dev/null 2>&1
 $T delete crd clusterwidgets.cw.example >/dev/null 2>&1
 
 echo
+echo "== a tenant's WORKLOAD reaches kubezoo, and sees the tenant's view =="
+# ⛔⛔ THE PATH THIS PLATFORM SELLS, and there WAS already a probe for it that
+# covered neither of the two things that were broken. The sa-probe section above
+# runs curl inside a Pod and writes a custom resource through kubezoo -- it looks
+# like this path is covered. It is not:
+#
+#   curl -sk  https://$ZOO_HOST:6443/...
+#         ^^              ^
+#    skips the cert    an address the LAB computes
+#
+# so it exercises neither the certificate a Pod is given nor the address the
+# policy injects. A real workload has no choice about either: it validates with
+# the upstream cluster's CA bundle and connects to KUBERNETES_SERVICE_HOST.
+#
+# ⚠️ Both were broken for the entire life of this lab -- the address placeholder
+# was never substituted, and the serving certificate was signed by kubezoo's own
+# CA rather than the one Pods carry -- and every assertion here stayed green. It
+# took installing cert-manager for real to find it.
+#
+# ⭐ So this probe deliberately does neither: no -k, and the address comes from
+# the environment rather than from this script.
+#
+# ⭐ The response is what proves which server answered: through kubezoo the
+# tenant's namespace is called `default`, and upstream it is `909090-default`.
+# Reachability alone would pass against the wrong one.
+$T -n default apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: pod-probe}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: pod-probe}
+# ⚠️ get, by name. A LIST answers with whatever else is in the namespace first
+# and the marker fell past the probe's own truncation -- the request has to be
+# for the one object the assertion is about.
+rules: [{apiGroups: [""], resources: ["configmaps"], verbs: ["get"]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: pod-probe}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: pod-probe}
+subjects: [{kind: ServiceAccount, name: pod-probe, namespace: default}]
+EOF
+$T -n default create configmap pod-probe-marker --from-literal=a=b >/dev/null 2>&1
+$T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: api-probe}
+spec:
+  serviceAccountName: pod-probe
+  restartPolicy: Never
+  containers:
+  - name: c
+    image: curlimages/curl:8.11.1
+    command: ["sh","-c"]
+    args:
+    - |
+      curl -sS --max-time 20 --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H "Authorization: Bearer \$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" "https://\$KUBERNETES_SERVICE_HOST:\$KUBERNETES_SERVICE_PORT/api/v1/namespaces/default/configmaps/pod-probe-marker" 2>&1 | head -c 600
+      echo
+      sleep 240
+    securityContext:
+      privileged: false
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      capabilities: {drop: ["ALL"]}
+      seccompProfile: {type: RuntimeDefault}
+EOF
+probe_out=""
+for _ in $(seq 40); do
+  # ⚠️ Read through $K, upstream. What is asserted is what the POD saw; reading
+  # it through kubezoo would drag the log subresource into a check that is not
+  # about it, and a failure there would report as this failing.
+  probe_out=$($K -n "$NS" logs api-probe 2>/dev/null)
+  [ -n "$probe_out" ] && break
+  sleep 3
+done
+# ⛔ The raw response, unfiltered. The first version piped it through
+# `grep '"name"'`, so an authorization failure -- which is a Status object with
+# no such field -- arrived as an EMPTY string and reported as "no output after
+# 120s". The evidence was in hand and thrown away by the probe itself.
+if [ -z "$probe_out" ]; then
+  bad "a tenant Pod reaches kubezoo at all" \
+      "nothing after 120s. pod=$($K -n "$NS" get pod api-probe -o jsonpath='{.status.phase}' 2>&1) \
+host=$($K -n "$NS" get pod api-probe -o jsonpath='{.spec.containers[0].env[?(@.name==\"KUBERNETES_SERVICE_HOST\")].value}' 2>&1)"
+elif grep -q "KUBEZOO_ADDRESS_PLACEHOLDER" <<<"$probe_out"; then
+  bad "a tenant Pod reaches kubezoo at all" \
+      "the address placeholder was never substituted, so no tenant workload can reach any API server"
+elif grep -qiE "certificate|x509|SSL" <<<"$probe_out"; then
+  bad "a tenant Pod trusts the certificate kubezoo serves it" \
+      "$(tr '\n' ' ' <<<"$probe_out" | cut -c1-160) -- a Pod validates with the UPSTREAM CA, so kubezoo needs an SNI certificate signed by it"
+elif ! grep -q "pod-probe-marker" <<<"$probe_out"; then
+  bad "a tenant Pod is answered by kubezoo" \
+      "$(tr '\n' ' ' <<<"$probe_out" | cut -c1-200)"
+else
+  ok "a tenant Pod reaches kubezoo with its projected token and the CA it was given"
+  # ⭐ WHICH server answered. Through kubezoo the object's namespace is the
+  # tenant's own name for it; upstream it carries the tenant prefix. Reaching
+  # something and reaching the RIGHT something are different claims.
+  if ! grep -q "$TID-default" <<<"$probe_out"; then
+    ok "and answered in the tenant's own terms, so it reached kubezoo and not the upstream"
+  else
+    bad "a tenant Pod is answered in the tenant's own terms" \
+        "the response names $TID-default, which is the upstream's name for it"
+  fi
+fi
+$T -n default delete pod api-probe --force --grace-period=0 >/dev/null 2>&1
+$T -n default delete configmap pod-probe-marker >/dev/null 2>&1
+$T -n default delete serviceaccount pod-probe >/dev/null 2>&1
+
+echo
 echo "== a tenant's ServiceAccount gets the cluster-wide half that is its own =="
 # The projection is a RoleBinding per namespace and a RoleBinding never
 # authorizes a cluster-scoped resource, so the cluster-scoped rules of a tenant's

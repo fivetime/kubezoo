@@ -159,7 +159,7 @@ nohup "$ZOO"/_output/local/bin/linux/amd64/kubezoo \
   --proxy-client-ca-file=$PKI/upstream/ca.crt --request-timeout=10m --watch-cache=true \
   --proxy-upstream-master=https://127.0.0.1:13486 --service-account-lookup=true \
   --api-audiences=$UPSTREAM_SA_ISSUER \
-  --tls-sni-cert-key=$PKI/kubezoo/pod-facing.pem,$PKI/kubezoo/pod-facing-key.pem \
+  --tls-sni-cert-key=$PKI/kubezoo/pod-facing.pem,$PKI/kubezoo/pod-facing-key.pem:kubezoo.default.svc,kubezoo.default.svc.cluster.local \
   --audit-policy-file=$ZOO/config/setup/audit-policy.yaml \
   --audit-log-path=$LAB/kubezoo-audit.log \
   --public-ingress-classes=${PUBLIC_INGRESS_CLASSES:-nginx} \
