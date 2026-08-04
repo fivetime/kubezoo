@@ -1882,6 +1882,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
 EOF
   expect_allowed "a tenant binds its ServiceAccount to a role naming its own cluster-scoped resource" \
     $T apply -f - <<EOF
@@ -1918,6 +1921,86 @@ EOF
     bad "nothing native comes with it" \
         "secrets=$($K auth can-i list secrets --as="$own_sa" 2>/dev/null) crds=$($K auth can-i get customresourcedefinitions --as="$own_sa" 2>/dev/null)"
   fi
+  # ⭐⭐ The NATIVE half (task #99). The same role also asks for
+  # validatingwebhookconfigurations -- a resource that is not the tenant's by
+  # name, so nothing about the object says who may see it. cainjector needs
+  # exactly this and cannot get it any other way: resourceNames does not apply to
+  # list or watch.
+  #
+  # ⚠️ Asked THROUGH KUBEZOO, unlike everything above. The grant lives on a group
+  # kubezoo adds when it forwards, so `--as=<the ServiceAccount>` -- which is how
+  # the assertions above ask -- deliberately does NOT see it. That is the design:
+  # an identity reaching upstream by any other route carries nothing.
+  SATOK=$($K -n "$NS" create token own-op --duration=10m 2>/dev/null)
+  if [ -n "$SATOK" ]; then
+    SAKC=$LAB/verify-own-sa.kubeconfig; rm -f "$SAKC"
+    kubectl --kubeconfig "$SAKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
+      --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
+    kubectl --kubeconfig "$SAKC" config set-credentials sa --token="$SATOK" >/dev/null
+    kubectl --kubeconfig "$SAKC" config set-context c --cluster=zoo --user=sa >/dev/null
+    kubectl --kubeconfig "$SAKC" config use-context c >/dev/null
+
+    # A webhook configuration of the tenant's own, and one of the PLATFORM's.
+    # The platform's carries no tenant prefix, which is the only thing that
+    # decides -- so it is the control for every claim below.
+    $T apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata: {name: sa-visible}
+webhooks: []
+EOF
+    $K apply -f - >/dev/null 2>&1 <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata: {name: platform-only-probe}
+webhooks: []
+EOF
+    listed=""
+    for _ in $(seq 30); do
+      listed=$(kubectl --kubeconfig "$SAKC" get validatingwebhookconfigurations --no-headers 2>&1)
+      grep -q "sa-visible" <<<"$listed" && break
+      sleep 2
+    done
+    sa_native=no
+    if grep -q "sa-visible" <<<"$listed"; then
+      sa_native=yes
+      ok "the ServiceAccount can list a NATIVE cluster-scoped resource through kubezoo"
+    else
+      # ⛔ Carry the evidence. The grant is written by the controller, from the
+      # intersection of the role and what the tenant may hold, onto a group
+      # kubezoo asserts -- three places it can come up empty, and the Forbidden
+      # alone says which only by accident.
+      bad "the ServiceAccount can list a native cluster-scoped resource through kubezoo" \
+          "$(tr '\n' ' ' <<<"$listed" | cut -c1-120) | derived=[$($K get clusterrolebinding \
+             -l kubezoo.io/clusterscoped=true -o jsonpath='{range .items[*]}{.metadata.name}->{.subjects[*].name} {end}' 2>&1 | cut -c1-160)]"
+    fi
+    # ⭐ The assertion that matters. Listing cannot be narrowed by name in RBAC,
+    # so upstream returns every webhook configuration there is; what the tenant
+    # sees is decided by kubezoo filtering on the way back.
+    # ⚠️ Gated on the list having WORKED. Both assertions below pass for free
+    # when it did not: an error message contains neither name, and a delete is
+    # refused along with everything else. The first version reported two passes
+    # on a run where nothing was granted at all.
+    if [ "$sa_native" = yes ]; then
+    if grep -q "platform-only-probe" <<<"$listed"; then
+      bad "and sees only its own" \
+          "the platform's own webhook configuration is visible to a tenant workload"
+    else
+      ok "and sees only its own, not the platform's"
+    fi
+    # ⚠️ Reads only. The same role asked for get/list/watch and nothing more, but
+    # the intersection is what decides -- a write must still be refused.
+    if kubectl --kubeconfig "$SAKC" delete validatingwebhookconfiguration sa-visible >/dev/null 2>&1; then
+      bad "and holds reads only" "it deleted a webhook configuration; the derived grant carried a write"
+    else
+      ok "and holds reads only, not the writes it did not ask for"
+    fi
+    fi
+    $K delete validatingwebhookconfiguration platform-only-probe >/dev/null 2>&1
+    $T delete validatingwebhookconfiguration sa-visible >/dev/null 2>&1
+    rm -f "$SAKC"
+  fi
+
   # Withdrawing has to be as prompt as granting, or a deleted binding keeps
   # granting with nothing in the tenant's view to explain it.
   $T delete clusterrolebinding own-op >/dev/null 2>&1
