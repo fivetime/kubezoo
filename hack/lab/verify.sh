@@ -3979,6 +3979,39 @@ else
   fi
 fi
 
+# ⭐ The invariant the whole translation layer exists to hold, asserted over
+# whole objects rather than over the fields somebody remembered: a tenant never
+# sees its own upstream prefix. Anywhere it appears, some convertor stopped
+# trimming -- and the failure that produces is silent, because the value is a
+# perfectly well-formed name that simply belongs to the platform's namespace of
+# names. That is exactly how the in-pod namespace file went wrong: every request
+# succeeded, and an operator indexing on it matched nothing, forever.
+#
+# ⚠️ Read as JSON over every kind rather than per-field. A field list only ever
+# covers what was thought of, and this whole section came out of finding that
+# discovery had eleven kinds nobody had looked at.
+leak_kinds="deployments replicasets pods services configmaps serviceaccounts roles
+  rolebindings networkpolicies poddisruptionbudgets secrets endpoints endpointslices events
+  persistentvolumeclaims ingresses jobs cronjobs horizontalpodautoscalers leases"
+leaked=""
+leak_seen=0
+for leak_kind in $leak_kinds; do
+  leak_json=$($T get "$leak_kind" -o json --request-timeout=20s 2>/dev/null) || continue
+  [ -z "$leak_json" ] && continue
+  leak_seen=$((leak_seen+1))
+  leak_hit=$(printf '%s' "$leak_json" | grep -o "$TID-[a-z0-9.-]*" | sort -u | tr '\n' ' ')
+  [ -n "$leak_hit" ] && leaked="$leaked $leak_kind($leak_hit)"
+done
+# ⚠️ A sweep that read nothing passes in silence.
+if [ "$leak_seen" -lt 10 ]; then
+  bad "the tenant's own view" "only $leak_seen kinds could be read, so the leak sweep proves nothing"
+elif [ -z "$leaked" ]; then
+  ok "across $leak_seen kinds, nothing the tenant reads back carries its upstream prefix"
+else
+  bad "the tenant sees its own upstream prefix" \
+    "in:$leaked -- a name from the platform's namespace of names reached the tenant, and nothing errors when it does"
+fi
+
 
 # --- the other way into storage from a pod spec ----------------------------
 # ⛔ A generic ephemeral volume embeds a whole PVC template, and the claim is

@@ -70,6 +70,7 @@ func (c *DefaultConvertor) ConvertTenantObjectToUpstreamObject(obj runtime.Objec
 			accessor.SetGenerateName(util.AddTenantIDPrefix(tenantID, accessor.GetGenerateName()))
 		}
 	}
+	rewriteLastApplied(obj, tenantID, isNamespaceScoped, true)
 	ownerReferences := accessor.GetOwnerReferences()
 	for i := range ownerReferences {
 		target, err := c.ownerRefTransformer.Forward(&ownerReferences[i], tenantID)
@@ -109,6 +110,7 @@ func (c *DefaultConvertor) ConvertUpstreamObjectToTenantObject(obj runtime.Objec
 		// because ValidateObjectMetaAccessorUpdate never looks at generateName.
 		accessor.SetGenerateName(util.TrimTenantIDPrefix(tenantID, accessor.GetGenerateName()))
 	}
+	rewriteLastApplied(obj, tenantID, isNamespaceScoped, false)
 	ownerReferences := accessor.GetOwnerReferences()
 	for i := range ownerReferences {
 		target, err := c.ownerRefTransformer.Backward(&ownerReferences[i], tenantID)
