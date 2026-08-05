@@ -181,6 +181,39 @@ if [ "$leftover" != 0 ]; then
   exit 1
 fi
 
+# ⛔ And a tenant is not only its namespaces. The guard above covered the half of
+# the leftovers that carries a label; the cluster-scoped half carries only the
+# tenant's name in its own, and nothing was looking at it.
+#
+# Measured, today: a killed run left ten ClusterRoles, a ClusterRoleBinding and
+# an IngressClass behind. Clearing the namespaces by hand was not enough -- the
+# next run failed with "clusterroles ... already exists" and with a CRD grant
+# that never arrived, in two sections that have nothing to do with either. That
+# is the same misreading the comment above was written about, one scope up.
+#
+# ⚠️ Deleted rather than made fatal, and the difference is real: a terminating
+# namespace cannot be helped along, so stopping is the only honest move there.
+# These are ordinary objects nobody owns any more, and a delete finishes. But it
+# SAYS SO when it finds any -- a run that quietly cleans up after a previous one
+# every time is a run whose teardown is broken, and that has to stay visible.
+#
+# ⭐ CRDs are matched separately: a tenant's CRD is prefixed by GROUP, so its
+# name is <plural>.<tenant>-<group> and a name-prefix match misses every one.
+stale_cluster_scoped=""
+for kind in clusterroles clusterrolebindings ingressclasses priorityclasses \
+            runtimeclasses storageclasses volumeattributesclasses persistentvolumes; do
+  found=$($K get "$kind" -o name --no-headers 2>/dev/null | grep -E "/$TID-" || true)
+  [ -n "$found" ] && stale_cluster_scoped="$stale_cluster_scoped $found"
+done
+found=$($K get crds -o name --no-headers 2>/dev/null | grep -E "[/.]$TID-" || true)
+[ -n "$found" ] && stale_cluster_scoped="$stale_cluster_scoped $found"
+if [ -n "$stale_cluster_scoped" ]; then
+  echo "NOTE cluster-scoped leftovers of a previous $TID were deleted before starting:"
+  echo "     $(tr ' ' '\n' <<<"$stale_cluster_scoped" | sed '/^$/d' | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  $K delete $stale_cluster_scoped --wait=true >/dev/null 2>&1
+fi
+
 kubectl --kubeconfig "$ZOOKC" config set-cluster zoo --certificate-authority=$PKI/ca.pem \
   --embed-certs=true --server=https://127.0.0.1:6443 >/dev/null
 kubectl --kubeconfig "$ZOOKC" config set-credentials admin --client-certificate=$PKI/admin.pem \
@@ -2757,6 +2790,90 @@ expect_denied "editing an accepted Ingress onto a foreign hostname" "own subdoma
 expect_allowed "the platform may still use any hostname it likes" \
   $K -n kube-public create ingress verify-plat --rule='anything.example.com/*=s:80'
 $K -n kube-public delete ingress verify-plat >/dev/null 2>&1
+
+# ⛔ A THIRD list of host names, and it is not in the spec at all. The
+# server-alias annotation goes into the SAME nginx server_name as
+# spec.rules[].host -- upstream rootfs/etc/nginx/template/nginx.tmpl:639:
+#   server_name {{ buildServerName $server.Hostname }} {{ range $server.Aliases }}...
+# so everything the two rules above refuse could be taken straight back with one
+# annotation. This is not "annotations are unfiltered" in general; it is a bypass
+# of THIS policy, which is why it is asserted here rather than with the others.
+ingress_with_alias() {
+  cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: $1
+  annotations: {nginx.ingress.kubernetes.io/server-alias: "$2"}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.$TID.apps.example.com
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+}
+# ⭐ The positive control comes first: an alias under the tenant's own subdomain
+# is ordinary use, and without it the three refusals below would all pass just as
+# well if the annotation were banned outright -- a different, worse policy that
+# this section could not tell apart.
+expect_allowed "an alias under the tenant's own subdomain" \
+  $T -n default apply -f <(ingress_with_alias alias-own "www.$TID.apps.example.com")
+expect_denied "an alias naming a foreign domain" "server-alias" -- \
+  $T -n default apply -f <(ingress_with_alias alias-foreign bank.example.com)
+# ⚠️ The value is a COMMA-SEPARATED list (upstream ValidateArrayOfServerName).
+# A check written against the whole string would accept this one: only the LAST
+# entry is legal.
+expect_denied "and one hidden in a comma-separated list" "server-alias" -- \
+  $T -n default apply -f <(ingress_with_alias alias-list "bank.example.com, www.$TID.apps.example.com")
+# ⚠️ Upstream accepts regexes here, and an nginx regex server_name is not
+# implicitly anchored -- so "ends with the tenant's suffix" does not mean the
+# same thing for a regex as it does for a name. This one ends with the suffix
+# exactly and still has to be refused.
+expect_denied "and a regex alias, even one ending in the tenant's own suffix" "server-alias" -- \
+  $T -n default apply -f <(ingress_with_alias alias-regex "~.$TID.apps.example.com")
+$T -n default delete ingress alias-own >/dev/null 2>&1
+
+echo
+echo "== the ingress controller's high-risk annotations belong to the platform =="
+# Annotations are the ingress controller's main configuration surface, and they
+# are interpreted BY THE PLATFORM'S OWN CONTROLLER, in one nginx.conf shared with
+# every other tenant. kubezoo passes them through untouched -- pkg/convert/ingress.go
+# rewrites the class and nothing else -- so the refusal is a policy, and its list
+# is upstream's own Risk: Critical/High classification rather than one this
+# repository invented.
+ingress_annotated() {
+  cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: $1
+  annotations: {"$2": "$3"}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.$TID.apps.example.com
+      http: {paths: [{path: /, pathType: Prefix, backend: {service: {name: s, port: {number: 80}}}}]}
+EOF
+}
+# ⭐ Positive control first, for the same reason as above: a section that refused
+# every annotation would pass every check below it.
+expect_allowed "an ordinary annotation the tenant is meant to have" \
+  $T -n default apply -f <(ingress_annotated ann-ok nginx.ingress.kubernetes.io/rewrite-target /)
+expect_denied "a configuration-snippet, which is raw nginx config" "reserved to the platform" -- \
+  $T -n default apply -f <(ingress_annotated ann-snippet nginx.ingress.kubernetes.io/configuration-snippet "more_set_headers 'x: y';")
+# auth-url makes the controller open a connection of the tenant's choosing from
+# the platform's own network namespace -- the same shape as the ExternalName and
+# probe-host findings, with a different component doing the dialling.
+expect_denied "an auth-url, which the platform's controller would dial" "reserved to the platform" -- \
+  $T -n default apply -f <(ingress_annotated ann-auth nginx.ingress.kubernetes.io/auth-url "http://169.254.169.254/latest/meta-data/")
+expect_denied "and a mirror-target, which copies traffic anywhere" "reserved to the platform" -- \
+  $T -n default apply -f <(ingress_annotated ann-mirror nginx.ingress.kubernetes.io/mirror-target "http://elsewhere.example.com/collect")
+# Updates as well as creates: an Ingress accepted without the annotation must not
+# be able to grow one afterwards.
+expect_denied "and adding one to an Ingress that was already accepted" "reserved to the platform" -- \
+  $T -n default patch ingress ann-ok --type=merge \
+    -p '{"metadata":{"annotations":{"nginx.ingress.kubernetes.io/auth-url":"http://10.0.0.1/"}}}'
+$T -n default delete ingress ann-ok >/dev/null 2>&1
 
 echo
 echo "== node pools must not overlap =="
