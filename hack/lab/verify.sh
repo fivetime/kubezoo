@@ -260,7 +260,19 @@ T="kubectl --kubeconfig $TKC -n default"
 # needs one or nothing it creates will schedule -- which is correct behaviour and
 # exactly the trap the runbook warns about, but it would make the pod checks here
 # fail for the wrong reason. Borrow a node and give it back at the end.
-POOL_NODE=$($K get nodes -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
+#
+# ⛔ Which node is not arbitrary once there is more than one, and "the last one"
+# was arbitrary. csi-driver-host-path is a NODE-LOCAL driver: the volume lives on
+# the node the plugin runs on, and the PV carries a nodeAffinity to it. Pin the
+# tenant to a different node and every storage assertion fails at
+# FailedScheduling -- measured on the first three-node run: ten failures, one
+# cause, none of them about kubezoo.
+#
+# ⚠️ This is the shape the whole multi-node exercise was for: a single-node
+# cluster made "the last node" and "the node with the driver" the same node, so
+# an assumption nobody had written down could not be wrong.
+POOL_NODE=$($K get pod csi-hostpathplugin-0 -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+[ -n "$POOL_NODE" ] || POOL_NODE=$($K get nodes -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
 POOL_WAS=$($K get node "$POOL_NODE" -o jsonpath='{.metadata.labels.kubezoo\.io/pool}' 2>/dev/null)
 $K label node "$POOL_NODE" "kubezoo.io/pool=$TID" --overwrite >/dev/null 2>&1
 
@@ -2897,6 +2909,36 @@ elif [ -n "$overlap" ]; then
   ok "no pool value is claimed by two tenants"
 else
   ok "every pool value belongs to one tenant"
+fi
+
+# ⛔ The containment itself, and it took a multi-node cluster to be able to fail.
+# Everything above reasons about LABELS; this asks where the pod actually ran.
+# On a single-node cluster the tenant's pool node and the only node were the same
+# node, so "it landed outside its pool" had nowhere to happen -- the assertion
+# would have passed against a build with no placement policy at all.
+#
+# ⚠️ Reads spec.nodeName from the STORED pod, and skips rather than passes when
+# the cluster cannot answer: on one node this proves nothing, and saying so is
+# the point of writing it here.
+outside=$($K get nodes -o json | jq -r --arg pool "$TID" '
+  [.items[] | select(.metadata.labels["kubezoo.io/pool"] != $pool) | .metadata.name] | length')
+if [ "${outside:-0}" -lt 1 ]; then
+  echo "  SKIP every node is in this tenant's pool, so there is nowhere for a pod to land wrongly"
+else
+  placed_on=$($K -n "$NS" get pods -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u | sed '/^$/d')
+  wrong=""
+  for placed_node in $placed_on; do
+    node_pool=$($K get node "$placed_node" -o jsonpath='{.metadata.labels.kubezoo\.io/pool}' 2>/dev/null)
+    [ "$node_pool" = "$TID" ] || wrong="$wrong $placed_node(pool=${node_pool:-none})"
+  done
+  if [ -z "$placed_on" ]; then
+    bad "the tenant's pods" "none has a node assigned, so placement containment is untested"
+  elif [ -z "$wrong" ]; then
+    ok "every pod of this tenant ran on a node of its own pool, with $outside node(s) it could have used instead"
+  else
+    bad "a tenant pod ran outside its pool" \
+      "on:$wrong -- the injected nodeSelector is the only thing on the binding path that stops this"
+  fi
 fi
 
 echo

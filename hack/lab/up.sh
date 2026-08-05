@@ -87,6 +87,33 @@ fi
 kind export kubeconfig --name "$CLUSTER"
 kubectl config use-context "kind-$CLUSTER"
 
+# ⛔ Node topology is fixed when the cluster is created, and everything above is
+# inside the "does it already exist" guard -- so WORKERS on an existing cluster
+# did NOTHING, silently. up.sh reported success, the run went green, and the
+# cluster still had one node.
+#
+# ⚠️ That is why the knob had never actually been exercised: on any machine that
+# already had the lab, asking for workers produced a single-node cluster and a
+# clean run. And a single-node cluster makes the per-tenant pool assertions
+# STRUCTURALLY unable to fail -- there is no second node for a cross-tenant
+# binding to aim at, and "pools must not overlap" is true of one node whatever
+# the labels say.
+#
+# Refuses rather than warns: a warning here is read as "fine", and the whole
+# point of setting WORKERS is that the run means something different.
+if [ -n "${WORKERS:-}" ]; then
+  have_workers=$(kubectl --context "kind-$CLUSTER" get nodes \
+    -l '!node-role.kubernetes.io/control-plane' --no-headers 2>/dev/null | wc -l)
+  if [ "$have_workers" != "$WORKERS" ]; then
+    echo "FATAL: WORKERS=$WORKERS was asked for, but $CLUSTER has $have_workers worker node(s)." >&2
+    echo "       kind fixes the topology at creation time and this script reuses an existing" >&2
+    echo "       cluster, so WORKERS is a no-op here -- and a single-node cluster makes the" >&2
+    echo "       node-pool assertions unable to fail. Recreate it:" >&2
+    echo "         kind delete cluster --name $CLUSTER && WORKERS=$WORKERS $0" >&2
+    exit 1
+  fi
+fi
+
 echo "== PKI =="
 cd "$ZOO"
 bash hack/lib/gen_pki.sh gen_pki_setup_ctx >"$LAB/pki.log" 2>&1
@@ -341,17 +368,33 @@ else
   fi
   # deploy.sh uses plain kubectl, i.e. the current context -- which up.sh has
   # already pointed at this cluster.
-  ( cd "$LAB/csi-driver-host-path" && bash deploy/kubernetes-latest/deploy.sh ) \
-    >"$LAB/csi-deploy.log" 2>&1 || {
-    echo "FATAL: the CSI hostpath driver failed to deploy; see $LAB/csi-deploy.log" >&2
-    exit 1
-  }
-  for _ in $(seq 40); do
+  # ⚠️ deploy.sh's exit code is ADVISORY here, and the readiness loop below is
+  # what decides. Its own `kubectl wait` is tuned for a single-node cluster where
+  # the images are already cached; on a freshly created multi-node one the plugin
+  # lands on a worker that has to pull eight images first, and deploy.sh gives up
+  # while the pull is still running. Measured: FATAL from deploy.sh, and the pod
+  # reached 8/8 a couple of minutes later untouched.
+  #
+  # ⛔ Said out loud rather than swallowed. A deploy that really is broken must
+  # not look the same as one that was merely slow, so the failure is reported and
+  # only the VERDICT is deferred to the loop.
+  if ! ( cd "$LAB/csi-driver-host-path" && bash deploy/kubernetes-latest/deploy.sh ) \
+    >"$LAB/csi-deploy.log" 2>&1; then
+    echo "NOTE the CSI deploy script reported failure; waiting to see whether the driver" >&2
+    echo "     comes up anyway (its own wait is short for a cluster that must pull images)." >&2
+    echo "     If the FATAL below fires, the deploy really did fail: $LAB/csi-deploy.log" >&2
+  fi
+  for _ in $(seq 60); do
     ready=$(kubectl --context "kind-$CLUSTER" get pod csi-hostpathplugin-0 \
       -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null | tr ' ' '\n' | grep -c true)
     [ "${ready:-0}" -ge 8 ] && break
     sleep 5
   done
+  if [ "${ready:-0}" -lt 8 ]; then
+    echo "FATAL: the CSI hostpath driver never became ready; see $LAB/csi-deploy.log" >&2
+    kubectl --context "kind-$CLUSTER" get pod csi-hostpathplugin-0 -o wide >&2 2>/dev/null
+    exit 1
+  fi
   echo "csi: hostpath driver installed"
 fi
 # ⚠️ ModifyVolume is OFF by default in this driver, and without it a
@@ -374,21 +417,61 @@ fi
 # platform's snapshot controller, and a VolumeSnapshotClass. Without them a
 # tenant's VolumeSnapshot is accepted and never reconciled, which is exactly the
 # silent shape the storage work keeps running into.
-if kubectl --context "kind-$CLUSTER" get crd volumesnapshots.snapshot.storage.k8s.io >/dev/null 2>&1; then
-  echo "csi: snapshot CRDs already installed"
-else
-  if [ ! -d "$LAB/external-snapshotter" ]; then
-    git clone -q --depth 1 https://github.com/kubernetes-csi/external-snapshotter.git \
-      "$LAB/external-snapshotter" || {
-      echo "FATAL: could not fetch external-snapshotter. The snapshot assertions in" >&2
-      echo "       verify.sh would then fail about this fetch rather than about kubezoo." >&2
-      exit 1
-    }
-  fi
-  kubectl --context "kind-$CLUSTER" apply -f "$LAB/external-snapshotter/client/config/crd/" >/dev/null
-  kubectl --context "kind-$CLUSTER" apply -f "$LAB/external-snapshotter/deploy/kubernetes/snapshot-controller/" >/dev/null
-  echo "csi: snapshot CRDs and controller installed"
+#
+# ⛔⛔ THE GUARD USED TO ASK ABOUT ONE OF THOSE THREE AND SKIP ALL THREE. It
+# tested for the CRDs; the block installs the CRDs AND the controller. So once
+# the CRDs existed the controller was never installed again -- and on a
+# long-lived cluster whose controller had been put there by hand while #104 was
+# written, nothing ever noticed. A cluster built from scratch got the CRDs and no
+# controller: tenant snapshots were accepted, stayed readyToUse empty forever,
+# and the VolumeSnapshot had no events at all. Four assertions, no cause visible
+# in any of them.
+#
+# ⭐ The list of three is written in the comment directly above the guard that
+# checked one. Fixed by REMOVING THE CLASS rather than the instance: only the
+# clone is expensive, `kubectl apply` is idempotent, so the applies always run.
+if [ ! -d "$LAB/external-snapshotter" ]; then
+  git clone -q --depth 1 https://github.com/kubernetes-csi/external-snapshotter.git \
+    "$LAB/external-snapshotter" || {
+    echo "FATAL: could not fetch external-snapshotter. The snapshot assertions in" >&2
+    echo "       verify.sh would then fail about this fetch rather than about kubezoo." >&2
+    exit 1
+  }
 fi
+{
+  # ⛔ -k, not -f. Both of these directories carry a kustomization.yaml, and
+  # `apply -f <dir>` reads every file in it -- including that one, which is not a
+  # resource: "no matches for kind Kustomization ... ensure CRDs are installed first".
+  #
+  # ⚠️ Creating the cluster from scratch is what ran this for the first time in a
+  # long while, and it failed immediately: apply -f had already written the CRD
+  # files before it reached kustomization.yaml and died, so the cluster was left
+  # with the CRDs and no controller -- and the guard below then saw the CRDs on
+  # every later run and skipped everything.
+  #
+  # ⚠️ Where the long-lived cluster's controller had come from is NOT established.
+  # It was there and working; this script cannot have been what put it there.
+  kubectl --context "kind-$CLUSTER" apply -k "$LAB/external-snapshotter/client/config/crd" >/dev/null
+  kubectl --context "kind-$CLUSTER" apply -k "$LAB/external-snapshotter/deploy/kubernetes/snapshot-controller" >/dev/null
+}
+# ⚠️ Checked, not assumed. The failure this replaces was invisible at install
+# time and only showed up four assertions later, as a snapshot that never became
+# ready with no events to say why.
+for _ in $(seq 30); do
+  # ⚠️ -n kube-system. Without it this looked in "default", got NotFound, and
+  # `set -e` killed up.sh on the assignment with no message at all -- the check
+  # written to make a silent failure loud, failing silently.
+  snap_ready=$(kubectl --context "kind-$CLUSTER" -n kube-system get deploy snapshot-controller \
+    -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  [ "${snap_ready:-0}" -ge 1 ] && break
+  sleep 4
+done
+if [ "${snap_ready:-0}" -lt 1 ]; then
+  echo "FATAL: the snapshot controller never became ready. Tenant snapshots would be" >&2
+  echo "       accepted and never reconciled, which reads as a kubezoo bug." >&2
+  exit 1
+fi
+echo "csi: snapshot CRDs and controller installed"
 # ⚠️ Unlabelled, like the storage class: verify.sh publishes it and takes it back.
 kubectl --context "kind-$CLUSTER" apply -f - >/dev/null <<'SNAPEOF'
 apiVersion: snapshot.storage.k8s.io/v1
