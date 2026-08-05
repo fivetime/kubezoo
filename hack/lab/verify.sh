@@ -3935,6 +3935,62 @@ endpoints:
     targetRef: {kind: Pod, name: csi-reader, namespace: default}
 EP
 
+# --- what the kubelet will dial on a tenant's behalf -----------------------
+# ⛔ probe/http/request.go: `host := httpGet.Host`, and upstream's own comment
+# says "When httpGet.Host is empty, podIP will be used instead" -- so a non-empty
+# host is dialled verbatim, BY THE KUBELET, from the node's network. The tenant's
+# pods are on a per-tenant network; the node is not. periodSeconds and the pod
+# count are the tenant's, so it is a scanner the platform runs on a schedule the
+# tenant sets, and the Ready condition reports the result back.
+probe_pod() { cat <<PRB
+apiVersion: v1
+kind: Pod
+metadata: {name: $1}
+spec:
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      $2
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+PRB
+}
+expect_denied "a liveness probe aimed at an address of the tenant's choosing" "dialled BY THE KUBELET" -- \
+  $T apply -f <(probe_pod probe-http 'livenessProbe: {httpGet: {host: 169.254.169.254, path: /, port: 80}}')
+expect_denied "and a tcpSocket one" "dialled BY THE KUBELET" -- \
+  $T apply -f <(probe_pod probe-tcp 'readinessProbe: {tcpSocket: {host: 10.0.0.1, port: 22}}')
+expect_denied "and a preStop hook" "dialled BY THE KUBELET" -- \
+  $T apply -f <(probe_pod probe-hook 'lifecycle: {preStop: {httpGet: {host: 10.0.0.1, path: /, port: 80}}}')
+# ⚠️ initContainers carry the same probes, and a rule applied to one list and not
+# the other is this repository's most repeated bug.
+expect_denied "and one on an initContainer" "dialled BY THE KUBELET" -- \
+  $T apply -f - <<'PRB'
+apiVersion: v1
+kind: Pod
+metadata: {name: probe-init}
+spec:
+  initContainers:
+    - name: i
+      image: busybox
+      command: ["sh","-c","true"]
+      restartPolicy: Always
+      livenessProbe: {httpGet: {host: 10.0.0.1, path: /, port: 80}}
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: c
+      image: busybox
+      command: ["sh","-c","sleep 3600"]
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+PRB
+# ⭐ Positive control: an ordinary probe with no host is the normal case and the
+# whole point of the field being optional. Without this the section would pass
+# just as well if every probe were refused.
+expect_allowed "while an ordinary probe on the pod's own address still works" \
+  $T apply -f <(probe_pod probe-ok 'livenessProbe: {httpGet: {path: /, port: 8080}}')
+
 # --- the field the endpoint guard was trusting -----------------------------
 # ⛔ kubezoo serves pods/status and a tenant is "*" on "*" in its own namespaces,
 # so it could write status.podIPs -- the very field refuseForgedEndpointAddress

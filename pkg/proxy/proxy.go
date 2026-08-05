@@ -506,6 +506,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseTenantWrittenPodAddresses(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseProbeHost(obj); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -742,6 +745,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	if err := tp.refuseUnpublishedEphemeralClasses(obj, nil); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseProbeHost(obj); err != nil {
 		return nil, err
 	}
 	if err := tp.refuseNewExternalIPs(obj, nil); err != nil {
@@ -1902,6 +1908,12 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseTenantWrittenPodAddresses(updated, original); err != nil {
+			return nil, false, err
+		}
+		// ⚠️ A template's probes are mutable, so create-only would be reachable by
+		// writing twice -- and a live pod's probes are mutable too, unlike its
+		// volumes.
+		if err := tp.refuseProbeHost(updated); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
