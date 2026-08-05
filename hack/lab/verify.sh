@@ -4132,21 +4132,42 @@ for _ in $(seq 40); do
   [ "$($T get pod status-probe -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] && break
   sleep 3
 done
-# ⚠️ Asserted on the END STATE, not on a refusal, and that is deliberate. The
-# guard refuses a CHANGE to these fields, but a tenant's patch may also come back
-# having changed nothing for a reason nobody here has established -- in the lab it
-# did exactly that, "patched (no change)", while upstream's podStatusStrategy
-# PrepareForUpdate demonstrably does NOT preserve the old podIPs. What matters is
-# not which layer says no; it is that the address a pod claims is not the
-# tenant's to choose. An assertion on the refusal alone would have gone red for a
-# property that holds.
-$T patch pod status-probe --subresource=status --type=merge \
-  -p '{"status":{"podIPs":[{"ip":"10.99.99.99"}]}}' >/dev/null 2>&1
-ps_ip=$($K -n "$NS" get pod status-probe -o jsonpath='{.status.podIPs[0].ip}' 2>/dev/null)
-if [ "$ps_ip" = 10.99.99.99 ]; then
-  bad "a tenant cannot choose its pod's address" "status.podIPs is now $ps_ip -- refuseForgedEndpointAddress reads this field to decide whether an endpoint address is real, so a tenant that can write it validates its own forgery"
+# ⛔⛔ THE FIELD HERE IS THE SCALAR podIP, AND THAT IS THE WHOLE POINT.
+#
+# This assertion first patched status.podIPs, saw "patched (no change)", and was
+# written up as a hole that could not be reproduced. It reproduces. Measured
+# against the upstream apiserver directly, on an ordinary pod:
+#
+#   patch {"status":{"podIP":"10.9.9.9"}}                -> podIP=10.9.9.9 podIPs=[10.9.9.9]
+#   patch {"status":{"podIPs":[{"ip":"10.9.9.9"}]}}      -> (no change)
+#
+# The reason is in the version this builds against, pkg/apis/core/v1/conversion.go:263:
+#
+#   // If both fields (v1.PodIPs and v1.PodIP) are provided and differ, then
+#   // PodIP is authoritative for compatibility with older kubelets
+#
+# The internal PodStatus has no scalar field, so the two versioned ones are
+# reconciled on the way in and the SCALAR WINS. A merge patch that sets only
+# podIPs leaves the real podIP in place beside it, they differ, and the real one
+# is taken -- the write lands and changes nothing.
+#
+# ⚠️ So "(no change)" never meant the write was refused. It meant this patch does
+# not alter the stored object, and reading it as a refusal is what turned a live
+# hole into a mystery. Both variants are asserted below, because a guard that
+# only catches the ineffective one is worth nothing.
+for ps_field in '"podIP":"10.99.99.99"' '"podIPs":[{"ip":"10.99.99.99"}]'; do
+  $T patch pod status-probe --subresource=status --type=merge \
+    -p "{\"status\":{$ps_field}}" >/dev/null 2>&1
+done
+# Asserted on the END STATE rather than on the refusal: what matters is not which
+# layer says no, it is that the address a pod claims is not the tenant's to
+# choose. Read through $K, because the tenant's own view is not the evidence.
+ps_ip=$($K -n "$NS" get pod status-probe -o jsonpath='{.status.podIP}' 2>/dev/null)
+ps_ips=$($K -n "$NS" get pod status-probe -o jsonpath='{.status.podIPs[0].ip}' 2>/dev/null)
+if [ "$ps_ip" = 10.99.99.99 ] || [ "$ps_ips" = 10.99.99.99 ]; then
+  bad "a tenant cannot choose its pod's address" "podIP=$ps_ip podIPs[0]=$ps_ips -- refuseForgedEndpointAddress reads this field to decide whether an endpoint address is real, so a tenant that can write it validates its own forgery, and the apiserver's pod proxy dials it straight from the control plane"
 else
-  ok "a tenant cannot choose the address its own pod claims (still $ps_ip)"
+  ok "a tenant cannot choose the address its own pod claims, by either field (still $ps_ip)"
 fi
 # ⭐ Positive control: a readiness gate is a tenant's controller writing
 # status.conditions, and refusing the whole subresource to close four fields
