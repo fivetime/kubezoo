@@ -112,6 +112,13 @@ func forwardCRDConversionWebhook(crd *crdinternal.CustomResourceDefinition, tena
 		return nil
 	}
 	if clientConfig.URL != nil {
+		// ⚠️ This message recommends clientConfig.service, and that recommendation
+		// rests on a premise that was FALSE until recently: that a Service in the
+		// tenant's own namespace can only reach the tenant's own pods. An
+		// ExternalName Service resolves to any host the tenant names, so the
+		// approved path rebuilt exactly the capability refused on the line above.
+		// It holds now only because tenantProxy.refuseExternalNameService closes it
+		// on the Service write -- see the comment there before relaxing either one.
 		return errors.Errorf("crd %s: spec.conversion.webhook.clientConfig.url is not available "+
 			"to tenants, because a URL cannot be confined to the tenant; use service to name a "+
 			"service in one of your namespaces", crd.Name)

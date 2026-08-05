@@ -4108,6 +4108,109 @@ PRB
 expect_allowed "while an ordinary probe on the pod's own address still works" \
   $T apply -f <(probe_pod probe-ok 'livenessProbe: {httpGet: {path: /, port: 8080}}')
 
+echo
+echo "== a registry address is dialled by the kubelet, so the tenant does not pick it =="
+# ⛔ Measured, on this lab, before the policy existed:
+#   image: 10.244.0.1:5000/x   -> Event: dial tcp 10.244.0.1:5000: connect: connection refused
+#   image: 10.99.99.99:5000/x  -> Event: dial tcp 10.99.99.99:5000: i/o timeout
+# open / closed / filtered are all distinguishable, the address and port come back
+# verbatim, and the tenant reads it with `kubectl describe pod`. The pull happens
+# in the NODE's network namespace, which is not the tenant's -- the same shape as
+# the probe host and the ingress auth-url, with the kubelet doing the dialling.
+# ⚠️ The name is a parameter because the initContainer case below puts two of
+# these in one pod. Sharing the default made that object violate TWO things at
+# once, and the one it was refused for was "Duplicate value: c" -- see the note
+# in config/policy/README.md about not attributing a refusal to the wrong rule.
+img_ctr() { printf '{name: %s, image: %s, command: ["sh","-c","sleep 3600"], securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}}' "${2:-c}" "$1"; }
+img_pod() {
+  cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: $1}
+spec:
+  containers: [$(img_ctr "$2")]
+EOF
+}
+# ⭐ Positive controls first, and the first one is not a formality: the rule has to
+# tell a registry host from an ordinary image name, and "busybox:1.36" contains a
+# colon. A check that read the colon as a port would refuse the commonest way
+# anyone writes an image, and every refusal below would still pass.
+expect_allowed "an ordinary Docker Hub image, tag and all" \
+  $T -n default apply -f <(img_pod img-bare busybox:1.36)
+# org/name is also Docker Hub -- a first segment with a slash after it is not a
+# host unless it looks like one.
+expect_allowed "and the org/name form of the same registry" \
+  $T -n default apply -f <(img_pod img-org library/busybox:1.36)
+expect_denied "an image whose registry is an address on the platform's network" "registry this platform allows" -- \
+  $T -n default apply -f <(img_pod img-addr 10.99.99.99:5000/whatever:latest)
+# An allowlist, not an address filter: a real registry nobody allowed is refused too.
+expect_denied "and one from a real registry the platform has not allowed" "registry this platform allows" -- \
+  $T -n default apply -f <(img_pod img-ghcr ghcr.io/someone/something:v1)
+expect_denied "and one on an initContainer" "registry this platform allows" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: img-init}
+spec:
+  initContainers: [$(img_ctr 10.99.99.99:5000/whatever:latest i)]
+  containers: [$(img_ctr busybox:1.36 c)]
+EOF
+# ⛔⛔ The controller kinds are the point of writing this as a native VAP. Kyverno's
+# autogen copies a validate.deny's CONDITIONS verbatim into the derived controller
+# rules and only shifts references in the message (kyverno pkg/autogen/v1/rule.go:167),
+# so a rule reading spec.containers would read an empty list on a Deployment and
+# never refuse -- Ready, and doing nothing. If this assertion goes green while the
+# Pod one does too, the branch for spec.template.spec is working.
+expect_denied "and one in a Deployment's template, not just in a Pod" "registry this platform allows" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: img-deploy}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: img}}
+  template:
+    metadata: {labels: {app: img}}
+    spec:
+      containers: [$(img_ctr 10.99.99.99:5000/whatever:latest)]
+EOF
+# CronJob nests one level deeper than every other controller, so it is the branch
+# most likely to be wrong -- and a wrong branch here fails OPEN.
+expect_denied "and one in a CronJob, which nests a level deeper" "registry this platform allows" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: img-cron}
+spec:
+  schedule: "0 0 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers: [$(img_ctr 10.99.99.99:5000/whatever:latest)]
+EOF
+# PodTemplate keeps its spec at the top level rather than under .spec, and it is
+# the kind Kyverno's autogen leaves out entirely.
+expect_denied "and one in a PodTemplate, the kind autogen forgets" "registry this platform allows" -- \
+  $T -n default apply -f - <<EOF
+apiVersion: v1
+kind: PodTemplate
+metadata: {name: img-tpl}
+template:
+  spec:
+    containers: [$(img_ctr 10.99.99.99:5000/whatever:latest)]
+EOF
+# ⛔ And the subresource, which was missing from this policy's first draft: an
+# ephemeral container's image cannot be set on a Pod create or update at all --
+# upstream only accepts it here -- and kubezoo serves the subresource
+# (cmd/kubezoo/app/apigroups.go:150). A policy matching "pods" alone would have
+# carried an ephemeralContainers branch that nothing could ever reach.
+expect_denied "and one on an ephemeral container, which only the subresource can set" "registry this platform allows" -- \
+  $T -n default patch pod img-bare --subresource=ephemeralcontainers --type=strategic \
+    -p "{\"spec\":{\"ephemeralContainers\":[{\"name\":\"dbg\",\"image\":\"10.99.99.99:5000/whatever:latest\",\"securityContext\":{\"privileged\":false,\"allowPrivilegeEscalation\":false,\"runAsNonRoot\":true,\"runAsUser\":1000,\"capabilities\":{\"drop\":[\"ALL\"]},\"seccompProfile\":{\"type\":\"RuntimeDefault\"}}}]}}"
+$T -n default delete pod img-bare img-org --wait=false >/dev/null 2>&1
+
 # --- the field the endpoint guard was trusting -----------------------------
 # ⛔ kubezoo serves pods/status and a tenant is "*" on "*" in its own namespaces,
 # so it could write status.podIPs -- the very field refuseForgedEndpointAddress
