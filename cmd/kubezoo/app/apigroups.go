@@ -1110,3 +1110,50 @@ func ServedAPIGroups() map[string]bool {
 	}
 	return served
 }
+
+// ServedAPIResources returns, per group, the resources this build installs
+// storage for.
+//
+// ⛔ Serving a GROUP is not the same as serving everything in it, and discovery
+// was treating it as though it were. Measured against a tenant: of the 64 kinds
+// advertised, ELEVEN answered NotFound when addressed -- csidrivers, csinodes,
+// csistoragecapacities and volumeattachments (the machine-facing four, withheld
+// on purpose), resourceslices, ipaddresses, servicecidrs, and both admission
+// policy kinds with their bindings. Every one of them lives in a group kubezoo
+// does serve, so filtering by group alone let them through.
+//
+// ⭐ The reasoning already existed in this repository, one field over:
+// discoveryProxy.sharedResources exists because "advertising a group advertises
+// everything upstream reports in it", which for snapshots would have advertised
+// volumesnapshotcontents. That rule was applied to the shared CRD groups and
+// never carried to the native ones -- the same shape as the rolebinding fix its
+// own twin, clusterrolebinding, did not receive.
+//
+// ⚠️ A group with NO entry here is passed through unfiltered rather than emptied.
+// The groups installed elsewhere (apiextensions, tenant.kubezoo.io,
+// quota.kubezoo.io) have no storage config to read, and the note above records
+// what happens when a set like this is missing something: leaving apiextensions
+// out of ServedAPIGroups stopped tenants managing CRDs at all. Absent means
+// unknown here, not empty.
+//
+// Derived from the same values that build the storage, so the two cannot drift.
+func ServedAPIResources() map[string]map[string]bool {
+	served := map[string]map[string]bool{}
+	collect := func(config *apiconfig.APIGroupConfig) {
+		resources := served[config.Group]
+		if resources == nil {
+			resources = map[string]bool{}
+			served[config.Group] = resources
+		}
+		for _, byResource := range config.StorageConfigs {
+			for resource := range byResource {
+				resources[resource] = true
+			}
+		}
+	}
+	collect(&legacyGroup)
+	for i := range nonLegacyGroups {
+		collect(&nonLegacyGroups[i])
+	}
+	return served
+}

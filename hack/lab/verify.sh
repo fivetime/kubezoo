@@ -3917,6 +3917,13 @@ fi
 # A real driver creates VolumeAttachments. kubezoo does not serve them and
 # should not: spec.nodeName names a machine, which is what Node and
 # ResourceSlice were withheld for.
+#
+# ⚠️ These four now fail EARLIER than they used to, and the assertion is written
+# loosely enough not to notice. They were refused by the server, as NotFound;
+# since discovery stopped advertising resources kubezoo does not install, kubectl
+# refuses them itself with "doesn't have a resource type". Both are covered by the
+# pattern below, and both mean the same thing here -- but if this ever gets
+# tightened to one message, tighten it to the one the build actually produces.
 csi_va=$($K get volumeattachments --no-headers 2>/dev/null | wc -l)
 [ "$csi_va" -ge 1 ] || bad "the driver attaches" "no VolumeAttachment exists, so the check below proves nothing about a resource that is in use"
 for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
@@ -3927,6 +3934,50 @@ for csi_res in volumeattachments csidrivers csinodes csistoragecapacities; do
     bad "$csi_res is exposed" "the tenant got: $(tr '\n' ' ' <<<"$csi_out" | cut -c1-140)"
   fi
 done
+
+# --- what the tenant is TOLD exists, versus what it can reach ---------------
+# ⛔ Asserted as a property over the whole discovery document rather than as a
+# list of names, because a list only ever catches what somebody thought of.
+# Measured before this held: of 64 kinds advertised to a tenant, ELEVEN answered
+# NotFound -- the four machine-facing storage resources just checked above,
+# resourceslices, ipaddresses, servicecidrs, and both admission policy kinds
+# with their bindings. Every one of them sits in a group kubezoo does serve, and
+# discovery filtered by GROUP.
+#
+# ⭐ Not a hole -- none of them was reachable. It is the API telling the tenant
+# something untrue, in the direction that misleads rather than exposes: a tenant
+# that tries to create a ValidatingAdmissionPolicy is told the platform has no
+# such API, when the truth is that it may not have one. Anything that walks
+# discovery and acts on it -- a backup tool, a policy engine, a dynamic informer
+# -- breaks on all eleven.
+disc_advertised=$($T api-resources --request-timeout=30s 2>/dev/null | awk 'NR>1{print $1}' | sort -u)
+disc_count=$(wc -w <<<"$disc_advertised")
+# ⚠️ A sweep over an empty list passes in silence, which is the failure this
+# assertion exists to prevent.
+if [ "$disc_count" -lt 40 ]; then
+  bad "the tenant's discovery document" "only $disc_count kinds came back, so the sweep below proves nothing"
+else
+  disc_lying=""
+  for disc_res in $disc_advertised; do
+    # Create-only kinds: a review is POSTed and answered, never listed, so GET
+    # says MethodNotAllowed and that is correct rather than a lie.
+    case $disc_res in
+      tokenreviews|subjectaccessreviews|selfsubjectaccessreviews|selfsubjectrulesreviews|\
+      localsubjectaccessreviews|selfsubjectreviews|bindings) continue ;;
+    esac
+    disc_out=$($T get "$disc_res" --request-timeout=15s 2>&1 | head -1)
+    case "$disc_out" in
+      *"the server could not find"*|*NotFound*|*"doesn't have a resource type"*)
+        disc_lying="$disc_lying $disc_res" ;;
+    esac
+  done
+  if [ -z "$disc_lying" ]; then
+    ok "every one of the $disc_count kinds discovery advertises can actually be addressed"
+  else
+    bad "discovery advertises what it does not serve" \
+      "these answered NotFound when the tenant addressed them:$disc_lying -- a client that walks discovery breaks on each"
+  fi
+fi
 
 
 # --- the other way into storage from a pod spec ----------------------------

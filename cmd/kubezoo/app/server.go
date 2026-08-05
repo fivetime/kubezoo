@@ -984,7 +984,7 @@ func buildGenericConfig(
 	// rather than everything the scheme knows about.
 	discoveryProxy, lastErr = proxy.NewDiscoveryProxy(proxyConfig.discoveryClient,
 		proxyConfig.crdInformers.Apiextensions().V1().CustomResourceDefinitions().Lister(),
-		ServedAPIGroups(), sharedCRDResources)
+		ServedAPIGroups(), ServedAPIResources(), sharedCRDResources)
 	if lastErr != nil {
 		return
 	}

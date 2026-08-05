@@ -69,6 +69,18 @@ type discoveryProxy struct {
 	// servedGroups are the API groups this build installs storage for, which is
 	// what may be advertised. The scheme knows many more.
 	servedGroups map[string]bool
+	// servedResources are, per native group, the resources actually installed.
+	//
+	// ⛔ A group is not its contents. storage.k8s.io is served for
+	// storageclasses and volumeattributesclasses, and advertising the group
+	// advertised csidrivers, csinodes, csistoragecapacities and
+	// volumeattachments with it -- four resources withheld on purpose, every one
+	// of them NotFound when a tenant addressed it. Eleven kinds in total.
+	//
+	// ⚠️ A group absent from this map is passed through, not emptied: the groups
+	// installed outside the storage configs have nothing to read here, and
+	// treating absent as empty would advertise nothing for them.
+	servedResources map[string]map[string]bool
 	// sharedResources are the platform's own CRD groups a tenant addresses under
 	// their real names, and -- per group -- exactly which resources of them.
 	//
@@ -81,6 +93,7 @@ type discoveryProxy struct {
 
 func NewDiscoveryProxy(discoveryClient *discovery.DiscoveryClient,
 	crdLister v1.CustomResourceDefinitionLister, servedGroups map[string]bool,
+	servedResources map[string]map[string]bool,
 	sharedResources map[string]map[string]bool) (DiscoveryProxy, error) {
 	if discoveryClient == nil {
 		return nil, fmt.Errorf("discoveryClient is nil")
@@ -91,8 +104,17 @@ func NewDiscoveryProxy(discoveryClient *discovery.DiscoveryClient,
 	if len(servedGroups) == 0 {
 		return nil, fmt.Errorf("servedGroups is empty; discovery would advertise nothing")
 	}
+	// ⚠️ Checked for the same reason as servedGroups: an empty map here does not
+	// empty discovery -- absent means unfiltered -- so it would fail SILENTLY,
+	// restoring exactly the eleven advertised-but-NotFound kinds this exists to
+	// remove, with nothing to see.
+	if len(servedResources) == 0 {
+		return nil, fmt.Errorf("servedResources is empty; discovery would advertise " +
+			"every resource of every served group, including the ones withheld on purpose")
+	}
 	return &discoveryProxy{discoveryClient: discoveryClient, crdLister: crdLister,
-		servedGroups: servedGroups, sharedResources: sharedResources}, nil
+		servedGroups: servedGroups, servedResources: servedResources,
+		sharedResources: sharedResources}, nil
 }
 
 // ServerGroups returns the supported groups for tenant, with information like supported versions and the
@@ -240,7 +262,20 @@ func (dp *discoveryProxy) ServerResourcesForGroupVersion(tenantID, group, versio
 	// snapshotHandle. Discovery is not authorization, and the write guards refuse
 	// it anyway; but advertising a resource a tenant must not use invites the
 	// call and makes the refusal look like a bug.
-	if allowed := dp.sharedResources[group]; len(allowed) > 0 {
+	//
+	// ⭐ The same holds for a NATIVE group, and for a long time it did not happen
+	// there. storage.k8s.io is served for two classes, and advertising the group
+	// advertised csidrivers, csinodes, csistoragecapacities and volumeattachments
+	// along with them. Measured against a tenant: eleven advertised kinds
+	// answered NotFound. The rule was written here and applied to one of the two
+	// places it holds.
+	allowed := dp.sharedResources[group]
+	if len(allowed) == 0 {
+		// ⚠️ Absent, not empty: a group installed outside the storage configs has
+		// nothing to filter against, and emptying it would advertise nothing.
+		allowed = dp.servedResources[group]
+	}
+	if len(allowed) > 0 {
 		kept := resourceList.APIResources[:0]
 		for _, r := range resourceList.APIResources {
 			// A subresource is written parent/sub; it lives or dies with its parent.

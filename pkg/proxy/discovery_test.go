@@ -32,20 +32,34 @@ import (
 	"github.com/fivetime/kubezoo-contract/pkg/util"
 )
 
+// anyResources satisfies the constructor without filtering anything the tests
+// below look at.
+//
+// ⚠️ Deliberately naming a group none of them uses: a group ABSENT from this map
+// is passed through unfiltered, which is what these cases were written against.
+// Listing their groups here instead would silently narrow every expectation.
+var anyResources = map[string]map[string]bool{"unused.example.io": {"widgets": true}}
+
 // TestNewDiscoveryProxy test some cases of NewDiscoveryProxy.
 func TestNewDiscoveryProxy(t *testing.T) {
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{})
 	crdLister := &util.FakeCRDLister{}
 	served := map[string]bool{"": true, "apps": true}
-	_, err := NewDiscoveryProxy(nil, crdLister, served, nil)
+	resources := map[string]map[string]bool{"": {"pods": true}, "apps": {"deployments": true}}
+	_, err := NewDiscoveryProxy(nil, crdLister, served, resources, nil)
 	assert.Error(t, err)
-	_, err = NewDiscoveryProxy(client, nil, served, nil)
+	_, err = NewDiscoveryProxy(client, nil, served, resources, nil)
 	assert.Error(t, err)
-	_, err = NewDiscoveryProxy(client, crdLister, served, nil)
+	_, err = NewDiscoveryProxy(client, crdLister, served, resources, nil)
 	assert.NoError(t, err)
 	// An empty served set would advertise nothing at all, which is worse than
 	// advertising too much; it has to be an error rather than a quiet blank.
-	_, err = NewDiscoveryProxy(client, crdLister, nil, nil)
+	_, err = NewDiscoveryProxy(client, crdLister, nil, resources, nil)
+	assert.Error(t, err)
+	// ⚠️ And an empty resource set fails the OTHER way: absent means unfiltered,
+	// so it would quietly restore every resource of every served group -- the
+	// eleven advertised-but-NotFound kinds included, with nothing to see.
+	_, err = NewDiscoveryProxy(client, crdLister, served, nil, nil)
 	assert.Error(t, err)
 }
 
@@ -138,7 +152,7 @@ func TestDiscoveryProxy_ServerGroups(t *testing.T) {
 	// does not. Asking the scheme instead advertises every group Kubernetes has,
 	// and a tenant then finds resources in api-resources that error on every
 	// call -- certificatesigningrequests did exactly that.
-	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"extensions": true}, nil)
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"extensions": true}, anyResources, nil)
 	assert.NoError(t, err)
 	actual, err := proxy.ServerGroups(tenantID)
 	assert.NoError(t, err)
@@ -146,7 +160,7 @@ func TestDiscoveryProxy_ServerGroups(t *testing.T) {
 
 	// The same upstream list, with extensions no longer served: the tenant's own
 	// CRD group survives, the unserved native group does not.
-	proxy, err = NewDiscoveryProxy(client, crdLister, map[string]bool{"apps": true}, nil)
+	proxy, err = NewDiscoveryProxy(client, crdLister, map[string]bool{"apps": true}, anyResources, nil)
 	assert.NoError(t, err)
 	actual, err = proxy.ServerGroups(tenantID)
 	assert.NoError(t, err)
@@ -209,7 +223,7 @@ func TestDiscoveryProxy_ServerVersionsForGroup(t *testing.T) {
 	defer ts.Close()
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	crdLister := &util.FakeCRDLister{tenantCRDs}
-	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true}, nil)
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true}, anyResources, nil)
 	assert.NoError(t, err)
 	actual, err := proxy.ServerVersionsForGroup(tenantID, "kubezoo.io")
 	assert.NoError(t, err)
@@ -270,7 +284,7 @@ func TestDiscoveryProxy_ServerResourcesForGroupVersion(t *testing.T) {
 	defer ts.Close()
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	crdLister := &util.FakeCRDLister{tenantCRDs}
-	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true}, nil)
+	proxy, err := NewDiscoveryProxy(client, crdLister, map[string]bool{"": true, "apps": true}, anyResources, nil)
 	assert.NoError(t, err)
 	actual, err := proxy.ServerResourcesForGroupVersion(tenantID, "kubezoo.io", "v1beta1")
 	assert.NoError(t, err)
@@ -313,7 +327,7 @@ func TestPerGroupDiscoveryRefusesAnotherTenantsGroup(t *testing.T) {
 
 	client := discovery.NewDiscoveryClientForConfigOrDie(&restclient.Config{Host: ts.URL})
 	proxy, err := NewDiscoveryProxy(client, &util.FakeCRDLister{tenantCRDs},
-		map[string]bool{"": true, "apps": true}, nil)
+		map[string]bool{"": true, "apps": true}, anyResources, nil)
 	assert.NoError(t, err)
 
 	// Another tenant's CRD group, by both endpoints.
