@@ -2939,6 +2939,73 @@ else
     bad "a tenant pod ran outside its pool" \
       "on:$wrong -- the injected nodeSelector is the only thing on the binding path that stops this"
   fi
+
+  # ⭐ The other half of the same question, and the one #115 could not answer on
+  # one node: a tenant DOES see node names -- on its own pods, on its endpoints,
+  # in its events -- and that leak is documented as accepted. What was never
+  # decidable is whether it sees only the node its own pods are on, or any node.
+  # With one node those two are the same sentence.
+  #
+  # ⚠️ Accepted is not the same as unbounded. "Tenants cannot see nodes" is not
+  # load-bearing here, but "a tenant learns the platform's whole inventory" is a
+  # different claim, and nobody had measured which one is true.
+  #
+  # ⛔ Matched with the quotes around the name. Node names nest --
+  # "kz-audit3-worker" is a prefix of "kz-audit3-worker2" -- so a bare grep for
+  # the first reports the second as leaked, and the assertion invents its own
+  # finding. Matching "\"name\"" as it appears in JSON is exact.
+  # ⭐ The path most likely to name a node the tenant has nothing on is a
+  # SCHEDULING FAILURE, and a run where everything schedules never produces one.
+  # So it is forced rather than waited for: without this the assertion would be
+  # reporting that it happened not to see a leak.
+  #
+  # ⚠️ Refused capacity, not a refused pod: the request has to pass admission and
+  # then fail to schedule. A pod the policy layer rejects produces no event at all.
+  $T apply -f - >/dev/null 2>&1 <<'UNSCHED'
+apiVersion: v1
+kind: Pod
+metadata: {name: unschedulable}
+spec:
+  containers:
+    - name: c
+      image: busybox:1.36
+      command: ["sh","-c","sleep 60"]
+      resources: {requests: {cpu: "9999"}}
+      securityContext: {privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+        runAsUser: 1000, capabilities: {drop: ["ALL"]}, seccompProfile: {type: RuntimeDefault}}
+UNSCHED
+  for _ in $(seq 20); do
+    [ -n "$($K -n "$NS" get events --field-selector reason=FailedScheduling \
+      -o jsonpath='{.items[0].message}' 2>/dev/null)" ] && break
+    sleep 3
+  done
+  sched_msg=$($K -n "$NS" get events --field-selector reason=FailedScheduling \
+    -o jsonpath='{.items[0].message}' 2>/dev/null)
+  if [ -z "$sched_msg" ]; then
+    bad "no scheduling failure was produced" \
+      "the node-name check below then never sees a scheduler message, which is the path most likely to name a foreign node"
+  else
+    echo "  (forced a FailedScheduling event: $(cut -c1-90 <<<"$sched_msg"))"
+  fi
+  foreign_nodes=$($K get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sed '/^$/d')
+  seen_foreign=""
+  for node_kind in pods endpoints endpointslices events services persistentvolumeclaims; do
+    node_json=$($T get "$node_kind" -o json --request-timeout=20s 2>/dev/null) || continue
+    [ -z "$node_json" ] && continue
+    for one_node in $foreign_nodes; do
+      case " $placed_on " in *" $one_node "*) continue ;; esac
+      if printf '%s' "$node_json" | grep -q "\"$one_node\""; then
+        seen_foreign="$seen_foreign $node_kind:$one_node"
+      fi
+    done
+  done
+  $T delete pod unschedulable --wait=false >/dev/null 2>&1
+  if [ -z "$seen_foreign" ]; then
+    ok "and the only node names it can read are the ones its own pods are on ($(echo $placed_on)), not the other $outside"
+  else
+    bad "a tenant reads node names it has nothing on" \
+      "$seen_foreign -- node-name exposure was accepted as its own pods' placement, which is a narrower claim than this"
+  fi
 fi
 
 echo
