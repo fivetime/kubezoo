@@ -77,7 +77,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "status",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Pod{}
@@ -89,7 +88,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "resize",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Pod{}
@@ -109,7 +107,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "eviction",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &policy.Eviction{}
@@ -126,7 +123,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "proxy",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Pod{}
@@ -138,7 +134,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "binding",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Binding{}
@@ -152,7 +147,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Pod"),
 				Resource:        "pods",
 				Subresource:     "ephemeralcontainers",
-				ShortNames:      []string{"po"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Pod{}
@@ -199,7 +193,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("ReplicationController"),
 				Resource:        "replicationcontrollers",
 				Subresource:     "status",
-				ShortNames:      []string{"rc"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.ReplicationController{}
@@ -210,7 +203,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("ReplicationController"),
 				Resource:        "replicationcontrollers",
 				Subresource:     "scale",
-				ShortNames:      []string{"rc"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &autoscaling.Scale{}
@@ -236,7 +228,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Service"),
 				Resource:        "services",
 				Subresource:     "proxy",
-				ShortNames:      []string{"svc"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Service{}
@@ -247,7 +238,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Service"),
 				Resource:        "services",
 				Subresource:     "status",
-				ShortNames:      []string{"svc"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.Service{}
@@ -286,7 +276,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Node"),
 				Resource:        "nodes",
 				Subresource:     "status",
-				ShortNames:      []string{"no"},
 				NamespaceScoped: false,
 				NewFunc: func() runtime.Object {
 					return &core.Node{}
@@ -297,7 +286,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Node"),
 				Resource:        "nodes",
 				Subresource:     "proxy",
-				ShortNames:      []string{"no"},
 				NamespaceScoped: false,
 				NewFunc: func() runtime.Object {
 					return &core.Node{}
@@ -351,7 +339,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("ResourceQuota"),
 				Resource:        "resourcequotas",
 				Subresource:     "status",
-				ShortNames:      []string{"quota"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.ResourceQuota{}
@@ -377,7 +364,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Namespace"),
 				Resource:        "namespaces",
 				Subresource:     "status",
-				ShortNames:      []string{"ns"},
 				NamespaceScoped: false,
 				NewFunc: func() runtime.Object {
 					return &core.Namespace{}
@@ -389,7 +375,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("Namespace"),
 				Resource:        "namespaces",
 				Subresource:     "finalize",
-				ShortNames:      []string{"ns"},
 				NamespaceScoped: false,
 				NewFunc: func() runtime.Object {
 					return &core.Namespace{}
@@ -441,7 +426,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("PersistentVolume"),
 				Resource:        "persistentvolumes",
 				Subresource:     "status",
-				ShortNames:      []string{"pv"},
 				NamespaceScoped: false,
 				NewFunc: func() runtime.Object {
 					return &core.PersistentVolume{}
@@ -467,7 +451,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("PersistentVolumeClaim"),
 				Resource:        "persistentvolumeclaims",
 				Subresource:     "status",
-				ShortNames:      []string{"pvc"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &core.PersistentVolumeClaim{}
@@ -495,7 +478,6 @@ var legacyGroup = apiconfig.APIGroupConfig{
 					SchemeGroupVersion.WithKind("ServiceAccount"),
 				Resource:        "serviceaccounts",
 				Subresource:     "token",
-				ShortNames:      []string{"sa"},
 				NamespaceScoped: true,
 				NewFunc: func() runtime.Object {
 					return &authentication.TokenRequest{}
@@ -591,7 +573,6 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 				"daemonsets/status": {
 					Kind:            appsapiv1.SchemeGroupVersion.WithKind("DaemonSet"),
 					Resource:        "daemonsets",
-					ShortNames:      []string{"ds"},
 					Subresource:     "status",
 					NamespaceScoped: true,
 					NewFunc:         func() runtime.Object { return &apps.DaemonSet{} },
@@ -776,7 +757,6 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					Resource:        "poddisruptionbudgets",
 					Subresource:     "status",
 					NamespaceScoped: true,
-					ShortNames:      []string{"pdb"},
 					NewFunc:         func() runtime.Object { return &policy.PodDisruptionBudget{} },
 				},
 			},
@@ -808,7 +788,6 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					Resource:        "ingresses",
 					Subresource:     "status",
 					NamespaceScoped: true,
-					ShortNames:      []string{"ing"},
 					NewFunc:         func() runtime.Object { return &networking.Ingress{} },
 				},
 				"ingressclasses": {
@@ -869,7 +848,6 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					Resource:        "horizontalpodautoscalers",
 					Subresource:     "status",
 					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
 					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
 				},
 			},
@@ -889,7 +867,6 @@ var nonLegacyGroups = []apiconfig.APIGroupConfig{
 					Resource:        "horizontalpodautoscalers",
 					Subresource:     "status",
 					NamespaceScoped: true,
-					ShortNames:      []string{"hpa"},
 					NewFunc:         func() runtime.Object { return &autoscaling.HorizontalPodAutoscaler{} },
 				},
 			},

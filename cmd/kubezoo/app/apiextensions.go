@@ -89,7 +89,6 @@ var v1StorageConfig = map[string]*apiconfig.StorageConfig{
 		Kind: v1.SchemeGroupVersion.
 			WithKind("CustomResourceDefinition"),
 		Resource:        "customresourcedefinitions",
-		ShortNames:      []string{"crd", "crds"},
 		Subresource:     "status",
 		NamespaceScoped: false,
 		NewFunc: func() runtime.Object {
@@ -117,7 +116,6 @@ var v1beta1StorageConfig = map[string]*apiconfig.StorageConfig{
 		Kind: v1beta1.SchemeGroupVersion.
 			WithKind("CustomResourceDefinition"),
 		Resource:        "customresourcedefinitions",
-		ShortNames:      []string{"crd", "crds"},
 		Subresource:     "status",
 		NamespaceScoped: false,
 		NewFunc: func() runtime.Object {
