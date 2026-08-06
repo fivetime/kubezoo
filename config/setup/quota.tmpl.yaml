@@ -17,7 +17,7 @@ spec:
       serviceAccountName: kubezoo-cluster-resource-quota
       containers:
         - name: resource-quota
-          image: kubezoo/clusterresourcequota:local-up
+          image: ghcr.io/fivetime/kubezoo-clusterresourcequota:latest
           imagePullPolicy: IfNotPresent
           command:
           - /usr/local/bin/clusterresourcequota

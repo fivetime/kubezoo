@@ -26,9 +26,30 @@ spec:
       labels:
         app: kubezoo
     spec:
+      # ⛔ The image runs as uid 65532, and the audit log is a hostPath that the
+      # kubelet creates root-owned 0755 -- so kubezoo died at startup with
+      # "ensureLogFile: open /var/log/kubezoo/audit.log: permission denied".
+      #
+      # ⭐ Two changes that are each right on their own: running the container as
+      # a non-root user, and keeping the audit log outside the container so it
+      # survives the incident being investigated. Neither is the thing to undo,
+      # so the directory is handed over instead.
+      #
+      # ⚠️ hack/lab/up.sh never met this: there kubezoo is a local binary running
+      # as root, writing to a file in the lab directory. The container path is the
+      # only one that exercises it, and only this manifest takes it.
+      initContainers:
+      - name: audit-log-permissions
+        image: busybox:1.36
+        command: ["sh", "-c", "chown 65532:65532 /var/log/kubezoo"]
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: audit-log
+          mountPath: /var/log/kubezoo
       containers:
       - name: kubezoo
-        image: kubezoo/kubezoo:local-up
+        image: ghcr.io/fivetime/kubezoo:latest
         imagePullPolicy: IfNotPresent
         args:
         - --allow-privileged=true
@@ -117,8 +138,14 @@ spec:
 # The audit policy, from config/setup/audit-policy.yaml. Kept as a ConfigMap
 # rather than baked into the image so that trimming it does not need a rebuild.
 #
+# ⚠️ In the SAME namespace this file is applied to -- the manifests here carry no
+# namespace, so that is `default` unless you pass one. This line said kube-system,
+# and following it leaves kubezoo-0 in ContainerCreating for ever with
+# "MountVolume.SetUp failed ... configmap kubezoo-audit-policy not found", which
+# names the configmap and not the namespace it looked in.
+#
 #   kubectl create configmap kubezoo-audit-policy \
-#     --from-file=policy.yaml=config/setup/audit-policy.yaml -n kube-system
+#     --from-file=policy.yaml=config/setup/audit-policy.yaml
 ---
 # KubeZoo service
 apiVersion: v1
