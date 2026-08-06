@@ -22,8 +22,17 @@ jobs:
   images:
     strategy:
       fail-fast: false
+      # ⚠️ The published name is NOT the binary name, and the two are listed
+      # separately on purpose. After the split this repository is one of three,
+      # and `ghcr.io/<owner>/clusterresourcequota` said nothing about which
+      # project it belongs to -- an organisation-level name with no owner in it.
+      # The Dockerfile is still named after the binary it builds.
       matrix:
-        image: [kubezoo, clusterresourcequota]
+        include:
+          - bin: kubezoo
+            image: kubezoo
+          - bin: clusterresourcequota
+            image: kubezoo-clusterresourcequota
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -54,14 +63,16 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: build/${{ matrix.image }}.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          file: build/${{ matrix.bin }}.Dockerfile
+          # A pull request does not push, so the second architecture is built and
+          # then thrown away -- it roughly doubles the job for nothing.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: GIT_VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-from: type=gha,scope=${{ matrix.bin }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.bin }}
           provenance: mode=max
           sbom: true
       - name: Attest published image

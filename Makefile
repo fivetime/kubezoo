@@ -76,7 +76,7 @@ docker-build:
 	@docker buildx build --load --platform $(TARGET_PLATFORMS) \
 		--build-arg GIT_VERSION="$(IMAGE_TAG)" \
 		-f build/clusterresourcequota.Dockerfile \
-		-t $(IMAGE_REPO)/clusterresourcequota:$(IMAGE_TAG) .
+		-t $(IMAGE_REPO)/kubezoo-clusterresourcequota:$(IMAGE_TAG) .
 
 .PHONY: local-up
 local-up:
