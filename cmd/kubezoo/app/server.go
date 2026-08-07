@@ -910,17 +910,25 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	// the store holds one Service per tenant rather than every Service upstream
 	// -- which at tenant scale is the difference between a small cache and a copy
 	// of the cluster.
-	tenantDNSInformers := informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
-		informers.WithNamespace(tenantdns.DefaultNamespace),
-		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
-			options.LabelSelector = tenantdns.Selector().String()
-		}))
-	tenantDNSInformer := tenantDNSInformers.Core().V1().Services().Informer()
-	tenantDNSResolver := tenantdns.New(tenantDNSInformer.GetStore(), tenantDNSInformer.HasSynced,
-		tenantdns.DefaultNamespace, tenantdns.DefaultClusterDomain)
+	//
+	// ⚠️ Built only when --tenant-dns is set. Standing up an informer for a
+	// feature nobody turned on would put a watch on the upstream cluster for
+	// every kubezoo replica and answer nothing with it.
+	var tenantDNSInformers informers.SharedInformerFactory
+	var tenantDNSLookup convert.TenantDNSFunc
+	if o.TenantDNS {
+		tenantDNSInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+			informers.WithNamespace(o.TenantDNSNamespace),
+			informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+				options.LabelSelector = tenantdns.Selector().String()
+			}))
+		tenantDNSInformer := tenantDNSInformers.Core().V1().Services().Informer()
+		tenantDNSLookup = tenantdns.New(tenantDNSInformer.GetStore(), tenantDNSInformer.HasSynced,
+			o.TenantDNSNamespace, o.TenantDNSClusterDomain).For
+	}
 
 	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs,
-		publishedIngressClasses, sharedCRDGroup, tenantDNSResolver.For)
+		publishedIngressClasses, sharedCRDGroup, tenantDNSLookup)
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)
@@ -971,7 +979,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		snapshotClassInformers:           snapshotClassInformers,
 		publishedDeviceClasses:           publishedDeviceClasses,
 		tenantDNSInformers:               tenantDNSInformers,
-		tenantDNS:                        tenantDNSResolver.For,
+		tenantDNS:                        tenantDNSLookup,
 	}, nil
 }
 
