@@ -21,9 +21,11 @@ package tenantdns
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/convert"
 )
@@ -63,6 +65,10 @@ const (
 type Resolver struct {
 	store  cache.Store
 	synced cache.InformerSynced
+	// endpoints answers whether a resolver is actually SERVING, not merely
+	// declared. See For.
+	endpoints    cache.Indexer
+	endpointsSyn cache.InformerSynced
 	// namespace is the platform namespace the resolver Services live in, and
 	// with the Service being named for its tenant it makes the lookup a keyed
 	// one rather than a scan of every tenant's entry on every pod create.
@@ -70,9 +76,76 @@ type Resolver struct {
 	clusterDomain string
 }
 
-// New builds a Resolver over a label-selected Service informer's store.
-func New(store cache.Store, synced cache.InformerSynced, namespace, clusterDomain string) *Resolver {
-	return &Resolver{store: store, synced: synced, namespace: namespace, clusterDomain: clusterDomain}
+// New builds a Resolver over a label-selected Service informer's store and the
+// EndpointSlices behind those Services.
+func New(store cache.Store, synced cache.InformerSynced, endpoints cache.Indexer,
+	endpointsSyn cache.InformerSynced, namespace, clusterDomain string) *Resolver {
+	return &Resolver{
+		store: store, synced: synced,
+		endpoints: endpoints, endpointsSyn: endpointsSyn,
+		namespace: namespace, clusterDomain: clusterDomain,
+	}
+}
+
+// ServiceNameIndex is the index a Resolver needs on the EndpointSlice informer,
+// so that finding a tenant's endpoints is a keyed lookup rather than a walk over
+// every tenant's on every pod create.
+const ServiceNameIndex = "kubezoo-tenant-dns-service-name"
+
+// IndexBySliceServiceName is the index function for ServiceNameIndex.
+func IndexBySliceServiceName(obj interface{}) ([]string, error) {
+	slice, ok := obj.(*discoveryv1.EndpointSlice)
+	if !ok {
+		return nil, nil
+	}
+	name := slice.Labels[discoveryv1.LabelServiceName]
+	if name == "" {
+		return nil, nil
+	}
+	return []string{name}, nil
+}
+
+// serving reports whether anything is actually behind the tenant's resolver
+// Service.
+//
+// ⛔ This is the check whose absence made the fail-open promise false. The
+// lookup used to require only that the Service EXIST, so a resolver that could
+// not start -- measured: CoreDNS refusing to become ready because its credential
+// was denied -- still produced a Service with a ClusterIP, and the gateway wrote
+// dnsPolicy: None and that address into every pod of the tenant. dnsPolicy: None
+// has no fallback, so those pods had NO name resolution at all: strictly worse
+// than the platform resolver they would otherwise have kept.
+//
+// ⚠️ The property this restores is not specific to that bug. A resolver that is
+// OOMKilled, evicted, or whose credential lapses now takes its tenant back to
+// the platform resolver instead of off a cliff.
+func (r *Resolver) serving(tenantID string) bool {
+	if r.endpoints == nil {
+		// No endpoint informer configured. Answering "serving" would restore the
+		// exact hole above; answering "not serving" disables the feature. The
+		// latter is the safe direction and the constructor is the only place that
+		// can get this wrong.
+		return false
+	}
+	slices, err := r.endpoints.ByIndex(ServiceNameIndex, tenantID)
+	if err != nil {
+		return false
+	}
+	for _, obj := range slices {
+		slice, ok := obj.(*discoveryv1.EndpointSlice)
+		if !ok || slice.Namespace != r.namespace {
+			continue
+		}
+		for i := range slice.Endpoints {
+			// ⚠️ Ready being nil means ready, per the API contract. Treating nil
+			// as not-ready would disable the feature wherever the endpoint
+			// controller leaves it unset.
+			if ptr.Deref(slice.Endpoints[i].Conditions.Ready, true) && len(slice.Endpoints[i].Addresses) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Selector is the label selector the informer must be built with, so that the
@@ -89,6 +162,9 @@ func Selector() labels.Selector {
 // resolver, which is the behaviour that came before any of this.
 func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 	if r == nil || r.store == nil || tenantID == "" {
+		return convert.TenantDNS{}, false
+	}
+	if r.endpointsSyn != nil && !r.endpointsSyn() {
 		return convert.TenantDNS{}, false
 	}
 	if r.synced != nil && !r.synced() {
@@ -124,6 +200,11 @@ func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 		// an outage.
 		klog.InfoS("tenant DNS Service has no usable ClusterIP; pods keep the platform resolver",
 			"tenant", tenantID, "clusterIP", svc.Spec.ClusterIP)
+		return convert.TenantDNS{}, false
+	}
+	if !r.serving(tenantID) {
+		klog.InfoS("tenant resolver has no ready endpoint; pods keep the platform resolver",
+			"tenant", tenantID, "service", r.namespace+"/"+tenantID)
 		return convert.TenantDNS{}, false
 	}
 	return convert.TenantDNS{Nameserver: svc.Spec.ClusterIP, ClusterDomain: r.clusterDomain}, true

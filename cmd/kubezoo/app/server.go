@@ -41,6 +41,8 @@ import (
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
+	"k8s.io/client-go/tools/cache"
+
 	"github.com/fivetime/kubezoo-gateway/pkg/tenantdns"
 
 	"github.com/spf13/cobra"
@@ -426,6 +428,7 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 				proxyConfig.snapshotClassInformers.Start(context.Done())
 				if proxyConfig.tenantDNSInformers != nil {
 					proxyConfig.tenantDNSInformers.Start(context.Done())
+					proxyConfig.tenantDNSEndpointInformers.Start(context.Done())
 				}
 				return nil
 			})
@@ -649,7 +652,8 @@ type ProxyConfig struct {
 	// created before this cache fills keeps the platform resolver, which is only
 	// the behaviour that came before per-tenant DNS existed. Blocking readiness
 	// on it would trade a working cluster for a cosmetic one.
-	tenantDNSInformers informers.SharedInformerFactory
+	tenantDNSInformers         informers.SharedInformerFactory
+	tenantDNSEndpointInformers informers.SharedInformerFactory
 	// tenantDNS is the lookup itself, handed to every storage so that a bare pod
 	// created through tenantProxy.Create gets the same resolver a templated one
 	// gets from the convertor chain.
@@ -914,7 +918,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	// ⚠️ Built only when --tenant-dns is set. Standing up an informer for a
 	// feature nobody turned on would put a watch on the upstream cluster for
 	// every kubezoo replica and answer nothing with it.
-	var tenantDNSInformers informers.SharedInformerFactory
+	var tenantDNSInformers, tenantDNSEndpointInformers informers.SharedInformerFactory
 	var tenantDNSLookup convert.TenantDNSFunc
 	if o.TenantDNS {
 		tenantDNSInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
@@ -923,7 +927,21 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 				options.LabelSelector = tenantdns.Selector().String()
 			}))
 		tenantDNSInformer := tenantDNSInformers.Core().V1().Services().Informer()
+		// ⚠️ Its own factory, and no label selector: the EndpointSlices behind a
+		// resolver Service are written by the endpoint controller and carry only
+		// kubernetes.io/service-name, never the label the Services are selected
+		// by. Reusing the factory above would filter them all out and the
+		// readiness check would answer "never serving" for every tenant.
+		tenantDNSEndpointInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+			informers.WithNamespace(o.TenantDNSNamespace))
+		endpointInformer := tenantDNSEndpointInformers.Discovery().V1().EndpointSlices().Informer()
+		if err := endpointInformer.AddIndexers(cache.Indexers{
+			tenantdns.ServiceNameIndex: tenantdns.IndexBySliceServiceName,
+		}); err != nil {
+			return nil, err
+		}
 		tenantDNSLookup = tenantdns.New(tenantDNSInformer.GetStore(), tenantDNSInformer.HasSynced,
+			endpointInformer.GetIndexer(), endpointInformer.HasSynced,
 			o.TenantDNSNamespace, o.TenantDNSClusterDomain).For
 	}
 
@@ -979,6 +997,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		snapshotClassInformers:           snapshotClassInformers,
 		publishedDeviceClasses:           publishedDeviceClasses,
 		tenantDNSInformers:               tenantDNSInformers,
+		tenantDNSEndpointInformers:       tenantDNSEndpointInformers,
 		tenantDNS:                        tenantDNSLookup,
 	}, nil
 }
