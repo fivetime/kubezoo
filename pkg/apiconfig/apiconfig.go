@@ -30,6 +30,7 @@ import (
 
 	"github.com/fivetime/kubezoo-contract/pkg/dynamic"
 
+	"github.com/fivetime/kubezoo-gateway/pkg/convert"
 	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
 )
 
@@ -80,6 +81,10 @@ type StorageConfig struct {
 
 	// dynamic client is used to communicate with upstream cluster
 	DynamicClient dynamic.Interface
+
+	// TenantDNS answers where a tenant's own CoreDNS is. nil disables per-tenant
+	// DNS, leaving pods on the platform resolver.
+	TenantDNS convert.TenantDNSFunc
 
 	Convertor common.ObjectConvertor
 
