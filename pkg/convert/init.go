@@ -33,7 +33,8 @@ import (
 // ones those are comes from a label on the IngressClass, so the answer can
 // change without restarting -- see pkg/publishedclass.
 func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListTenantCRDsFunc,
-	publishedIngressClasses publishedclass.Set, isSharedGroup func(group string) bool) (nativeConvertor, customConvertor common.ObjectConvertor) {
+	publishedIngressClasses publishedclass.Set, isSharedGroup func(group string) bool,
+	tenantDNS TenantDNSFunc) (nativeConvertor, customConvertor common.ObjectConvertor) {
 	ownerReferenceTransformer := NewOwnerReferenceTransformer(checkGroupKind)
 	objectReferenceTransformer := NewObjectReferenceTransformer(checkGroupKind)
 	defaultConvertor := NewDefaultConvertor(ownerReferenceTransformer)
@@ -185,7 +186,14 @@ func InitConvertors(checkGroupKind util.CheckGroupKindFunc, listTenantCRDs ListT
 	// that a pod's own idea of which namespace it is in agrees with the one
 	// kubezoo answers in. saprojection.go says why that is not the policy layer's
 	// job either.
-	podTransformer := chainTransformers(NewPlacementTransformer(), NewSATokenNamespaceTransformer())
+	//
+	// ⭐ ...and the same kinds get pointed at the tenant's own resolver. The
+	// TEMPLATE is where that has to happen: a Deployment's pods are created by
+	// the upstream controller-manager, which never passes through kubezoo, so
+	// tenantProxy.Create sees bare pods and nothing else. dnsconfig.go says what
+	// the shared cluster DNS leaks without it.
+	podTransformer := chainTransformers(NewPlacementTransformer(), NewSATokenNamespaceTransformer(),
+		NewDNSConfigTransformer(tenantDNS))
 	for _, gk := range PodCarryingKinds {
 		convertor := NewCrossReferenceConverter(defaultConvertor, podTransformer)
 		if _, taken := nativeKindToConvertors[gk]; taken {

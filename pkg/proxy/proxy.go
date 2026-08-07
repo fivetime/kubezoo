@@ -142,6 +142,11 @@ type tenantProxy struct {
 	// dynamic client is used to communicate with upstream cluster
 	dynamicClient dynamic.Interface
 
+	// tenantDNS answers where a tenant's own CoreDNS is, for the bare pods that
+	// Create sees. nil means no per-tenant DNS is deployed and pods keep the
+	// platform resolver.
+	tenantDNS convert.TenantDNSFunc
+
 	groupVersionKindFunc apiconfig.GroupVersionKindFunc
 }
 
@@ -231,6 +236,7 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		newListFunc:   config.NewListFunc,
 		typeConverter: config.TypeConverter,
 		dynamicClient: config.DynamicClient,
+		tenantDNS:     config.TenantDNS,
 
 		publishedStorageClasses:          config.PublishedStorageClasses,
 		publishedSnapshotClasses:         config.PublishedSnapshotClasses,
@@ -683,6 +689,16 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		// stored, so doing it in the convertor would make every update to a pod
 		// that predates this be refused upstream. saprojection.go.
 		convert.ProjectPodNamespace(pod, tenantID)
+		// ⭐ ...and the resolver the pod asks for names. Third field in this block
+		// that the pod spec will not let an update change -- dnsPolicy and
+		// dnsConfig join nodeSelector and volumes -- so the same CREATE-only
+		// shape, for the same reason.
+		//
+		// ⚠️ Only BARE pods reach here. A Deployment's pods are made by the
+		// upstream controller-manager and never pass through kubezoo at all;
+		// theirs comes from the template, in the convertor chain. Both are
+		// needed, and neither covers the other.
+		convert.SetPodDNS(pod, tenantID, tp.tenantDNS)
 		// ⭐ CREATE only: a pod's spec.volumes is immutable once stored, so this is
 		// the only write where an inline CSI volume can appear -- and refusing on
 		// an update would strand a pod that predates the check.

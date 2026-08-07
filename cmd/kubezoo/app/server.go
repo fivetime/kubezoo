@@ -41,6 +41,7 @@ import (
 
 	"github.com/fivetime/kubezoo-gateway/pkg/apiconfig"
 	"github.com/fivetime/kubezoo-gateway/pkg/publishedclass"
+	"github.com/fivetime/kubezoo-gateway/pkg/tenantdns"
 
 	"github.com/spf13/cobra"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -423,6 +424,9 @@ func CreateKubeZooServer(kubeAPIServerConfig *master.Config,
 				proxyConfig.volumeAttributesClassInformers.Start(context.Done())
 				proxyConfig.deviceClassInformers.Start(context.Done())
 				proxyConfig.snapshotClassInformers.Start(context.Done())
+				if proxyConfig.tenantDNSInformers != nil {
+					proxyConfig.tenantDNSInformers.Start(context.Done())
+				}
 				return nil
 			})
 		m.ControlPlane.GenericAPIServer.AddPostStartHookOrDie("published-class-informers-synced",
@@ -640,6 +644,16 @@ type ProxyConfig struct {
 	volumeAttributesClassInformers informers.SharedInformerFactory
 	deviceClassInformers           informers.SharedInformerFactory
 	snapshotClassInformers         dynamicinformer.DynamicSharedInformerFactory
+	// tenantDNSInformers backs the per-tenant resolver lookup. Started with the
+	// others, but deliberately NOT waited for in the readiness gate: a pod
+	// created before this cache fills keeps the platform resolver, which is only
+	// the behaviour that came before per-tenant DNS existed. Blocking readiness
+	// on it would trade a working cluster for a cosmetic one.
+	tenantDNSInformers informers.SharedInformerFactory
+	// tenantDNS is the lookup itself, handed to every storage so that a bare pod
+	// created through tenantProxy.Create gets the same resolver a templated one
+	// gets from the convertor chain.
+	tenantDNS convert.TenantDNSFunc
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -652,6 +666,7 @@ func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
 
 func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
+	config.TenantDNS = c.tenantDNS
 	// The platform's own classes, published read-only. Set even when the operator
 	// published none: a non-nil Set is what makes the storage serve the resource
 	// and show nothing, rather than falling through to the tenant proxy and
@@ -891,7 +906,29 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		common.VolumeSnapshotClassPublishedLabelKey,
 		snapshotClassInformer.GetStore(), snapshotClassInformer.HasSynced, nil)
 
-	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs, publishedIngressClasses, sharedCRDGroup)
+	// Where each tenant's own CoreDNS is. Label-selected and namespace-scoped, so
+	// the store holds one Service per tenant rather than every Service upstream
+	// -- which at tenant scale is the difference between a small cache and a copy
+	// of the cluster.
+	//
+	// ⚠️ Built only when --tenant-dns is set. Standing up an informer for a
+	// feature nobody turned on would put a watch on the upstream cluster for
+	// every kubezoo replica and answer nothing with it.
+	var tenantDNSInformers informers.SharedInformerFactory
+	var tenantDNSLookup convert.TenantDNSFunc
+	if o.TenantDNS {
+		tenantDNSInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
+			informers.WithNamespace(o.TenantDNSNamespace),
+			informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+				options.LabelSelector = tenantdns.Selector().String()
+			}))
+		tenantDNSInformer := tenantDNSInformers.Core().V1().Services().Informer()
+		tenantDNSLookup = tenantdns.New(tenantDNSInformer.GetStore(), tenantDNSInformer.HasSynced,
+			o.TenantDNSNamespace, o.TenantDNSClusterDomain).For
+	}
+
+	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs,
+		publishedIngressClasses, sharedCRDGroup, tenantDNSLookup)
 
 	// construct transport for connect proxy round trip
 	proxyTransport, err := rest.TransportFor(upstreamConfig)
@@ -941,6 +978,8 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		deviceClassInformers:             deviceClassInformers,
 		snapshotClassInformers:           snapshotClassInformers,
 		publishedDeviceClasses:           publishedDeviceClasses,
+		tenantDNSInformers:               tenantDNSInformers,
+		tenantDNS:                        tenantDNSLookup,
 	}, nil
 }
 

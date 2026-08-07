@@ -2,6 +2,7 @@ package options
 
 import (
 	"fmt"
+	"github.com/fivetime/kubezoo-gateway/pkg/tenantdns"
 
 	"github.com/spf13/pflag"
 
@@ -17,6 +18,12 @@ type ProxyOptions struct {
 
 	ProxyClientQPS   float32
 	ProxyClientBurst int
+
+	// The per-tenant resolver. See pkg/convert/dnsconfig.go for what it fixes and
+	// pkg/tenantdns for how the address is found.
+	TenantDNS              bool
+	TenantDNSNamespace     string
+	TenantDNSClusterDomain string
 
 	// ClientCAFile is copied from the authentication options; it is the CA that
 	// tenant client certificates are verified against. Signing them is the
@@ -54,6 +61,11 @@ func NewProxyOptions() *ProxyOptions {
 	return &ProxyOptions{
 		ProxyClientQPS:   1000,
 		ProxyClientBurst: 2000,
+		// ⚠️ Defaults only; --tenant-dns is what turns the feature on. These have
+		// to equal kubezoo-controller's own defaults or a deployment that sets the
+		// flag on one side only ends up with a resolver nobody can find.
+		TenantDNSNamespace:     tenantdns.DefaultNamespace,
+		TenantDNSClusterDomain: tenantdns.DefaultClusterDomain,
 	}
 }
 
@@ -71,6 +83,17 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.ProxyClientBurst, "proxy-client-burst", o.ProxyClientBurst,
 		fmt.Sprintf("the maximun burst for thorttle to the upstream cluster apiserver, default to %v", o.ProxyClientBurst))
 	fs.StringVar(&o.UpstreamMaster, "proxy-upstream-master", o.UpstreamMaster, "upstream apiserver master address")
+	fs.BoolVar(&o.TenantDNS, "tenant-dns", o.TenantDNS,
+		"Point each tenant's pods at that tenant's own CoreDNS, so the FQDNs they resolve are the "+
+			"names the tenant can see rather than the upstream ones. Requires kubezoo-controller to be "+
+			"running with --tenant-dns; until it is, no resolver exists and pods keep the platform one.")
+	fs.StringVar(&o.TenantDNSNamespace, "tenant-dns-namespace", o.TenantDNSNamespace,
+		"Platform namespace the per-tenant resolvers live in. ⚠️ Must match kubezoo-controller's "+
+			"TenantDNSNamespace; they disagree silently, because a lookup miss fails open.")
+	fs.StringVar(&o.TenantDNSClusterDomain, "tenant-dns-cluster-domain", o.TenantDNSClusterDomain,
+		"Zone the tenant resolvers are authoritative for. ⚠️ Must match kubezoo-controller's "+
+			"--tenant-dns-cluster-domain: a disagreement produces no error, only short names that "+
+			"stop resolving.")
 	fs.StringSliceVar(&o.PublicIngressClasses, "public-ingress-classes", o.PublicIngressClasses,
 		"IngressClass names that reach the platform's own ingress controller, and so the public internet. "+
 			"A tenant naming one of these is asking to be exposed; every other class it names is prefixed with "+
