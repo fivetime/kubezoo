@@ -147,6 +147,15 @@ type tenantProxy struct {
 	// platform resolver.
 	tenantDNS convert.TenantDNSFunc
 
+	// storageView suppresses the read-path translations that cannot be reversed,
+	// so an internal read returns the object as STORED rather than as shown.
+	//
+	// ⚠️ Set only by readForUpdate, and that is the whole reason it exists: a
+	// write is applied on top of what that read returns, so a one-way
+	// translation left in place there is a translated value written back into
+	// storage. See readForUpdate for the failure this comes from.
+	storageView bool
+
 	groupVersionKindFunc apiconfig.GroupVersionKindFunc
 }
 
@@ -393,13 +402,35 @@ func (tp *tenantProxy) convertUnstructuredListToOutput(utdList *unstructured.Uns
 // ⭐ Reading the parent is equivalent, not a workaround: a GET on the status
 // subresource returns the whole object, the same one the parent returns. Only
 // the permission asked for differs.
+// readForUpdate fetches the stored object a write is applied on top of.
+//
+// ⛔ storageView, not the tenant view, and the difference is load-bearing for
+// exactly one field so far. Every other translation on the read path is
+// reversible -- a namespace prefix comes off and goes back on -- so it did not
+// matter which side of it this read landed. spec.clusterIP is not: the address
+// shown to the tenant is one the data plane allocated, and the upstream address
+// cannot be computed back from it.
+//
+// Reading the tenant view here therefore DESTROYED the value every write needs
+// to preserve. The guard compared the submitted address against an "old" that
+// already carried the same translated address, concluded nothing had changed,
+// and passed it upstream -- where it was refused with "may not change once set".
+// Measured on the live cluster: every update to a Service with a translated
+// address failed, kubectl annotate included, not just the round-trip this was
+// written for.
 func (tp *tenantProxy) readForUpdate(ctx context.Context, name string) (runtime.Object, error) {
-	if tp.subresource == "" {
-		return tp.Get(ctx, name, &metav1.GetOptions{})
-	}
-	parent := *tp
-	parent.subresource = ""
-	return parent.Get(ctx, name, &metav1.GetOptions{})
+	target := tp.forUpdate()
+	return target.Get(ctx, name, &metav1.GetOptions{})
+}
+
+// forUpdate is the proxy readForUpdate reads through, split out so the one line
+// that matters is reachable by a test without a client.
+func (tp *tenantProxy) forUpdate() *tenantProxy {
+	target := *tp
+	target.storageView = true
+	// A subresource has no stored object of its own; the parent carries it.
+	target.subresource = ""
+	return &target
 }
 
 func (tp *tenantProxy) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
@@ -1849,9 +1880,23 @@ func (tp *tenantProxy) convertUpstreamObjectToTenantObject(obj runtime.Object,
 	if err := tp.convertor.ConvertUpstreamObjectToTenantObject(obj, tenantID, tp.namespaceScoped); err != nil {
 		return err
 	}
-	showTenantClusterIP(obj)
+	tp.applyTenantViews(obj)
 	echoRequestNamespace(obj, tenantID, requestNamespace)
 	return nil
+}
+
+// applyTenantViews runs the read-path translations that must NOT survive into a
+// write, and is the one place that decides whether they run.
+//
+// ⚠️ Extracted so the decision is testable on its own. The bug this comes from
+// was not in showTenantClusterIP -- that function and its unit tests were
+// correct -- it was in WHICH read called it. A guard on the translation could
+// never have caught that; a guard on the gate can.
+func (tp *tenantProxy) applyTenantViews(obj runtime.Object) {
+	if tp.storageView {
+		return
+	}
+	showTenantClusterIP(obj)
 }
 
 // showTenantClusterIP reports a Service at the address the tenant's own data
