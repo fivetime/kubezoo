@@ -34,12 +34,16 @@ const (
 	// ResolverName is what a tenant's resolver Service is called inside that
 	// tenant's own kube-system.
 	//
-	// ⚠️ Duplicated as TenantDNSName in the controller's pkg/controller, and
-	// nothing checks the two against each other -- separate repositories, so no
-	// test can see both. A disagreement makes every lookup miss, and a miss fails
-	// open, so the only symptom is tenants quietly going back to the platform
-	// resolver. Same hazard as the two label keys below.
-	ResolverName = "kubezoo-dns"
+	// ⭐ kube-dns, which is what a stock cluster calls the CoreDNS Service -- the
+	// tenant should see in its own kube-system what it would see anywhere else.
+	// The workload behind it is called coredns, also as upstream does.
+	//
+	// ⚠️ Duplicated as TenantDNSServiceName in the controller's pkg/controller,
+	// and nothing checks the two against each other -- separate repositories, so
+	// no test can see both. A disagreement makes every lookup miss, and a miss
+	// fails open, so the only symptom is tenants quietly going back to the
+	// platform resolver. Same hazard as the two label keys below.
+	ResolverName = "kube-dns"
 	// DefaultClusterDomain is the zone tenant resolvers are authoritative for.
 	// It has to agree with what the resolver is configured to serve; the two are
 	// set from the same place by the provisioning side for that reason.
