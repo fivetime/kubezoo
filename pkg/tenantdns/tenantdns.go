@@ -31,10 +31,15 @@ import (
 )
 
 const (
-	// DefaultNamespace is the platform namespace tenant resolvers live in.
+	// ResolverName is what a tenant's resolver Service is called inside that
+	// tenant's own kube-system.
 	//
-	// ⚠️ Not a tenant namespace, and not configurable to one: see Resolver.
-	DefaultNamespace = "kubezoo-tenant-dns"
+	// ⚠️ Duplicated as TenantDNSName in the controller's pkg/controller, and
+	// nothing checks the two against each other -- separate repositories, so no
+	// test can see both. A disagreement makes every lookup miss, and a miss fails
+	// open, so the only symptom is tenants quietly going back to the platform
+	// resolver. Same hazard as the two label keys below.
+	ResolverName = "kubezoo-dns"
 	// DefaultClusterDomain is the zone tenant resolvers are authoritative for.
 	// It has to agree with what the resolver is configured to serve; the two are
 	// set from the same place by the provisioning side for that reason.
@@ -52,40 +57,43 @@ const (
 
 // Resolver maps a tenant to the address of its CoreDNS.
 //
-// ⛔ The Services it reads live in a PLATFORM namespace, never in the tenant's
-// own <tid>-kube-system. A tenant holds namespaced write on every namespace
-// kubezoo makes for it, so a resolver kept there would be one the tenant can
-// repoint or delete -- and since the pods reading it are that same tenant's,
-// the damage would be silent: names resolve to whatever it chose, and nothing
-// upstream would call that an error.
+// ⭐ The Services it reads live in each tenant's OWN kube-system, because the
+// tenant is billed for the pods behind them and a charge for something the payer
+// cannot list is not a charge anyone can check.
 //
-// ⚠️ Keeping it out of reach is the whole reason for the extra namespace. The
-// credential the resolver uses is that tenant's own, so a tenant reading it
-// gains nothing -- the reason to move it is the WRITE, not the read.
+// ⚠️ That means a tenant can delete or repoint its own resolver. The blast
+// radius is that tenant: the pods reading it are its own, the reconciler puts
+// the objects back, and this package refuses anything that is not actually
+// serving, so a tenant that breaks its resolver falls back to the platform one
+// rather than losing DNS. What it cannot do is reach another tenant.
+//
+// ⛔ The label cross-check in For is what enforces that last sentence, and it is
+// no longer a formality: the Service now lives somewhere the tenant can write,
+// so the tenant label on it is attacker-controlled. It is checked against the
+// namespace the object was found in, which is not.
 type Resolver struct {
 	store  cache.Store
 	synced cache.InformerSynced
 	// endpoints answers whether a resolver is actually SERVING, not merely
 	// declared. See For.
-	endpoints    cache.Indexer
-	endpointsSyn cache.InformerSynced
-	// namespace is the platform namespace the resolver Services live in, and
-	// with the Service being named for its tenant it makes the lookup a keyed
-	// one rather than a scan of every tenant's entry on every pod create.
-	namespace     string
+	endpoints     cache.Indexer
+	endpointsSyn  cache.InformerSynced
 	clusterDomain string
 }
 
 // New builds a Resolver over a label-selected Service informer's store and the
 // EndpointSlices behind those Services.
 func New(store cache.Store, synced cache.InformerSynced, endpoints cache.Indexer,
-	endpointsSyn cache.InformerSynced, namespace, clusterDomain string) *Resolver {
+	endpointsSyn cache.InformerSynced, clusterDomain string) *Resolver {
 	return &Resolver{
 		store: store, synced: synced,
 		endpoints: endpoints, endpointsSyn: endpointsSyn,
-		namespace: namespace, clusterDomain: clusterDomain,
+		clusterDomain: clusterDomain,
 	}
 }
+
+// ResolverNamespace is where tenantID's resolver lives.
+func ResolverNamespace(tenantID string) string { return tenantID + "-kube-system" }
 
 // ServiceNameIndex is the index a Resolver needs on the EndpointSlice informer,
 // so that finding a tenant's endpoints is a keyed lookup rather than a walk over
@@ -127,13 +135,17 @@ func (r *Resolver) serving(tenantID string) bool {
 		// can get this wrong.
 		return false
 	}
-	slices, err := r.endpoints.ByIndex(ServiceNameIndex, tenantID)
+	slices, err := r.endpoints.ByIndex(ServiceNameIndex, ResolverName)
 	if err != nil {
 		return false
 	}
 	for _, obj := range slices {
 		slice, ok := obj.(*discoveryv1.EndpointSlice)
-		if !ok || slice.Namespace != r.namespace {
+		// ⛔ The namespace is the tenant check. Every tenant's resolver Service
+		// has the same name now, so the index returns all of them; matching on
+		// the namespace is what keeps one tenant's readiness from vouching for
+		// another's.
+		if !ok || slice.Namespace != ResolverNamespace(tenantID) {
 			continue
 		}
 		for i := range slice.Endpoints {
@@ -175,7 +187,7 @@ func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 			"tenant", tenantID)
 		return convert.TenantDNS{}, false
 	}
-	obj, exists, err := r.store.GetByKey(r.namespace + "/" + tenantID)
+	obj, exists, err := r.store.GetByKey(ResolverNamespace(tenantID) + "/" + ResolverName)
 	if err != nil || !exists {
 		return convert.TenantDNS{}, false
 	}
@@ -184,11 +196,12 @@ func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 		return convert.TenantDNS{}, false
 	}
 	if svc.Labels[TenantLabelKey] != tenantID {
-		// ⚠️ The name said one tenant and the label says another. Rather than
-		// trust either, refuse -- pointing a tenant's pods at another tenant's
-		// resolver would let them read that tenant's service names, and it would
-		// look like working DNS the whole time.
-		klog.InfoS("tenant DNS Service name and tenant label disagree; pods keep the platform resolver",
+		// ⚠️ The namespace said one tenant and the label says another. The
+		// namespace is the trustworthy half -- kubezoo derives it -- and the
+		// label now sits on an object in a namespace the tenant can write, so
+		// this is the check that stops a tenant from labelling its own resolver
+		// with a neighbour's id and seeing where that leads.
+		klog.InfoS("tenant DNS Service namespace and tenant label disagree; pods keep the platform resolver",
 			"tenant", tenantID, "labelled", svc.Labels[TenantLabelKey])
 		return convert.TenantDNS{}, false
 	}
@@ -204,7 +217,7 @@ func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 	}
 	if !r.serving(tenantID) {
 		klog.InfoS("tenant resolver has no ready endpoint; pods keep the platform resolver",
-			"tenant", tenantID, "service", r.namespace+"/"+tenantID)
+			"tenant", tenantID, "service", ResolverNamespace(tenantID)+"/"+ResolverName)
 		return convert.TenantDNS{}, false
 	}
 	return convert.TenantDNS{Nameserver: svc.Spec.ClusterIP, ClusterDomain: r.clusterDomain}, true

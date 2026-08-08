@@ -22,7 +22,6 @@ type ProxyOptions struct {
 	// The per-tenant resolver. See pkg/convert/dnsconfig.go for what it fixes and
 	// pkg/tenantdns for how the address is found.
 	TenantDNS              bool
-	TenantDNSNamespace     string
 	TenantDNSClusterDomain string
 
 	// ClientCAFile is copied from the authentication options; it is the CA that
@@ -64,7 +63,6 @@ func NewProxyOptions() *ProxyOptions {
 		// ⚠️ Defaults only; --tenant-dns is what turns the feature on. These have
 		// to equal kubezoo-controller's own defaults or a deployment that sets the
 		// flag on one side only ends up with a resolver nobody can find.
-		TenantDNSNamespace:     tenantdns.DefaultNamespace,
 		TenantDNSClusterDomain: tenantdns.DefaultClusterDomain,
 	}
 }
@@ -87,9 +85,10 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 		"Point each tenant's pods at that tenant's own CoreDNS, so the FQDNs they resolve are the "+
 			"names the tenant can see rather than the upstream ones. Requires kubezoo-controller to be "+
 			"running with --tenant-dns; until it is, no resolver exists and pods keep the platform one.")
-	fs.StringVar(&o.TenantDNSNamespace, "tenant-dns-namespace", o.TenantDNSNamespace,
-		"Platform namespace the per-tenant resolvers live in. ⚠️ Must match kubezoo-controller's "+
-			"TenantDNSNamespace; they disagree silently, because a lookup miss fails open.")
+	// ⚠️ --tenant-dns-namespace is gone: a resolver lives in its own tenant's
+	// kube-system, which is derived rather than configured. Leaving the flag
+	// accepted-but-ignored would be worse than removing it -- a deployment that
+	// still passes it would read as though it were placing the resolver.
 	fs.StringVar(&o.TenantDNSClusterDomain, "tenant-dns-cluster-domain", o.TenantDNSClusterDomain,
 		"Zone the tenant resolvers are authoritative for. ⚠️ Must match kubezoo-controller's "+
 			"--tenant-dns-cluster-domain: a disagreement produces no error, only short names that "+

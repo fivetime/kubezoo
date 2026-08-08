@@ -26,12 +26,12 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const ns = "kubezoo-tenant-dns"
+func ns(tenantID string) string { return tenantID + "-kube-system" }
 
 func resolverService(tenantID, clusterIP string) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: tenantID, Namespace: ns,
+			Name: ResolverName, Namespace: ns(tenantID),
 			Labels: map[string]string{ServiceLabelKey: "true", TenantLabelKey: tenantID},
 		},
 		Spec: corev1.ServiceSpec{ClusterIP: clusterIP},
@@ -41,8 +41,8 @@ func resolverService(tenantID, clusterIP string) *corev1.Service {
 func readySlice(tenantID string, ready *bool, addresses ...string) *discoveryv1.EndpointSlice {
 	return &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: tenantID + "-abcde", Namespace: ns,
-			Labels: map[string]string{discoveryv1.LabelServiceName: tenantID},
+			Name: ResolverName + "-abcde", Namespace: ns(tenantID),
+			Labels: map[string]string{discoveryv1.LabelServiceName: ResolverName},
 		},
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses:  addresses,
@@ -62,7 +62,7 @@ func resolverWith(svc *corev1.Service, slices ...*discoveryv1.EndpointSlice) *Re
 		_ = indexer.Add(s)
 	}
 	synced := func() bool { return true }
-	return New(store, synced, indexer, synced, ns, "cluster.local")
+	return New(store, synced, indexer, synced, "cluster.local")
 }
 
 // TestDeclaredButNotServingIsNotAnAnswer is the regression guard for a promise
@@ -147,10 +147,10 @@ func TestUnsyncedInformersAnswerNothing(t *testing.T) {
 
 	notSynced := func() bool { return false }
 	synced := func() bool { return true }
-	if _, ok := New(store, synced, indexer, notSynced, ns, "cluster.local").For("111111"); ok {
+	if _, ok := New(store, synced, indexer, notSynced, "cluster.local").For("111111"); ok {
 		t.Error("answered before the endpoint cache had synced")
 	}
-	if _, ok := New(store, notSynced, indexer, synced, ns, "cluster.local").For("111111"); ok {
+	if _, ok := New(store, notSynced, indexer, synced, "cluster.local").For("111111"); ok {
 		t.Error("answered before the Service cache had synced")
 	}
 }
@@ -162,7 +162,45 @@ func TestNoEndpointIndexerDisablesTheFeature(t *testing.T) {
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	_ = store.Add(resolverService("111111", "10.0.0.5"))
 	synced := func() bool { return true }
-	if _, ok := New(store, synced, nil, nil, ns, "cluster.local").For("111111"); ok {
+	if _, ok := New(store, synced, nil, nil, "cluster.local").For("111111"); ok {
 		t.Error("a Resolver with no endpoint informer answered anyway")
+	}
+}
+
+// TestATenantCannotClaimAnothersResolver is new with the move into tenant
+// namespaces, and it guards the one thing that move put at risk.
+//
+// ⛔ The Service now sits somewhere the tenant can write, so the tenant label on
+// it is attacker-controlled: a tenant can label its own resolver with a
+// neighbour's id. What is NOT attacker-controlled is the namespace the object
+// was found in, which kubezoo derives. For keys on the namespace and checks the
+// label against it; if it ever trusted the label instead, one tenant's pods
+// could be pointed at another tenant's resolver and would read that tenant's
+// service names while looking like perfectly healthy DNS.
+func TestATenantCannotClaimAnothersResolver(t *testing.T) {
+	// 222222 labels its own resolver as if it belonged to 111111.
+	impostor := resolverService("222222", "10.0.0.9")
+	impostor.Labels[TenantLabelKey] = "111111"
+	r := resolverWith(impostor, readySlice("222222", ptr.To(true), "10.1.1.9"))
+
+	if dns, ok := r.For("111111"); ok {
+		t.Errorf("111111 was handed %s, which lives in 222222's namespace; "+
+			"the tenant label was trusted over the namespace", dns.Nameserver)
+	}
+	if _, ok := r.For("222222"); ok {
+		t.Error("222222's own lookup succeeded on a resolver labelled for someone else; " +
+			"the label check has to refuse a disagreement in both directions")
+	}
+}
+
+// TestEachTenantsReadinessIsItsOwn -- every resolver Service now has the SAME
+// name, so the EndpointSlice index returns every tenant's slices for one lookup.
+// The namespace is the only thing separating them.
+func TestEachTenantsReadinessIsItsOwn(t *testing.T) {
+	r := resolverWith(resolverService("111111", "10.0.0.5"),
+		readySlice("222222", ptr.To(true), "10.1.1.1"))
+	if _, ok := r.For("111111"); ok {
+		t.Error("222222's ready endpoints made 111111's resolver look healthy; " +
+			"with a shared Service name the index alone cannot tell them apart")
 	}
 }

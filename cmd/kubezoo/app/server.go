@@ -46,12 +46,14 @@ import (
 	"github.com/fivetime/kubezoo-gateway/pkg/tenantdns"
 
 	"github.com/spf13/cobra"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	extensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	externalinformer "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	util_net "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -921,19 +923,29 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	var tenantDNSInformers, tenantDNSEndpointInformers informers.SharedInformerFactory
 	var tenantDNSLookup convert.TenantDNSFunc
 	if o.TenantDNS {
+		// ⚠️ Cluster-wide rather than one namespace, because a resolver now lives
+		// in its own tenant's kube-system. The label selector is what keeps that
+		// from being a watch on every Service in the cluster.
 		tenantDNSInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
-			informers.WithNamespace(o.TenantDNSNamespace),
 			informers.WithTweakListOptions(func(options *metav1.ListOptions) {
 				options.LabelSelector = tenantdns.Selector().String()
 			}))
 		tenantDNSInformer := tenantDNSInformers.Core().V1().Services().Informer()
-		// ⚠️ Its own factory, and no label selector: the EndpointSlices behind a
+		// ⚠️ Its own factory, and selected differently: the EndpointSlices behind a
 		// resolver Service are written by the endpoint controller and carry only
 		// kubernetes.io/service-name, never the label the Services are selected
 		// by. Reusing the factory above would filter them all out and the
 		// readiness check would answer "never serving" for every tenant.
+		//
+		// ⭐ Selecting on kubernetes.io/service-name is only possible because every
+		// tenant's resolver Service has the SAME name; that is what a per-tenant
+		// name would cost -- a selector-free cluster-wide EndpointSlice watch.
 		tenantDNSEndpointInformers = informers.NewSharedInformerFactoryWithOptions(typedClientSet, 10*time.Minute,
-			informers.WithNamespace(o.TenantDNSNamespace))
+			informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+				options.LabelSelector = labels.SelectorFromSet(labels.Set{
+					discoveryv1.LabelServiceName: tenantdns.ResolverName,
+				}).String()
+			}))
 		endpointInformer := tenantDNSEndpointInformers.Discovery().V1().EndpointSlices().Informer()
 		if err := endpointInformer.AddIndexers(cache.Indexers{
 			tenantdns.ServiceNameIndex: tenantdns.IndexBySliceServiceName,
@@ -942,7 +954,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		}
 		tenantDNSLookup = tenantdns.New(tenantDNSInformer.GetStore(), tenantDNSInformer.HasSynced,
 			endpointInformer.GetIndexer(), endpointInformer.HasSynced,
-			o.TenantDNSNamespace, o.TenantDNSClusterDomain).For
+			o.TenantDNSClusterDomain).For
 	}
 
 	nativeConvertor, customConvertor := convert.InitConvertors(checkGroupKind, listTenantCRDs,
