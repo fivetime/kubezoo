@@ -17,6 +17,7 @@ limitations under the License.
 package convert
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 
@@ -34,6 +35,11 @@ import (
 // touched -- and that is the map somebody uses to go looking for the layer's
 // edges.
 const PlatformMetadataPattern = `^kubezoo\.io/`
+
+// lastAppliedKey is the annotation kubectl uses to stash a copy of the whole
+// object -- annotations and labels included -- which is why hiding a key means
+// hiding it in there too.
+const lastAppliedKey = "kubectl.kubernetes.io/last-applied-configuration"
 
 // HiddenMetadata hides platform metadata from tenants in one place, for every
 // object, in both directions.
@@ -93,9 +99,83 @@ func (h *HiddenMetadata) hides(key string) bool {
 // tenant's own namespace carries both.
 func (h *HiddenMetadata) Strip(obj runtime.Object) {
 	h.forEachObject(obj, func(o metav1.Object) {
-		o.SetAnnotations(withoutHidden(h, o.GetAnnotations()))
+		o.SetAnnotations(h.stripLastApplied(withoutHidden(h, o.GetAnnotations())))
 		o.SetLabels(withoutHidden(h, o.GetLabels()))
 	})
+	h.forEachObject(obj, h.stripPodTemplate)
+}
+
+// stripPodTemplate reaches the metadata a workload carries for the pods it
+// makes.
+//
+// ⛔ Measured, after the first version of this shipped: a tenant reading its own
+// kube-system saw a Deployment whose own labels were clean and whose
+// spec.template.metadata.labels still said kubezoo.io/platform-workload and
+// kubezoo.io/tenant. metav1.Object reaches an object's OWN metadata and stops
+// there; a pod template is a second ObjectMeta the accessor never sees.
+func (h *HiddenMetadata) stripPodTemplate(o metav1.Object) {
+	obj, ok := o.(runtime.Object)
+	if !ok {
+		return
+	}
+	template, _, err := podTemplateOf(obj)
+	if err != nil || template == nil {
+		return
+	}
+	template.Annotations = h.stripLastApplied(withoutHidden(h, template.Annotations))
+	template.Labels = withoutHidden(h, template.Labels)
+}
+
+// stripLastApplied removes hidden keys from the copy of the object kubectl
+// leaves inside an annotation.
+//
+// ⛔ Also measured: stripping the annotations left kubezoo.io/cluster-ip plainly
+// readable inside kubectl.kubernetes.io/last-applied-configuration, which is a
+// serialised copy of the whole object including its annotations. Hiding a key
+// everywhere except in the copy of itself hides nothing.
+//
+// ⚠️ Left untouched if it does not parse. A last-applied that is not JSON is a
+// client's business, and replacing it with something this code invented would
+// break that client's next apply.
+func (h *HiddenMetadata) stripLastApplied(annotations map[string]string) map[string]string {
+	raw, ok := annotations[lastAppliedKey]
+	if !ok || raw == "" {
+		return annotations
+	}
+	var applied map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &applied); err != nil {
+		return annotations
+	}
+	metadata, ok := applied["metadata"].(map[string]interface{})
+	if !ok {
+		return annotations
+	}
+	changed := false
+	for _, field := range []string{"annotations", "labels"} {
+		m, ok := metadata[field].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for k := range m {
+			if h.hides(k) {
+				delete(m, k)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return annotations
+	}
+	encoded, err := json.Marshal(applied)
+	if err != nil {
+		return annotations
+	}
+	out := make(map[string]string, len(annotations))
+	for k, v := range annotations {
+		out[k] = v
+	}
+	out[lastAppliedKey] = string(encoded)
+	return out
 }
 
 // Restore puts back what the platform stored, and drops whatever the tenant

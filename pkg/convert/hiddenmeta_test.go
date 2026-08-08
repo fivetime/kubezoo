@@ -17,9 +17,11 @@ limitations under the License.
 package convert
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apps "k8s.io/kubernetes/pkg/apis/apps"
 	core "k8s.io/kubernetes/pkg/apis/core"
 )
 
@@ -191,5 +193,83 @@ func TestThePlatformPatternCannotBeConfiguredAway(t *testing.T) {
 	hidden(t, `^something-else/`).Strip(svc)
 	if len(svc.Annotations) != 0 {
 		t.Errorf("annotations = %v; the platform pattern is not optional", svc.Annotations)
+	}
+}
+
+// TestPodTemplatesAreCovered -- measured after the first version shipped. A
+// tenant reading its own kube-system saw a Deployment whose own labels were
+// clean and whose spec.template.metadata.labels still said
+// kubezoo.io/platform-workload and kubezoo.io/tenant.
+//
+// ⛔ metav1.Object reaches an object's OWN metadata and stops there. A pod
+// template is a second ObjectMeta the accessor never sees, and it is the one a
+// tenant reads when it looks at what the platform runs in its namespace.
+func TestPodTemplatesAreCovered(t *testing.T) {
+	d := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "111111-kube-system",
+			Labels: map[string]string{"kubezoo.io/tenant": "111111"}},
+		Spec: apps.DeploymentSpec{Template: core.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"kubezoo.io/platform-workload": "true",
+				"kubezoo.io/tenant":            "111111",
+				"k8s-app":                      "core-dns",
+			},
+			Annotations: map[string]string{"kubezoo.io/credential-hash": "abc", "own": "keep"},
+		}}},
+	}
+	hidden(t).Strip(d)
+
+	if len(d.Labels) != 0 {
+		t.Errorf("object labels = %v, want none", d.Labels)
+	}
+	for k := range d.Spec.Template.Labels {
+		if k != "k8s-app" {
+			t.Errorf("pod template still shows %q to the tenant", k)
+		}
+	}
+	if _, present := d.Spec.Template.Annotations["kubezoo.io/credential-hash"]; present {
+		t.Error("pod template annotation still shows a kubezoo.io key")
+	}
+	if d.Spec.Template.Annotations["own"] != "keep" {
+		t.Error("the tenant's own pod template annotation was dropped")
+	}
+}
+
+// TestLastAppliedIsCovered -- also measured. Stripping the annotations left
+// kubezoo.io/cluster-ip plainly readable inside
+// kubectl.kubernetes.io/last-applied-configuration, which is a serialised copy
+// of the whole object, annotations included.
+//
+// ⛔ Hiding a key everywhere except in the copy of itself hides nothing. This is
+// the same surface as the upstream namespace that used to leak through this
+// annotation.
+func TestLastAppliedIsCovered(t *testing.T) {
+	svc := svcMeta(map[string]string{
+		lastAppliedKey: `{"apiVersion":"v1","kind":"Service","metadata":{"name":"rsvc",` +
+			`"annotations":{"kubezoo.io/cluster-ip":"192.168.200.7","team":"payments"},` +
+			`"labels":{"kubezoo.io/tenant":"111111","app":"rsvc"}}}`,
+	}, nil)
+	hidden(t).Strip(svc)
+
+	got := svc.Annotations[lastAppliedKey]
+	for _, leaked := range []string{"kubezoo.io/cluster-ip", "kubezoo.io/tenant", "192.168.200.7"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("last-applied still contains %q:\n%s", leaked, got)
+		}
+	}
+	for _, kept := range []string{"payments", `"app":"rsvc"`} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("last-applied lost the tenant's own %q:\n%s", kept, got)
+		}
+	}
+}
+
+// TestUnparseableLastAppliedIsLeftAlone -- replacing a client's annotation with
+// something this code invented would break that client's next apply.
+func TestUnparseableLastAppliedIsLeftAlone(t *testing.T) {
+	svc := svcMeta(map[string]string{lastAppliedKey: "not json at all"}, nil)
+	hidden(t).Strip(svc)
+	if svc.Annotations[lastAppliedKey] != "not json at all" {
+		t.Errorf("rewrote an unparseable last-applied to %q", svc.Annotations[lastAppliedKey])
 	}
 }
