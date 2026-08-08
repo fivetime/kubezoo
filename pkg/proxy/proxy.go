@@ -518,6 +518,9 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseNewExternalIPs(obj, original); err != nil {
 		return nil, false, err
 	}
+	if err := tp.refuseForeignClusterIP(obj, original); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNodePorts(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -771,6 +774,11 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	}
 	// nil for the same reason: on a create there is no port to have kept.
 	if err := tp.refuseNodePorts(obj, nil); err != nil {
+		return nil, err
+	}
+	// nil old, but not a no-op: the annotation still has to be stripped off a
+	// create, or a tenant writes its own address into storage on the first try.
+	if err := tp.refuseForeignClusterIP(obj, nil); err != nil {
 		return nil, err
 	}
 	if err := tp.refuseUnpublishedDeviceClass(obj); err != nil {
@@ -1276,6 +1284,43 @@ func (tp *tenantProxy) refuseNewExternalIPs(obj, old runtime.Object) error {
 				"intercept traffic to that address and deliver it here, whoever the address "+
 				"actually belongs to. Use a Service of type LoadBalancer, or ask the platform "+
 				"to route the address to you.",
+		)})
+}
+
+// refuseForeignClusterIP keeps a tenant's write from carrying an address the
+// platform did not give it, and puts back the one upstream actually holds.
+//
+// ⭐ Mostly this succeeds silently, which is the point: the tenant is SHOWN the
+// data plane's address, so that is what comes back on any read-modify-write --
+// `kubectl get svc -o yaml | kubectl apply -f -`, an operator round-tripping the
+// object. Upstream would see its own ClusterIP changing and refuse with "may not
+// change once set", naming a field the tenant never knowingly touched.
+//
+// The refusal is for the remaining case: a tenant naming some third address. It
+// cannot be honoured -- the address comes from the data plane's own allocator,
+// not from anything kubezoo can ask for -- and accepting it silently would leave
+// the tenant believing it had chosen.
+func (tp *tenantProxy) refuseForeignClusterIP(obj, old runtime.Object) error {
+	svc, ok := obj.(*core.Service)
+	if !ok {
+		return nil
+	}
+	oldSvc, _ := old.(*core.Service)
+	// ⚠️ Runs even with no old object. On a create there is nothing to restore,
+	// but the annotation still has to be stripped: a create carrying it would
+	// write the tenant's own value straight into storage, which is the whole
+	// hole this closes.
+	convert.StripClusterIPAnnotation(svc, oldSvc)
+	if convert.RestoreUpstreamClusterIP(svc, oldSvc) {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Service"}, svc.Name,
+		field.ErrorList{field.Invalid(
+			field.NewPath("spec", "clusterIP"), svc.Spec.ClusterIP,
+			"a Service's address is allocated for you and cannot be chosen or changed. "+
+				"Leave the field unset to be given one, or set it to None for a headless "+
+				"Service.",
 		)})
 }
 
@@ -1804,8 +1849,43 @@ func (tp *tenantProxy) convertUpstreamObjectToTenantObject(obj runtime.Object,
 	if err := tp.convertor.ConvertUpstreamObjectToTenantObject(obj, tenantID, tp.namespaceScoped); err != nil {
 		return err
 	}
+	showTenantClusterIP(obj)
 	echoRequestNamespace(obj, tenantID, requestNamespace)
 	return nil
+}
+
+// showTenantClusterIP reports a Service at the address the tenant's own data
+// plane can reach it at.
+//
+// ⛔ Here rather than in a Backward transformer, and that is deliberate: this
+// funnel is the single choke point every read passes through -- get, list,
+// watch, the answer to a create, the answer to an update, the fan-out paths --
+// and a translation that reached only some of them would show one address in
+// `kubectl get` and another in a watch event. #110 is the standing lesson: a
+// guard that walked only the methods named Backward missed the helpers they
+// called.
+//
+// See convert.ClusterIPAnnotation for what makes the upstream address the wrong
+// one to report and why the tenant must not be able to write this.
+func showTenantClusterIP(obj runtime.Object) {
+	switch typed := obj.(type) {
+	case *core.Service:
+		if address, ok := convert.TenantClusterIP(typed); ok {
+			typed.Spec.ClusterIP = address
+			if len(typed.Spec.ClusterIPs) > 0 {
+				typed.Spec.ClusterIPs[0] = address
+			}
+		}
+	case *core.ServiceList:
+		// ⚠️ A list is not covered by the single-object case. Every read of more
+		// than one Service -- `kubectl get svc`, an informer's initial LIST, the
+		// tenant's CoreDNS filling its cache -- arrives here as a list, so
+		// leaving it out would translate the address everywhere except the paths
+		// that matter most.
+		for i := range typed.Items {
+			showTenantClusterIP(&typed.Items[i])
+		}
+	}
 }
 
 // echoRequestNamespace puts the namespace back into the spelling the caller used.
@@ -1935,6 +2015,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		if err := tp.refuseNewExternalIPs(updated, original); err != nil {
 			return nil, false, err
 		}
+		if err := tp.refuseForeignClusterIP(updated, original); err != nil {
+			return nil, false, err
+		}
 		if err := tp.refuseNodePorts(updated, original); err != nil {
 			return nil, false, err
 		}
@@ -1974,7 +2057,6 @@ func checkPreconditions(preconditions *metav1.Preconditions, obj runtime.Object)
 	return nil
 }
 
-
 // upstreamGroupVersion is the group/version this proxy addresses upstream.
 //
 // ⛔ A custom resource carries the tenant prefix on its group -- that is what
@@ -2011,8 +2093,8 @@ func (tp *tenantProxy) upstreamGroupVersion(tenantID string) schema.GroupVersion
 // ExternalName: upstream's ResolveCluster
 // (staging/src/k8s.io/apiserver/pkg/util/proxy/proxy.go) has
 //
-//     case svc.Spec.Type == v1.ServiceTypeExternalName:
-//         return &url.URL{Scheme: "https", Host: JoinHostPort(svc.Spec.ExternalName, port)}
+//	case svc.Spec.Type == v1.ServiceTypeExternalName:
+//	    return &url.URL{Scheme: "https", Host: JoinHostPort(svc.Spec.ExternalName, port)}
 //
 // so a tenant writes an ExternalName Service in its own namespace, points a
 // webhook's clientConfig.service at it -- the APPROVED path -- and the apiserver

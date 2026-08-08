@@ -17,6 +17,8 @@ limitations under the License.
 package convert
 
 import (
+	"net"
+
 	core "k8s.io/kubernetes/pkg/apis/core"
 )
 
@@ -122,4 +124,128 @@ func ExternalIPsAreNew(svc, old *core.Service) bool {
 		}
 	}
 	return false
+}
+
+// ClusterIPAnnotation carries the address a tenant's own data plane can actually
+// reach this Service at, and is what a tenant is shown as spec.clusterIP.
+//
+// ⛔ The problem it solves is measured, not theoretical. A tenant's pods run as
+// Zun capsules on the tenant's own OVN network. The ClusterIP the upstream
+// cluster allocates comes from that cluster's service CIDR, which does not exist
+// on the tenant's network -- so the address kubezoo would otherwise report is one
+// no tenant workload can dial. The address that works is the VIP the data plane
+// allocates on the tenant's network for that Service's load balancer.
+//
+// ⭐ Named in kubezoo's own namespace rather than the data plane's, because
+// kubezoo must not know that this deployment's data plane is Octavia. Anything
+// that can allocate a reachable address for a Service can fill this in.
+//
+// ⛔ WRITTEN BY THE PLATFORM, READ BY THE TENANT -- the opposite direction from
+// the annotation it resembles (lbipam.cilium.io/ips is a REQUEST, written by the
+// user). A tenant that could set this could make kubezoo report an address of
+// its choosing as its own ClusterIP, and the tenant's CoreDNS -- which reads
+// Services back through kubezoo -- would answer with it. StripClusterIPAnnotation
+// is what keeps the direction one-way.
+const ClusterIPAnnotation = "kubezoo.io/cluster-ip"
+
+// TenantClusterIP is the address to show a tenant for svc, and whether it
+// differs from what upstream stored.
+//
+// ⚠️ A genuinely headless Service is left alone even if the annotation is
+// present. "None" is the tenant's own words -- a StatefulSet's governing Service
+// is the usual writer -- and overwriting it would turn per-pod DNS into a single
+// address, silently, for a workload that specifically asked not to have one.
+//
+// ⚠️ Absent annotation reports the upstream address rather than nothing. The
+// data plane fills this in shortly after the Service is created, and reporting
+// an empty clusterIP in that window would invent a state stock Kubernetes never
+// produces -- a ClusterIP Service with no address -- which client code and
+// controllers have no branch for.
+func TenantClusterIP(svc *core.Service) (string, bool) {
+	if svc == nil || svc.Spec.ClusterIP == core.ClusterIPNone || svc.Spec.ClusterIP == "" {
+		return "", false
+	}
+	address := svc.Annotations[ClusterIPAnnotation]
+	if address == "" || net.ParseIP(address) == nil {
+		return "", false
+	}
+	if address == svc.Spec.ClusterIP {
+		return "", false
+	}
+	return address, true
+}
+
+// StripClusterIPAnnotation removes a tenant's attempt to set the annotation,
+// returning whether there was one.
+//
+// ⚠️ Stripped rather than refused. The tenant sees this annotation on every
+// read, so it comes back on any read-modify-write -- kubectl apply of a file
+// produced by kubectl get, an operator that round-trips the object -- and
+// refusing would break all of those. What has to be true is only that a tenant's
+// value never reaches storage.
+func StripClusterIPAnnotation(svc, old *core.Service) bool {
+	if svc == nil {
+		return false
+	}
+	_, submitted := svc.Annotations[ClusterIPAnnotation]
+	if !submitted {
+		return false
+	}
+	delete(svc.Annotations, ClusterIPAnnotation)
+	if len(svc.Annotations) == 0 {
+		svc.Annotations = nil
+	}
+	// Whatever the platform had recorded survives the tenant's write untouched.
+	if old != nil {
+		if stored, ok := old.Annotations[ClusterIPAnnotation]; ok {
+			if svc.Annotations == nil {
+				svc.Annotations = map[string]string{}
+			}
+			svc.Annotations[ClusterIPAnnotation] = stored
+		}
+	}
+	return true
+}
+
+// RestoreUpstreamClusterIP puts back the address upstream actually allocated,
+// after a tenant submitted the one it was shown.
+//
+// ⭐ This is what makes `kubectl get svc -o yaml | kubectl apply -f -` work. The
+// tenant is shown the data plane's address, so that is what it sends back; the
+// upstream apiserver would see its own ClusterIP changing and refuse with
+// "may not change once set".
+//
+// ⛔ Substituted rather than cleared. Clearing looks like the obvious fix and is
+// not available: validateUpgradeDowngradeClusterIPs rejects an update whose
+// primary clusterIP is unset with "primary clusterIP can not be unset"
+// (k8s pkg/apis/core/validation/validation.go). The old object is therefore
+// required, which is why this runs where the update paths already hold it.
+//
+// Returns false when the submitted address is neither the shown one nor the
+// stored one -- a tenant naming some third address, which the caller refuses.
+func RestoreUpstreamClusterIP(svc, old *core.Service) bool {
+	if svc == nil || old == nil {
+		return true
+	}
+	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == core.ClusterIPNone {
+		// Unset or headless: not this function's business. An unset primary is
+		// refused upstream and a headless-to-ClusterIP change is refused there
+		// too, both with their own messages.
+		return svc.Spec.ClusterIP == old.Spec.ClusterIP
+	}
+	if svc.Spec.ClusterIP == old.Spec.ClusterIP {
+		return true
+	}
+	shown, translated := TenantClusterIP(old)
+	if !translated || svc.Spec.ClusterIP != shown {
+		return false
+	}
+	svc.Spec.ClusterIP = old.Spec.ClusterIP
+	// ⚠️ clusterIPs travels with clusterIP and upstream validates them against
+	// each other; translating one and not the other is a rejected write in the
+	// dual-stack case and a silently inconsistent object in the single-stack one.
+	if len(svc.Spec.ClusterIPs) > 0 {
+		svc.Spec.ClusterIPs[0] = old.Spec.ClusterIP
+	}
+	return true
 }
