@@ -189,38 +189,6 @@ func TenantClusterIPFrom(annotations map[string]string, clusterIP string) (strin
 	return address, true
 }
 
-// StripClusterIPAnnotation removes a tenant's attempt to set the annotation,
-// returning whether there was one.
-//
-// ⚠️ Stripped rather than refused. The tenant sees this annotation on every
-// read, so it comes back on any read-modify-write -- kubectl apply of a file
-// produced by kubectl get, an operator that round-trips the object -- and
-// refusing would break all of those. What has to be true is only that a tenant's
-// value never reaches storage.
-func StripClusterIPAnnotation(svc, old *core.Service) bool {
-	if svc == nil {
-		return false
-	}
-	_, submitted := svc.Annotations[ClusterIPAnnotation]
-	if !submitted {
-		return false
-	}
-	delete(svc.Annotations, ClusterIPAnnotation)
-	if len(svc.Annotations) == 0 {
-		svc.Annotations = nil
-	}
-	// Whatever the platform had recorded survives the tenant's write untouched.
-	if old != nil {
-		if stored, ok := old.Annotations[ClusterIPAnnotation]; ok {
-			if svc.Annotations == nil {
-				svc.Annotations = map[string]string{}
-			}
-			svc.Annotations[ClusterIPAnnotation] = stored
-		}
-	}
-	return true
-}
-
 // RestoreUpstreamClusterIP puts back the address upstream actually allocated,
 // after a tenant submitted the one it was shown.
 //

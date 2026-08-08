@@ -24,6 +24,11 @@ type ProxyOptions struct {
 	TenantDNS              bool
 	TenantDNSClusterDomain string
 
+	// HideMetadataPatterns are extra regexps for labels and annotations a tenant
+	// must not see. kubezoo's own namespace is always hidden and is not in this
+	// list; see convert.PlatformMetadataPattern.
+	HideMetadataPatterns []string
+
 	// ClientCAFile is copied from the authentication options; it is the CA that
 	// tenant client certificates are verified against. Signing them is the
 	// controller's job now, so the signing key is not here and must not be:
@@ -89,6 +94,14 @@ func (o *ProxyOptions) AddFlags(fs *pflag.FlagSet) {
 	// kube-system, which is derived rather than configured. Leaving the flag
 	// accepted-but-ignored would be worse than removing it -- a deployment that
 	// still passes it would read as though it were placing the resolver.
+	fs.StringSliceVar(&o.HideMetadataPatterns, "hide-metadata-pattern", o.HideMetadataPatterns,
+		"Regexp matching label and annotation KEYS a tenant must not see. Repeatable. "+
+			"Matching keys are stripped from every read and, on a write, the tenant's value "+
+			"is dropped while the stored one is put back -- so a read-modify-write cannot "+
+			"erase them. ⚠️ kubezoo.io/ is always hidden and cannot be switched off. "+
+			"⛔ A pattern that does not compile refuses startup rather than being skipped: a "+
+			"rule an operator believes is in force and which matches nothing would be "+
+			"invisible until someone audited what tenants can see.")
 	fs.StringVar(&o.TenantDNSClusterDomain, "tenant-dns-cluster-domain", o.TenantDNSClusterDomain,
 		"Zone the tenant resolvers are authoritative for. ⚠️ Must match kubezoo-controller's "+
 			"--tenant-dns-cluster-domain: a disagreement produces no error, only short names that "+

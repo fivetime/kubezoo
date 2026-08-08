@@ -81,38 +81,10 @@ func TestNoAnnotationReportsUpstream(t *testing.T) {
 	}
 }
 
-// TestTenantCannotWriteItsOwnAddress is the security property of the whole
-// design.
-//
-// ⛔ The annotation is written by the platform and read by the tenant -- the
-// opposite direction from the annotation it resembles, lbipam.cilium.io/ips,
-// which is a request the user writes. A tenant that could set this would make
-// kubezoo report an address of its choosing as its own ClusterIP, and the
-// tenant's CoreDNS -- which reads Services back through kubezoo -- would answer
-// with it. Every name in that tenant could then be pointed anywhere.
-func TestTenantCannotWriteItsOwnAddress(t *testing.T) {
-	submitted := svcWith(upstreamIP, map[string]string{ClusterIPAnnotation: "10.0.0.1"})
-	if !StripClusterIPAnnotation(submitted, nil) {
-		t.Error("the tenant's annotation was not reported as submitted")
-	}
-	if _, present := submitted.Annotations[ClusterIPAnnotation]; present {
-		t.Errorf("the tenant's own value reached storage: %v", submitted.Annotations)
-	}
-}
-
-// TestTheStoredAddressSurvivesATenantWrite -- stripping alone is not enough on
-// an update. The tenant sees the annotation on every read, so it comes back on
-// any read-modify-write; dropping it would erase the platform's record and the
-// tenant would silently fall back to an unreachable address until the data plane
-// wrote it again.
-func TestTheStoredAddressSurvivesATenantWrite(t *testing.T) {
-	old := svcWith(upstreamIP, map[string]string{ClusterIPAnnotation: tenantIP})
-	submitted := svcWith(tenantIP, map[string]string{ClusterIPAnnotation: "10.0.0.1"})
-	StripClusterIPAnnotation(submitted, old)
-	if submitted.Annotations[ClusterIPAnnotation] != tenantIP {
-		t.Errorf("annotation = %q, want the stored %q", submitted.Annotations[ClusterIPAnnotation], tenantIP)
-	}
-}
+// The two cases that used to live here -- a tenant cannot write the annotation,
+// and the platform's stored value survives a tenant write -- moved to
+// hiddenmeta_test.go when the rule stopped being specific to this one key. See
+// TestATenantCannotSetAHiddenKey and TestAReadModifyWriteDoesNotEraseThePlatform.
 
 // TestApplyRoundTripIsStable is the case a tenant hits by accident, constantly.
 //

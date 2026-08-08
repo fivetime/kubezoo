@@ -156,6 +156,10 @@ type tenantProxy struct {
 	// storage. See readForUpdate for the failure this comes from.
 	storageView bool
 
+	// hiddenMetadata keeps kubezoo's own labels and annotations out of what a
+	// tenant sees, and keeps a tenant's values for them out of storage.
+	hiddenMetadata *convert.HiddenMetadata
+
 	groupVersionKindFunc apiconfig.GroupVersionKindFunc
 }
 
@@ -238,14 +242,15 @@ func NewTenantProxy(config apiconfig.StorageConfig) (rest.Storage, error) {
 		isSharedGroup:    config.IsSharedGroup,
 		hideProjected: config.Resource == "rolebindings" && config.Subresource == "" &&
 			config.Kind.Group == "rbac.authorization.k8s.io",
-		resource:      config.Resource,
-		subresource:   config.Subresource,
-		shortNames:    config.ShortNames,
-		newFunc:       config.NewFunc,
-		newListFunc:   config.NewListFunc,
-		typeConverter: config.TypeConverter,
-		dynamicClient: config.DynamicClient,
-		tenantDNS:     config.TenantDNS,
+		resource:       config.Resource,
+		subresource:    config.Subresource,
+		shortNames:     config.ShortNames,
+		newFunc:        config.NewFunc,
+		newListFunc:    config.NewListFunc,
+		typeConverter:  config.TypeConverter,
+		dynamicClient:  config.DynamicClient,
+		tenantDNS:      config.TenantDNS,
+		hiddenMetadata: config.HiddenMetadata,
 
 		publishedStorageClasses:          config.PublishedStorageClasses,
 		publishedSnapshotClasses:         config.PublishedSnapshotClasses,
@@ -558,6 +563,7 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseTenantBinding(obj); err != nil {
 		return nil, false, err
 	}
+	tp.hiddenMetadata.Restore(obj, original)
 	if err := tp.refuseNodePorts(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -790,6 +796,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 	if err := tp.refuseTenantBinding(obj); err != nil {
 		return nil, err
 	}
+	// nil old: a create has nothing stored to put back, but a tenant must not be
+	// able to plant a hidden key on the first write either.
+	tp.hiddenMetadata.Restore(obj, nil)
 	if err := tp.refuseTooManyNamespaces(ctx, obj, tenantID); err != nil {
 		return nil, err
 	}
@@ -1346,11 +1355,10 @@ func (tp *tenantProxy) refuseForeignClusterIP(obj, old runtime.Object) error {
 		return nil
 	}
 	oldSvc, _ := old.(*core.Service)
-	// ⚠️ Runs even with no old object. On a create there is nothing to restore,
-	// but the annotation still has to be stripped: a create carrying it would
-	// write the tenant's own value straight into storage, which is the whole
-	// hole this closes.
-	convert.StripClusterIPAnnotation(svc, oldSvc)
+	// ⚠️ Only the FIELD is handled here. The kubezoo.io/cluster-ip annotation --
+	// stripping the tenant's value and putting the platform's back -- is no
+	// longer a special case: HiddenMetadata does it for every kubezoo.io key on
+	// every object, and a second copy here would be one more pair that can drift.
 	if convert.RestoreUpstreamClusterIP(svc, oldSvc) {
 		return nil
 	}
@@ -1949,6 +1957,10 @@ func (tp *tenantProxy) applyTenantViews(obj runtime.Object) {
 		return
 	}
 	showTenantClusterIP(obj)
+	// ⛔ After the ClusterIP translation, not before: that translation READS
+	// kubezoo.io/cluster-ip, and stripping first would take the address away
+	// before anyone had used it.
+	tp.hiddenMetadata.Strip(obj)
 }
 
 // showTenantClusterIP reports a Service at the address the tenant's own data
@@ -2118,6 +2130,7 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 		if err := tp.refuseTenantBinding(updated); err != nil {
 			return nil, false, err
 		}
+		tp.hiddenMetadata.Restore(updated, original)
 		if err := tp.refuseNodePorts(updated, original); err != nil {
 			return nil, false, err
 		}

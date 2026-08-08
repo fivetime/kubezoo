@@ -86,6 +86,10 @@ type StorageConfig struct {
 	// DNS, leaving pods on the platform resolver.
 	TenantDNS convert.TenantDNSFunc
 
+	// HiddenMetadata keeps kubezoo's own labels and annotations out of what a
+	// tenant sees, and a tenant's values for them out of storage.
+	HiddenMetadata *convert.HiddenMetadata
+
 	Convertor common.ObjectConvertor
 
 	TableConvertor rest.TableConvertor

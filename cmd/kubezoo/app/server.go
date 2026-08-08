@@ -659,7 +659,8 @@ type ProxyConfig struct {
 	// tenantDNS is the lookup itself, handed to every storage so that a bare pod
 	// created through tenantProxy.Create gets the same resolver a templated one
 	// gets from the convertor chain.
-	tenantDNS convert.TenantDNSFunc
+	tenantDNS      convert.TenantDNSFunc
+	hiddenMetadata *convert.HiddenMetadata
 }
 
 func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
@@ -673,6 +674,7 @@ func (c *ProxyConfig) ApplyToGroup(group *apiconfig.APIGroupConfig) {
 func (c *ProxyConfig) ApplyToStorage(config *apiconfig.StorageConfig) {
 	config.DynamicClient = c.dynamicClient
 	config.TenantDNS = c.tenantDNS
+	config.HiddenMetadata = c.hiddenMetadata
 	// The platform's own classes, published read-only. Set even when the operator
 	// published none: a non-nil Set is what makes the storage serve the resource
 	// and show nothing, rather than falling through to the tenant proxy and
@@ -920,6 +922,14 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 	// ⚠️ Built only when --tenant-dns is set. Standing up an informer for a
 	// feature nobody turned on would put a watch on the upstream cluster for
 	// every kubezoo replica and answer nothing with it.
+	// ⛔ Compiled here so a bad pattern refuses startup. Skipping it would leave an
+	// operator believing a rule is in force that matches nothing, and nothing
+	// would say so until someone audited what tenants can see.
+	hiddenMetadata, err := convert.NewHiddenMetadata(o.HideMetadataPatterns...)
+	if err != nil {
+		return nil, err
+	}
+
 	var tenantDNSInformers, tenantDNSEndpointInformers informers.SharedInformerFactory
 	var tenantDNSLookup convert.TenantDNSFunc
 	if o.TenantDNS {
@@ -1011,6 +1021,7 @@ func buildProxyConfig(o *options.ProxyOptions) (*ProxyConfig, error) {
 		tenantDNSInformers:               tenantDNSInformers,
 		tenantDNSEndpointInformers:       tenantDNSEndpointInformers,
 		tenantDNS:                        tenantDNSLookup,
+		hiddenMetadata:                   hiddenMetadata,
 	}, nil
 }
 
