@@ -552,6 +552,12 @@ func (tp *tenantProxy) Update(ctx context.Context, name string, objInfo rest.Upd
 	if err := tp.refuseForeignClusterIP(obj, original); err != nil {
 		return nil, false, err
 	}
+	// ⚠️ On the update paths too. A binding is normally a POST, but a guard that
+	// only covers the verb it expects is a guard that covers the spelling rather
+	// than the thing.
+	if err := tp.refuseTenantBinding(obj); err != nil {
+		return nil, false, err
+	}
 	if err := tp.refuseNodePorts(obj, original); err != nil {
 		return nil, false, err
 	}
@@ -779,6 +785,9 @@ func (tp *tenantProxy) Create(ctx context.Context, obj runtime.Object, _ rest.Va
 		return nil, err
 	}
 	if err := tp.refuseTenantChosenNode(obj); err != nil {
+		return nil, err
+	}
+	if err := tp.refuseTenantBinding(obj); err != nil {
 		return nil, err
 	}
 	if err := tp.refuseTooManyNamespaces(ctx, obj, tenantID); err != nil {
@@ -1548,6 +1557,49 @@ func (tp *tenantProxy) refuseTooManyNamespaces(ctx context.Context, obj runtime.
 			len(owned), limit))
 }
 
+// refuseTenantBinding refuses a tenant binding a pod to a node itself.
+//
+// ⛔ Confirmed on the live cluster, not reasoned about: tenant 333333 created a
+// pod, had its nodeSelector replaced with its own pool by admission exactly as
+// designed, and then bound that same pod onto 111111-node-az1 with a single
+// POST to pods/binding. The pod stayed Pending -- the other tenant's provider
+// refuses to run it -- but it was BOUND, and a bound pod counts against that
+// node's allocatable whether or not it ever starts. The node's capacity is the
+// victim's quota, so this is a tenant exhausting a neighbour's schedulable
+// capacity with pods that never run.
+//
+// ⭐ Why placement injection cannot cover it: a binding is a SECOND write, made
+// after the pod exists. Replacing fields on the pod -- which is how every other
+// placement rule works here -- reaches the first write only. That is what makes
+// this the one placement decision that has to be refused rather than rewritten.
+//
+// ⚠️ Keyed on the OBJECT TYPE, not on the resource or subresource string. The
+// same Binding arrives two ways, as pods/binding and as the older top-level
+// bindings resource, and a guard written against one of those spellings would
+// leave the other open -- which is exactly the shape of defect this codebase
+// keeps producing. Both are served (cmd/kubezoo/app/apigroups.go), so both have
+// to be closed.
+//
+// A second copy of what config/policy/tenant-deny-binding.yaml denies. That
+// policy is correct and was never applied to this cluster, which is the whole
+// argument for not leaving a structural privilege escalation to a deployment
+// step: a ValidatingAdmissionPolicy nobody installed does not fail, it is
+// simply absent.
+func (tp *tenantProxy) refuseTenantBinding(obj runtime.Object) error {
+	binding, ok := obj.(*core.Binding)
+	if !ok {
+		return nil
+	}
+	return apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Binding"}, binding.Name,
+		field.ErrorList{field.Forbidden(
+			field.NewPath("target"),
+			"binding a pod to a node is not available to tenants: it is how a pod is "+
+				"placed, and placement belongs to the platform. Create the pod and the "+
+				"scheduler will place it in your own node pool.",
+		)})
+}
+
 // refuseTenantChosenNode refuses a pod that names the node it wants to run on.
 //
 // spec.nodeName goes around the scheduler completely: kubelet takes the pod
@@ -2061,6 +2113,9 @@ func (tp *tenantProxy) guaranteedUpdate(ctx context.Context, name string,
 			return nil, false, err
 		}
 		if err := tp.refuseForeignClusterIP(updated, original); err != nil {
+			return nil, false, err
+		}
+		if err := tp.refuseTenantBinding(updated); err != nil {
 			return nil, false, err
 		}
 		if err := tp.refuseNodePorts(updated, original); err != nil {

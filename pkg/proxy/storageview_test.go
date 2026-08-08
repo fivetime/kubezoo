@@ -17,9 +17,11 @@ limitations under the License.
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	core "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/fivetime/kubezoo-gateway/pkg/convert"
@@ -98,6 +100,59 @@ func TestReadForUpdateAsksForTheStoredObject(t *testing.T) {
 			if target.subresource != "" {
 				t.Errorf("subresource = %q; a subresource has no stored object of its own",
 					target.subresource)
+			}
+		})
+	}
+}
+
+// TestATenantCannotBindItsPod is the regression guard for a confirmed live
+// cross-tenant escape.
+//
+// ⛔ Measured, not reasoned about: tenant 333333 created a pod, had its
+// nodeSelector replaced with its own pool by admission exactly as designed, and
+// then bound that same pod onto 111111-node-az1 with one POST to pods/binding.
+// The pod stayed Pending -- the other tenant's provider refuses to run it -- but
+// it was BOUND, and a bound pod counts against that node's allocatable whether
+// or not it ever starts. That node's capacity is the victim's quota, so this is
+// one tenant exhausting a neighbour's schedulable capacity with pods that never
+// run.
+//
+// ⭐ Placement injection cannot cover it. A binding is a SECOND write, made
+// after the pod exists, and rewriting fields on the pod -- how every other
+// placement rule here works -- reaches the first write only.
+//
+// ⚠️ Both spellings. The same Binding arrives as pods/binding and as the older
+// top-level bindings resource; a guard written against one string would leave
+// the other open.
+func TestATenantCannotBindItsPod(t *testing.T) {
+	tp := &tenantProxy{}
+	binding := &core.Binding{
+		ObjectMeta: metav1.ObjectMeta{Name: "victimpod", Namespace: "333333-default"},
+		Target:     core.ObjectReference{Kind: "Node", Name: "111111-node-az1"},
+	}
+	err := tp.refuseTenantBinding(binding)
+	if err == nil {
+		t.Fatal("a tenant was allowed to bind a pod to a node of its choosing; " +
+			"measured on the live cluster, that node can belong to another tenant and " +
+			"the bound pod consumes its quota without ever running")
+	}
+	if !strings.Contains(err.Error(), "placement belongs to the platform") {
+		t.Errorf("refusal does not explain itself: %v", err)
+	}
+}
+
+// TestBindingGuardLeavesEverythingElseAlone -- a guard that refused more than
+// Bindings would break ordinary writes, and would do it on the create path that
+// every tenant object goes through.
+func TestBindingGuardLeavesEverythingElseAlone(t *testing.T) {
+	tp := &tenantProxy{}
+	for name, obj := range map[string]runtime.Object{
+		"a pod":     &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}},
+		"a service": &core.Service{ObjectMeta: metav1.ObjectMeta{Name: "s"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := tp.refuseTenantBinding(obj); err != nil {
+				t.Errorf("refused %s: %v", name, err)
 			}
 		})
 	}
