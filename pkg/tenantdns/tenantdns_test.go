@@ -204,3 +204,49 @@ func TestEachTenantsReadinessIsItsOwn(t *testing.T) {
 			"with a shared Service name the index alone cannot tell them apart")
 	}
 }
+
+// TestPodsAreSentToAnAddressTheyCanReach guards the moment the resolver moves
+// onto the tenant's own data plane.
+//
+// ⛔ This package's informer reads the upstream cluster directly, so it sees
+// Services as STORED -- the read-path translation that shows a tenant the data
+// plane's address never runs here. Returning spec.clusterIP was correct only
+// while the resolver ran on the platform's own nodes.
+//
+// It stops being correct the moment the resolver becomes a capsule, which is
+// the entire point of moving it: only there does its pod get an OVN address and
+// become eligible as a load balancer member. Its Service then acquires a VIP on
+// the tenant's network, and the upstream service-CIDR address stops being
+// reachable from the pods that have to use it.
+//
+// ⛔ Getting this wrong is not a degradation. The injected spec carries
+// dnsPolicy: None, which has NO fallback, so a nameserver the pod cannot reach
+// means that pod has no name resolution at all -- strictly worse than never
+// having injected anything.
+func TestPodsAreSentToAnAddressTheyCanReach(t *testing.T) {
+	svc := resolverService("111111", "254.51.215.104") // upstream service CIDR
+	svc.Annotations = map[string]string{"kubezoo.io/cluster-ip": "192.168.200.12"}
+	r := resolverWith(svc, readySlice("111111", ptr.To(true), "192.168.100.9"))
+
+	dns, ok := r.For("111111")
+	if !ok {
+		t.Fatal("a serving resolver was refused")
+	}
+	if dns.Nameserver != "192.168.200.12" {
+		t.Errorf("nameserver = %q, want the data plane's address; pods get dnsPolicy None "+
+			"pointed at an address their network does not carry, and None has no fallback",
+			dns.Nameserver)
+	}
+}
+
+// TestWithoutATranslationTheStoredAddressStands -- a resolver on the platform's
+// own nodes has no data-plane address and must keep working.
+func TestWithoutATranslationTheStoredAddressStands(t *testing.T) {
+	r := resolverWith(resolverService("111111", "10.0.0.5"),
+		readySlice("111111", ptr.To(true), "10.1.1.1"))
+	dns, ok := r.For("111111")
+	if !ok || dns.Nameserver != "10.0.0.5" {
+		t.Errorf("got %q,%v; want the stored address to stand when nothing translated it",
+			dns.Nameserver, ok)
+	}
+}

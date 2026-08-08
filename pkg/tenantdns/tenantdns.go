@@ -224,5 +224,31 @@ func (r *Resolver) For(tenantID string) (convert.TenantDNS, bool) {
 			"tenant", tenantID, "service", ResolverNamespace(tenantID)+"/"+ResolverName)
 		return convert.TenantDNS{}, false
 	}
-	return convert.TenantDNS{Nameserver: svc.Spec.ClusterIP, ClusterDomain: r.clusterDomain}, true
+	return convert.TenantDNS{Nameserver: nameserverFor(svc), ClusterDomain: r.clusterDomain}, true
+}
+
+// nameserverFor picks the address a POD can dial, which is not always the one
+// upstream allocated.
+//
+// ⛔ This informer reads the upstream cluster directly, so it sees Services as
+// STORED -- the read-path translation that shows a tenant the data plane's
+// address never runs here. Returning spec.clusterIP unconditionally was correct
+// only for as long as the resolver ran on the platform's own nodes.
+//
+// It stops being correct the moment the resolver becomes a capsule, which is
+// the point of moving it: only then does its pod get an OVN address and become
+// eligible as a load balancer member. At that moment its Service acquires a VIP
+// on the tenant's network, and the upstream service-CIDR address stops being
+// reachable from the pods that have to use it.
+//
+// ⛔ Getting this wrong is not a degradation. The injected spec has
+// dnsPolicy: None, which has NO fallback, so a nameserver the pod cannot reach
+// means that pod has no name resolution at all -- worse than never having
+// injected anything. That is why this reads the same annotation the read path
+// does rather than assuming the two addresses agree.
+func nameserverFor(svc *corev1.Service) string {
+	if address, translated := convert.TenantClusterIPFrom(svc.Annotations, svc.Spec.ClusterIP); translated {
+		return address
+	}
+	return svc.Spec.ClusterIP
 }

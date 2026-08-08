@@ -162,14 +162,28 @@ const ClusterIPAnnotation = "kubezoo.io/cluster-ip"
 // produces -- a ClusterIP Service with no address -- which client code and
 // controllers have no branch for.
 func TenantClusterIP(svc *core.Service) (string, bool) {
-	if svc == nil || svc.Spec.ClusterIP == core.ClusterIPNone || svc.Spec.ClusterIP == "" {
+	if svc == nil {
 		return "", false
 	}
-	address := svc.Annotations[ClusterIPAnnotation]
+	return TenantClusterIPFrom(svc.Annotations, svc.Spec.ClusterIP)
+}
+
+// TenantClusterIPFrom is TenantClusterIP over the two fields it actually reads.
+//
+// ⚠️ Exists because the same decision has to be made on a *core.Service (the
+// internal type, on the request path) and on a *corev1.Service (the external
+// type, which is what an informer over the upstream cluster holds). Converting
+// between them for this would be absurd, and writing the rule twice is how the
+// two copies drift -- silently, because both answers are valid addresses.
+func TenantClusterIPFrom(annotations map[string]string, clusterIP string) (string, bool) {
+	if clusterIP == core.ClusterIPNone || clusterIP == "" {
+		return "", false
+	}
+	address := annotations[ClusterIPAnnotation]
 	if address == "" || net.ParseIP(address) == nil {
 		return "", false
 	}
-	if address == svc.Spec.ClusterIP {
+	if address == clusterIP {
 		return "", false
 	}
 	return address, true
